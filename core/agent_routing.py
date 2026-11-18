@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
     from config.memory_config import MemoryConfig
     from core.approval_policy import ApprovalRequest
-    from core.auto_runtime import AutoRunOutcome
+    from core.auto_preset import AutoRunOutcome
     from core.decision.handler import DecisionHandler
     from core.decision.models import DecisionPacket
     from core.desktop_runtime import DesktopRunOutcome, DesktopRuntime

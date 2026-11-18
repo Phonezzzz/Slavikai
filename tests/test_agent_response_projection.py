@@ -1,5 +1,5 @@
 from core.agent_response import AgentResponse
-from core.auto_runtime import AutoRunOutcome
+from core.auto_preset import AutoRunOutcome
 from core.mwv.models import StopReasonCode
 from server.http.common.chat_payload import _project_agent_response
 from shared.auto_models import AutoRunStatus

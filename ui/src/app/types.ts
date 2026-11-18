@@ -136,6 +136,7 @@ export type ModeTransitionsContract = {
 
 export type AutoRunStatus =
   | 'idle'
+  | 'running'
   | 'planning'
   | 'coding'
   | 'merging'

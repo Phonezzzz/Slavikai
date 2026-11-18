@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from core.auto_runtime import AutoRunOutcome
+from core.auto_preset import AutoRunOutcome
 from core.desktop_runtime import DesktopRunOutcome
 from core.mwv.manager import MWVRunResult
 from core.tool_loop import AgentToolLoopResult

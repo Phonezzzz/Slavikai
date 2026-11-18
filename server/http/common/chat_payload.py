@@ -6,7 +6,7 @@ from typing import Final
 from aiohttp import web
 
 from core.agent_response import AgentResponse
-from core.auto_runtime import AutoRunOutcome
+from core.auto_preset import AutoRunOutcome
 from core.mwv.models import MWV_REPORT_PREFIX
 from shared.models import JSONValue, LLMMessage
 from shared.sanitize import safe_json_loads

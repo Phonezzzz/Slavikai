@@ -70,14 +70,14 @@ def test_approval_resume_counts_original_response_once(tmp_path):
 
 
 def test_auto_publishes_usage_on_terminal_and_paused_paths(tmp_path, monkeypatch):
-    from core.auto_runtime import AutoOrchestrator
-    from tests.test_auto_runtime import _AutoV1Agent
+    from core.auto_preset import AutoPresetRunner
+    from tests.test_auto_preset import _PresetAgent
 
     monkeypatch.chdir(tmp_path)
-    agent = _AutoV1Agent()
+    agent = _PresetAgent()
     agent._brain = UsageBrain([LLMResult(text="done", usage=LLMUsage(1, 2, 3))])
-    outcome = AutoOrchestrator(agent, workspace_root=tmp_path).run_v1("go")
-    assert outcome.verifier.ok
+    outcome = AutoPresetRunner(agent, workspace_root=tmp_path).run("go")
+    assert outcome.verifier is None
     usage = agent.last_auto_state["execution_metrics"]["tool_loop_model_usage"]
     assert usage == {
         "started_calls": 1,
@@ -208,14 +208,14 @@ def test_repeated_approval_checkpoints_keep_independent_frozen_summary(tmp_path)
 
 
 def test_auto_projection_survives_pause_cancel_and_independent_principals(tmp_path, monkeypatch):
-    from core.auto_runtime import AutoOrchestrator
+    from core.auto_preset import AutoPresetRunner
     from shared.models import ToolResult
-    from tests.test_auto_runtime import _AutoV1Agent
+    from tests.test_auto_preset import _PresetAgent
 
     monkeypatch.chdir(tmp_path)
     runs = []
     for principal, count in [("one", 3), ("two", 8)]:
-        agent = _AutoV1Agent()
+        agent = _PresetAgent()
         agent.user_id = agent.session_id = principal
         agent._brain = UsageBrain(
             [
@@ -235,19 +235,18 @@ def test_auto_projection_survives_pause_cancel_and_independent_principals(tmp_pa
             agent.tool_registry, approval_context=ApprovalContext(True, principal, set())
         )
         agent._build_tool_gateway = lambda current=gateway, budget=None: current
-        orchestrator = AutoOrchestrator(agent, workspace_root=tmp_path)
+        preset = AutoPresetRunner(agent, workspace_root=tmp_path)
         with pytest.raises(ApprovalRequired):
-            orchestrator.run_v1("go")
+            preset.run("go")
         usage = agent.last_auto_state["execution_metrics"]["tool_loop_model_usage"]
         assert usage["total_tokens"] == count
-        runs.append((agent, orchestrator, agent.last_auto_state["run_id"], count))
-    agent, orchestrator, run_id, count = runs[0]
+        runs.append((agent, preset, agent.last_auto_state["run_id"], count))
+    agent, preset, run_id, count = runs[0]
     assert (
-        orchestrator.cancel(run_id)["execution_metrics"]["tool_loop_model_usage"]["total_tokens"]
-        == count
+        preset.cancel(run_id)["execution_metrics"]["tool_loop_model_usage"]["total_tokens"] == count
     )
-    agent, orchestrator, run_id, count = runs[1]
-    orchestrator.resume(run_id)
+    agent, preset, run_id, count = runs[1]
+    preset.resume(run_id)
     usage = agent.last_auto_state["execution_metrics"]["tool_loop_model_usage"]
     assert usage["started_calls"] == 2 and usage["unknown_calls"] == 1
     assert usage["total_tokens"] is None and usage["reported_sum"]["total_tokens"] == count
@@ -257,18 +256,18 @@ def test_auto_projection_survives_pause_cancel_and_independent_principals(tmp_pa
 def test_auto_failure_projection_keeps_observed_usage(tmp_path, monkeypatch, kind):
     from types import SimpleNamespace
 
-    import core.auto_runtime as auto_runtime
+    import core.auto_preset as auto_preset
     import core.tool_loop as tool_loop
     from shared.models import ToolResult
-    from tests.test_auto_runtime import _AutoV1Agent
+    from tests.test_auto_preset import _PresetAgent
 
     monkeypatch.chdir(tmp_path)
     timer = SimpleNamespace(monotonic=lambda: 10.0)
-    monkeypatch.setattr(auto_runtime, "time", timer)
+    monkeypatch.setattr(auto_preset, "time", timer)
     monkeypatch.setattr(tool_loop, "time", timer)
-    monkeypatch.setenv(auto_runtime.AUTO_MAX_RUNTIME_SECONDS_ENV, "1")
-    monkeypatch.setenv(auto_runtime.AUTO_MAX_TOOL_CALLS_ENV, "1" if kind == "cap" else "3")
-    agent = _AutoV1Agent()
+    monkeypatch.setenv(auto_preset.AUTO_MAX_RUNTIME_SECONDS_ENV, "1")
+    monkeypatch.setenv(auto_preset.AUTO_MAX_TOOL_CALLS_ENV, "1" if kind == "cap" else "3")
+    agent = _PresetAgent()
 
     class FaultBrain(UsageBrain):
         def generate(self, *args, **kwargs):
@@ -295,7 +294,7 @@ def test_auto_failure_projection_keeps_observed_usage(tmp_path, monkeypatch, kin
     agent._build_tool_gateway = lambda budget=None: ToolGateway(
         agent.tool_registry, post_call=observe if kind == "dispatch" else None
     )
-    auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path).run_v1("go")
+    auto_preset.AutoPresetRunner(agent, workspace_root=tmp_path).run("go")
     usage = agent.last_auto_state["execution_metrics"]["tool_loop_model_usage"]
     assert usage["reported_calls"] == 1
     assert usage["started_calls"] == (2 if kind == "exception" else 1)

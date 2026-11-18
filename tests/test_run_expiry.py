@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import core.auto_runtime as auto_runtime
+import core.auto_preset as auto_preset
 import core.tool_loop as tool_loop
 from core.approval_policy import ApprovalContext, ApprovalRequired
 from core.mwv.models import StopReasonCode, VerificationResult, VerificationStatus
@@ -13,7 +13,7 @@ from llm.brain_base import Brain
 from llm.types import LLMResult
 from shared.auto_models import AutoRunStatus
 from shared.models import ToolResult
-from tests.test_auto_runtime import _AutoV1Agent
+from tests.test_auto_preset import _PresetAgent
 from tests.test_tool_call_cap import BatchBrain, calls, run, setup
 
 
@@ -22,9 +22,9 @@ def clock(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     clock = SimpleNamespace(now=100.0)
     clock.monotonic = lambda: clock.now
-    monkeypatch.setattr(auto_runtime, "time", clock)
+    monkeypatch.setattr(auto_preset, "time", clock)
     monkeypatch.setattr(tool_loop, "time", clock, raising=False)
-    monkeypatch.setenv(auto_runtime.AUTO_MAX_RUNTIME_SECONDS_ENV, "1")
+    monkeypatch.setenv(auto_preset.AUTO_MAX_RUNTIME_SECONDS_ENV, "1")
     return clock
 
 
@@ -43,18 +43,18 @@ def test_expired_provider_response_starts_neither_tools_nor_verifier(tmp_path, c
             clock.now = 101.0
             return LLMResult(text="late answer", tool_calls=calls("tick") if has_tools else [])
 
-    agent = _AutoV1Agent()
+    agent = _PresetAgent()
     agent._brain = SlowBrain()
     agent.tool_registry.register(
         "tick", lambda request: dispatched.append(True) or ToolResult.success({}), capability="read"
     )
-    orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
+    preset = auto_preset.AutoPresetRunner(agent, workspace_root=tmp_path)
 
     def forbidden_verifier(**kwargs):
         pytest.fail("Verifier must not start after expiry")
 
-    orchestrator._run_verifier = forbidden_verifier
-    outcome = orchestrator.run_v1("go")
+    preset._verify_after_loop = forbidden_verifier
+    outcome = preset.run("go")
     assert requested == [True]
     assert dispatched == []
     assert outcome.stop_reason_code == StopReasonCode.BUDGET_EXHAUSTED
@@ -63,7 +63,7 @@ def test_expired_provider_response_starts_neither_tools_nor_verifier(tmp_path, c
 
 @pytest.mark.parametrize("cancel", [False, True])
 def test_expiry_before_verifier_and_cancellation_precedence(tmp_path, clock, cancel):
-    agent = _AutoV1Agent()
+    agent = _PresetAgent()
     agent._brain = BatchBrain([calls("network")])
     agent.tool_registry.register(
         "network",
@@ -81,14 +81,14 @@ def test_expiry_before_verifier_and_cancellation_precedence(tmp_path, clock, can
             if cancel:
                 token.set()
 
-    orchestrator = auto_runtime.AutoOrchestrator(
+    preset = auto_preset.AutoPresetRunner(
         agent, workspace_root=tmp_path, progress_callback=progress
     )
-    orchestrator._run_verifier = lambda **kwargs: pytest.fail("Expired verifier was started")
+    preset._verify_after_loop = lambda **kwargs: pytest.fail("Expired verifier was started")
     with pytest.raises(ApprovalRequired):
-        orchestrator.run_v1("go")
-    outcome = orchestrator.resume(agent.last_auto_state["run_id"], cancellation_token=token)
-    assert len(agent.last_auto_state["coders"]) == 1
+        preset.run("go")
+    outcome = preset.resume(agent.last_auto_state["run_id"], cancellation_token=token)
+    assert agent.last_auto_state["execution_metrics"]["tool_calls_used"] == 1
     assert outcome.verifier is None
     if cancel:
         assert outcome.status == AutoRunStatus.CANCELLED
@@ -201,7 +201,7 @@ def test_approval_continuation_retains_original_expiry(
 def test_auto_runs_keep_separate_original_expiry_after_env_change(tmp_path, clock, monkeypatch):
     runs = []
     for principal in ["one", "two"]:
-        agent = _AutoV1Agent()
+        agent = _PresetAgent()
         agent.user_id = agent.session_id = principal
         agent._brain = BatchBrain([calls("network")])
         dispatched = []
@@ -215,27 +215,27 @@ def test_auto_runs_keep_separate_original_expiry_after_env_change(tmp_path, cloc
             agent.tool_registry, approval_context=ApprovalContext(True, principal, set())
         )
         agent._build_tool_gateway = lambda current=gateway, budget=None: current
-        orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
+        preset = auto_preset.AutoPresetRunner(agent, workspace_root=tmp_path)
         with pytest.raises(ApprovalRequired):
-            orchestrator.run_v1("go")
-        runs.append((orchestrator, agent.last_auto_state["run_id"], dispatched))
+            preset.run("go")
+        runs.append((preset, agent.last_auto_state["run_id"], dispatched))
         clock.now += 0.5
-    monkeypatch.setenv(auto_runtime.AUTO_MAX_RUNTIME_SECONDS_ENV, "1000")
-    for index, (orchestrator, run_id, dispatched) in enumerate(runs):
-        outcome = orchestrator.resume(run_id)
+    monkeypatch.setenv(auto_preset.AUTO_MAX_RUNTIME_SECONDS_ENV, "1000")
+    for index, (preset, run_id, dispatched) in enumerate(runs):
+        outcome = preset.resume(run_id)
         if index == 0:
             assert outcome.stop_reason_code == StopReasonCode.BUDGET_EXHAUSTED
             assert not dispatched
         else:
             assert outcome.status == AutoRunStatus.COMPLETED
             assert dispatched == [True]
-        with pytest.raises(auto_runtime.AutoContinuationUnavailable):
-            orchestrator.resume(run_id)
+        with pytest.raises(auto_preset.AutoContinuationUnavailable):
+            preset.resume(run_id)
 
 
 def test_already_started_verifier_is_not_interrupted(tmp_path, clock):
-    agent = _AutoV1Agent()
-    orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
+    agent = _PresetAgent()
+    preset = auto_preset.AutoPresetRunner(agent, workspace_root=tmp_path)
     verified = []
 
     def verifier(**kwargs):
@@ -250,8 +250,8 @@ def test_already_started_verifier_is_not_interrupted(tmp_path, clock):
             duration_seconds=2.0,
         )
 
-    orchestrator._run_verifier = verifier
-    outcome = orchestrator.run_v1("go")
+    preset._verify_after_loop = verifier
+    outcome = preset.run("go")
     assert verified == [True] and outcome.status == AutoRunStatus.COMPLETED
 
 

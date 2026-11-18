@@ -5,7 +5,7 @@ from pathlib import Path
 
 from core.agent import Agent
 from core.agent_response import AgentResponse, ResponseProduced
-from core.auto_runtime import AutoRunOutcome
+from core.auto_preset import AutoRunOutcome
 from core.skills.index import SkillIndex, SkillResolution
 from core.skills.models import SkillEntry, SkillManifest
 from llm.brain_base import Brain
@@ -83,7 +83,7 @@ def test_agent_ask_mode_uses_chat_path_for_action_text(tmp_path: Path, monkeypat
     assert main.calls == 1
 
 
-def test_agent_auto_mode_chat_like_request_uses_auto_runtime(tmp_path: Path, monkeypatch) -> None:
+def test_agent_auto_mode_chat_like_request_uses_auto_preset(tmp_path: Path, monkeypatch) -> None:
     agent, main = _prepare_agent(tmp_path)
     agent.runtime_mode = "auto"
     calls: dict[str, object] = {}
@@ -111,7 +111,7 @@ def test_agent_auto_mode_chat_like_request_uses_auto_runtime(tmp_path: Path, mon
     assert calls.get("skill_resolution") is None
 
 
-def test_agent_auto_mode_execution_request_uses_auto_runtime(tmp_path: Path, monkeypatch) -> None:
+def test_agent_auto_mode_execution_request_uses_auto_preset(tmp_path: Path, monkeypatch) -> None:
     agent, main = _prepare_agent(tmp_path)
     agent.runtime_mode = "auto"
     calls: dict[str, object] = {}
@@ -197,7 +197,7 @@ def test_agent_auto_stream_does_not_call_route_classifier(tmp_path: Path, monkey
     assert main.calls == 0
 
 
-def test_agent_auto_mode_passes_resolved_skill_to_auto_runtime(
+def test_agent_auto_mode_passes_resolved_skill_to_auto_preset(
     tmp_path: Path,
     monkeypatch,
 ) -> None:

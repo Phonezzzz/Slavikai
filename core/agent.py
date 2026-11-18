@@ -16,7 +16,7 @@ from core.agent_mwv import AgentMWVMixin, MWVWorkerCheckpoint
 from core.agent_routing import AgentRoutingMixin
 from core.agent_tools import AgentToolsMixin, PendingChatApproval
 from core.approval_policy import ApprovalCategory, ApprovalRequest
-from core.auto_agent import AutoAgent
+from core.auto_preset import AutoPresetRunner
 from core.computer_activity_log import ComputerActivityLog
 from core.computer_backend import ComputerBackend, LocalComputerBackend
 from core.container_computer_backend import ContainerComputerBackend
@@ -233,8 +233,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         self.brain = self._build_brain()
         self.logger = logging.getLogger("SlavikAI.Agent")
         self.tracer = Tracer()
-        self.auto_agent = AutoAgent(self)
-        self.auto_agent.set_progress_callback(self._record_auto_progress)
+        self.auto_preset = AutoPresetRunner(self, progress_callback=self._record_auto_progress)
         self.desktop_execution_control = DesktopExecutionControl()
         self.desktop_runtime = DesktopRuntime(
             self,

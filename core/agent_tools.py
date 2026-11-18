@@ -21,7 +21,7 @@ from core.approval_policy import (
     ApprovalRequest,
     ApprovalRequired,
 )
-from core.auto_runtime import AutoContinuationUnavailable
+from core.auto_preset import AutoContinuationUnavailable
 from core.computer_activity_log import ComputerActivityLog
 from core.decision.handler import DecisionContext
 from core.decision.models import DecisionPacket
@@ -94,8 +94,7 @@ _MAX_UX_SUMMARY_CHARS = 220
 if TYPE_CHECKING:
     from config.memory_config import MemoryConfig
     from core.agent_mwv import MWVWorkerCheckpoint
-    from core.auto_agent import AutoAgent
-    from core.auto_runtime import AutoRunOutcome
+    from core.auto_preset import AutoPresetRunner, AutoRunOutcome
     from core.decision.handler import DecisionHandler
     from core.desktop_policy import DesktopPolicyStore
     from core.desktop_security import DesktopPathSecurity
@@ -163,7 +162,7 @@ class AgentToolsMixin:
         decision_handler: DecisionHandler
         memory: MemoryManager
         memory_config: MemoryConfig
-        auto_agent: AutoAgent
+        auto_preset: AutoPresetRunner
         desktop_policy_store: DesktopPolicyStore
         desktop_policy_runtime: DesktopPolicyRuntime
         desktop_security: DesktopPathSecurity
@@ -329,7 +328,7 @@ class AgentToolsMixin:
             self.desktop_runtime.cancel_pending()
             pending = self._pending_chat_approval
             if pending is not None and pending.auto_run_id is not None:
-                self.auto_agent.cancel_run(pending.auto_run_id)
+                self.auto_preset.cancel(pending.auto_run_id)
             if self._pending_chat_approval is not None:
                 self.desktop_policy_runtime.consume_once_rule_ids(
                     {rule.rule_id for rule in self._pending_chat_approval.desktop_once_rules}
@@ -423,7 +422,7 @@ class AgentToolsMixin:
             raw_input,
             self.session_id,
             self.runtime_mode,
-            auto_run_id=self.auto_agent.orchestrator.pending_run_id(exc.continuation)
+            auto_run_id=self.auto_preset.pending_run_id(exc.continuation)
             if self.runtime_mode == "auto"
             else None,
             policy_application=policy_application,
@@ -523,9 +522,7 @@ class AgentToolsMixin:
             try:
                 if pending.auto_run_id is None:
                     raise AutoContinuationUnavailable("auto_continuation_unavailable")
-                self.auto_agent.orchestrator.validate_resume(
-                    pending.auto_run_id, pending.continuation
-                )
+                self.auto_preset.validate_resume(pending.auto_run_id, pending.continuation)
             except AutoContinuationUnavailable as exc:
                 raise ChatApprovalUnavailable(str(exc)) from exc
 
@@ -561,7 +558,7 @@ class AgentToolsMixin:
         try:
             if pending.mode == "auto":
                 assert pending.auto_run_id is not None
-                auto_outcome = self.auto_agent.resume_outcome(
+                auto_outcome = self.auto_preset.resume(
                     pending.auto_run_id,
                     cancellation_token=cancellation_token,
                 )
@@ -1303,8 +1300,8 @@ class AgentToolsMixin:
         capture_binding: CaptureBinding | None = None,
     ) -> AutoRunOutcome:
         goal_clean = goal.strip() or "auto run"
-        self.tracer.log("auto_invoke", f"Auto v1 tool loop: {goal_clean}")
-        return self.auto_agent.run_outcome(
+        self.tracer.log("auto_invoke", f"Auto preset canonical loop: {goal_clean}")
+        return self.auto_preset.run(
             goal_clean,
             skill_resolution=skill_resolution,
             capture_binding=capture_binding,
@@ -1319,7 +1316,7 @@ class AgentToolsMixin:
         run_id_clean = run_id.strip()
         if not run_id_clean:
             return None
-        return self.auto_agent.cancel_run(run_id_clean, reason=reason)
+        return self.auto_preset.cancel(run_id_clean, reason=reason)
 
     def reconfigure_models(
         self,

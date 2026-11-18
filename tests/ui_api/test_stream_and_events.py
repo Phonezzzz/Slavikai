@@ -1472,7 +1472,7 @@ def test_chat_tool_multiple_sequential_calls() -> None:
 
 @pytest.mark.parametrize("streaming", [False, True])
 def test_http_uses_request_local_auto_outcome_without_stale_agent_state(streaming) -> None:
-    from core.auto_runtime import AutoRunOutcome
+    from core.auto_preset import AutoRunOutcome
     from core.mwv.models import StopReasonCode
     from shared.auto_models import AutoRunStatus
 

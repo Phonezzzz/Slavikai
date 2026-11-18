@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 from time import monotonic
 from urllib.parse import urlsplit
 
-from core.auto_runtime import AUTO_V1_SYSTEM_PROMPT
+from core.auto_preset import AUTO_V1_SYSTEM_PROMPT
 from core.tool_gateway import ToolGateway
 from core.tool_loop import AgentToolLoop
 from llm.brain_base import Brain

@@ -10,6 +10,11 @@ from shared.models import JSONValue
 
 class AutoRunStatus(StrEnum):
     IDLE = "idle"
+    # The only non-terminal phase the preset emits while the
+    # canonical loop runs. PLANNING/CODING/MERGING stay valid
+    # status values for states already in flight, but the
+    # preset never claims those phases.
+    RUNNING = "running"
     PLANNING = "planning"
     CODING = "coding"
     MERGING = "merging"
@@ -25,9 +30,7 @@ class AutoRunStatus(StrEnum):
 
 AUTO_RUN_STATUSES: Final[set[str]] = {item.value for item in AutoRunStatus}
 AUTO_RUN_ACTIVE_STATUSES: Final[set[str]] = {
-    AutoRunStatus.PLANNING.value,
-    AutoRunStatus.CODING.value,
-    AutoRunStatus.MERGING.value,
+    AutoRunStatus.RUNNING.value,
     AutoRunStatus.VERIFYING.value,
     AutoRunStatus.WAITING_APPROVAL.value,
 }
@@ -40,9 +43,6 @@ AUTO_RUN_TERMINAL_STATUSES: Final[set[str]] = {
     AutoRunStatus.FAILED_INTERNAL.value,
     AutoRunStatus.CANCELLED.value,
 }
-AUTO_CODER_POOL_DEFAULT: Final[int] = 3
-AUTO_CODER_POOL_MIN: Final[int] = 1
-AUTO_CODER_POOL_MAX: Final[int] = 6
 
 
 def utc_now_iso() -> str:
@@ -74,74 +74,6 @@ def _normalize_json(value: object) -> JSONValue:
             payload[str(key)] = _normalize_json(item)
         return payload
     return str(value)
-
-
-@dataclass(frozen=True)
-class AutoShard:
-    shard_id: str
-    goal: str
-    path_scope: list[str] = field(default_factory=list)
-    depends_on: list[str] = field(default_factory=list)
-    acceptance_checks: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, JSONValue]:
-        return {
-            "shard_id": self.shard_id,
-            "goal": self.goal,
-            "path_scope": list(self.path_scope),
-            "depends_on": list(self.depends_on),
-            "acceptance_checks": list(self.acceptance_checks),
-        }
-
-
-@dataclass(frozen=True)
-class AutoPlan:
-    plan_id: str
-    goal: str
-    shards: list[AutoShard] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, JSONValue]:
-        return {
-            "plan_id": self.plan_id,
-            "goal": self.goal,
-            "shards": [item.to_dict() for item in self.shards],
-        }
-
-
-@dataclass(frozen=True)
-class AutoCoderState:
-    coder_id: str
-    shard_id: str
-    status: str
-    changed_paths: list[str] = field(default_factory=list)
-    diagnostics: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, JSONValue]:
-        return {
-            "coder_id": self.coder_id,
-            "shard_id": self.shard_id,
-            "status": self.status,
-            "changed_paths": list(self.changed_paths),
-            "diagnostics": list(self.diagnostics),
-        }
-
-
-@dataclass(frozen=True)
-class AutoVerifierState:
-    status: str
-    command: list[str] = field(default_factory=list)
-    exit_code: int | None = None
-    error: str | None = None
-    duration_ms: int | None = None
-
-    def to_dict(self) -> dict[str, JSONValue]:
-        return {
-            "status": self.status,
-            "command": list(self.command),
-            "exit_code": self.exit_code,
-            "error": self.error,
-            "duration_ms": self.duration_ms,
-        }
 
 
 @dataclass(frozen=True)
@@ -243,6 +175,13 @@ def _normalize_execution_metrics(value: object) -> dict[str, JSONValue] | None:
         count = value["files_touched"]
         # Invalid/unobserved file effects stay unknown, never coerced to zero.
         metrics["files_touched"] = count if type(count) is int and count >= 0 else None
+    # Honest loop counters: preserved only as non-negative ints, dropped
+    # (not zeroed) when absent or invalid.
+    for key in ("tool_calls_used", "iterations"):
+        if key in value:
+            count = value[key]
+            if type(count) is int and count >= 0:
+                metrics[key] = count
     return metrics or None
 
 
@@ -295,10 +234,12 @@ def _normalize_model_usage_metrics(value: object) -> dict[str, JSONValue] | None
     }
 
 
+# No coder pool exists anymore; pool_size is a legacy UI field.
+# Keep a positive value as-is, default to a single worker.
 def _normalize_pool_size(value: object) -> int:
     if isinstance(value, int) and value > 0:
-        return max(AUTO_CODER_POOL_MIN, min(AUTO_CODER_POOL_MAX, value))
-    return AUTO_CODER_POOL_DEFAULT
+        return value
+    return 1
 
 
 def _normalize_object(value: object) -> dict[str, JSONValue] | None:

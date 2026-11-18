@@ -42,6 +42,7 @@ const STATUS_META: Record<
 };
 
 const AUTO_STATUS_MAP: Record<string, ComputerRunStatus> = {
+  running: 'running',
   planning: 'planning',
   coding: 'running',
   merging: 'running',
@@ -82,6 +83,8 @@ function firstNonEmpty(...values: Array<string | null | undefined>): string | nu
 
 function autoStepLabel(autoState: AutoState): string | null {
   switch (autoState.status) {
+    case 'running':
+      return 'Working on task';
     case 'planning':
       return 'Planning approach';
     case 'coding': {

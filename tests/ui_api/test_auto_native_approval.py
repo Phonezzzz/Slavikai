@@ -116,7 +116,7 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
                 workflow = await client.server.app["ui_hub"].get_session_workflow(session)
                 assert workflow["auto_state"]["status"] == "cancelled"
                 assert agent.drain_auto_progress_events() == []
-                assert original_run not in agent.auto_agent.orchestrator._paused_runs
+                assert original_run not in agent.auto_preset._paused_runs
                 assert executed == [{"index": 0}]
                 return
             if cleanup == "nested_cancel":
@@ -124,7 +124,7 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
                 from core.tool_gateway import ToolGateway
 
                 live = []
-                original_resume = agent.auto_agent.resume_outcome
+                original_resume = agent.auto_preset.resume
                 original_call = ToolGateway.call
 
                 def resumed(run_id, *, cancellation_token=None):
@@ -138,7 +138,7 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
                         live[0].set()
                         raise
 
-                monkeypatch.setattr(agent.auto_agent, "resume_outcome", resumed)
+                monkeypatch.setattr(agent.auto_preset, "resume", resumed)
                 monkeypatch.setattr(ToolGateway, "call", call)
                 response = await client.post(
                     "/ui/api/decision/respond",
@@ -151,7 +151,7 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
                 )
                 assert response.status == 200
                 assert agent.last_auto_state["status"] == "cancelled"
-                assert original_run not in agent.auto_agent.orchestrator._paused_runs
+                assert original_run not in agent.auto_preset._paused_runs
                 assert agent.last_approval_request is None
                 assert executed == [{"index": 0}, {"index": 1}]
                 return
@@ -203,7 +203,7 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
                 workflow = await client.server.app["ui_hub"].get_session_workflow(session)
                 assert workflow["auto_state"]["status"] == "cancelled"
                 assert agent.drain_auto_progress_events() == []
-                assert original_run not in agent.auto_agent.orchestrator._paused_runs
+                assert original_run not in agent.auto_preset._paused_runs
                 assert executed == [{"index": 0}]
                 return
             if cleanup == "grant_race":
@@ -215,13 +215,13 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
                     return await original_categories(scope)
 
                 monkeypatch.setattr(store, "get_categories", existing_grant)
-                original_resume = agent.auto_agent.resume_outcome
+                original_resume = agent.auto_preset.resume
 
                 def cancel_before_claim(run_id, *, cancellation_token=None):
                     cancellation_token.set()
                     return original_resume(run_id, cancellation_token=cancellation_token)
 
-                monkeypatch.setattr(agent.auto_agent, "resume_outcome", cancel_before_claim)
+                monkeypatch.setattr(agent.auto_preset, "resume", cancel_before_claim)
                 rejected = await client.post(
                     "/ui/api/decision/respond",
                     headers=headers,
@@ -236,7 +236,7 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
                 store = client.server.app["session_store"]
                 for scope in store._approved:
                     assert await original_categories(scope) == {"SUDO"}
-                assert original_run in agent.auto_agent.orchestrator._paused_runs
+                assert original_run in agent.auto_preset._paused_runs
                 assert executed == [{"index": 0}]
                 return
             if cleanup == "security":
@@ -258,7 +258,7 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
                 assert accepted.status == 409
                 assert agent.tools_enabled["web"] is True
                 assert executed == [{"index": 0}]
-                paused = agent.auto_agent.orchestrator._paused_runs[original_run]
+                paused = agent.auto_preset._paused_runs[original_run]
                 assert len(paused.continuation.executed) == 1
                 assert paused.continuation.executed[0].result.ok is True
                 assert brain.initial_requests == 1
@@ -268,18 +268,18 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
             if cleanup == "claim_race":
                 identity = decision["context"]["resume_payload"]["continuation_id"]
                 token = asyncio.Event()
-                original_resume = agent.auto_agent.resume_outcome
+                original_resume = agent.auto_preset.resume
 
                 def race(run_id, *, cancellation_token=None):
                     token.set()
                     return original_resume(run_id, cancellation_token=cancellation_token)
 
-                monkeypatch.setattr(agent.auto_agent, "resume_outcome", race)
+                monkeypatch.setattr(agent.auto_preset, "resume", race)
                 with pytest.raises(ChatApprovalUnavailable, match="not_started"):
                     agent.resume_chat_approval(identity, cancellation_token=token)
                 token.clear()
                 agent.validate_chat_approval(identity)
-                assert original_run in agent.auto_agent.orchestrator._paused_runs
+                assert original_run in agent.auto_preset._paused_runs
                 assert agent.last_approval_resume_payload["continuation_id"] == identity
                 assert executed == [{"index": 0}]
                 return
@@ -305,7 +305,7 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
                     assert agent.drain_auto_progress_events() == []
                 with pytest.raises(ChatApprovalUnavailable):
                     agent.validate_chat_approval(identity)
-                assert original_run not in agent.auto_agent.orchestrator._paused_runs
+                assert original_run not in agent.auto_preset._paused_runs
                 assert executed == [{"index": 0}]
                 return
             for expected_index in [1, 2]:

@@ -662,6 +662,7 @@ export const parseAutoState = (value: unknown): AutoState | null => {
   const status = candidate.status;
   const isKnownStatus =
     status === 'idle'
+    || status === 'running'
     || status === 'planning'
     || status === 'coding'
     || status === 'merging'

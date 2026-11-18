@@ -1,10 +1,10 @@
 import pytest
 
-import core.auto_runtime as auto_runtime
+import core.auto_preset as auto_preset
 from core.mwv.models import StopReasonCode
 from llm.types import LLMResult, LLMUsage
 from shared.models import ToolResult
-from tests.test_auto_runtime import _AutoV1Agent
+from tests.test_auto_preset import _PresetAgent
 from tests.test_auto_usage_accounting import UsageBrain
 from tests.test_tool_call_cap import calls
 
@@ -12,8 +12,8 @@ from tests.test_tool_call_cap import calls
 @pytest.mark.parametrize("unknown", [False, True])
 def test_auto_blocks_next_generation_at_limit_or_unknown(tmp_path, monkeypatch, unknown):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv(auto_runtime.AUTO_MAX_LLM_TOKENS_ENV, "5")
-    agent = _AutoV1Agent()
+    monkeypatch.setenv(auto_preset.AUTO_MAX_LLM_TOKENS_ENV, "5")
+    agent = _PresetAgent()
     responses = [
         LLMResult(
             text="tools", tool_calls=calls("tick"), usage=None if unknown else LLMUsage(2, 3, 5)
@@ -31,7 +31,7 @@ def test_auto_blocks_next_generation_at_limit_or_unknown(tmp_path, monkeypatch, 
     agent.tool_registry.register(
         "tick", lambda request: dispatched.append(True) or ToolResult.success({}), capability="read"
     )
-    outcome = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path).run_v1("go")
+    outcome = auto_preset.AutoPresetRunner(agent, workspace_root=tmp_path).run("go")
     assert agent._brain.requests == (1 if unknown else 2)
     assert len(dispatched) == (1 if unknown else 2)
     assert outcome.stop_reason_code == StopReasonCode.BUDGET_EXHAUSTED
@@ -65,13 +65,13 @@ def test_exact_threshold_blocks_only_next_genuine_request(tmp_path, total):
 
 
 @pytest.mark.parametrize("usage", [None, LLMUsage(2, 3, 5), LLMUsage(3, 4, 7)])
-def test_final_response_can_pass_verifier_without_another_request(tmp_path, monkeypatch, usage):
+def test_final_response_completes_without_another_request(tmp_path, monkeypatch, usage):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv(auto_runtime.AUTO_MAX_LLM_TOKENS_ENV, "5")
-    agent = _AutoV1Agent()
+    monkeypatch.setenv(auto_preset.AUTO_MAX_LLM_TOKENS_ENV, "5")
+    agent = _PresetAgent()
     agent._brain = UsageBrain([LLMResult(text="final", usage=usage)])
-    outcome = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path).run_v1("go")
-    assert outcome.verifier.ok and agent._brain.requests == 1
+    outcome = auto_preset.AutoPresetRunner(agent, workspace_root=tmp_path).run("go")
+    assert outcome.verifier is None and agent._brain.requests == 1
     assert agent.last_auto_state["error_code"] is None
 
 
@@ -183,10 +183,10 @@ def test_auto_env_change_does_not_replace_captured_cap_across_principals(tmp_pat
     from core.tool_gateway import ToolGateway
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv(auto_runtime.AUTO_MAX_LLM_TOKENS_ENV, "5")
+    monkeypatch.setenv(auto_preset.AUTO_MAX_LLM_TOKENS_ENV, "5")
     runs = []
     for principal, total in [("one", 5), ("two", 2)]:
-        agent = _AutoV1Agent()
+        agent = _PresetAgent()
         agent.user_id = agent.session_id = principal
         agent._brain = UsageBrain(
             [
@@ -204,13 +204,13 @@ def test_auto_env_change_does_not_replace_captured_cap_across_principals(tmp_pat
             agent.tool_registry, approval_context=ApprovalContext(True, principal, set())
         )
         agent._build_tool_gateway = lambda current=gateway, budget=None: current
-        orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
+        preset = auto_preset.AutoPresetRunner(agent, workspace_root=tmp_path)
         with pytest.raises(ApprovalRequired):
-            orchestrator.run_v1("go")
-        runs.append((agent, orchestrator, agent.last_auto_state["run_id"], total))
-    monkeypatch.setenv(auto_runtime.AUTO_MAX_LLM_TOKENS_ENV, "1")
-    for agent, orchestrator, run_id, total in runs:
-        outcome = orchestrator.resume(run_id)
+            preset.run("go")
+        runs.append((agent, preset, agent.last_auto_state["run_id"], total))
+    monkeypatch.setenv(auto_preset.AUTO_MAX_LLM_TOKENS_ENV, "1")
+    for agent, preset, run_id, total in runs:
+        outcome = preset.resume(run_id)
         assert agent._brain.requests == (1 if total == 5 else 2)
         assert outcome.stop_reason_code == (StopReasonCode.BUDGET_EXHAUSTED if total == 5 else None)
-        assert len(agent.last_auto_state["coders"]) == 1
+        assert agent.last_auto_state["execution_metrics"]["tool_calls_used"] == 1

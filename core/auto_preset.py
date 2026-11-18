@@ -1,3 +1,42 @@
+"""Auto as a policy preset over the canonical tool loop (E01-T07).
+
+Auto is no longer an orchestration engine. There is no planner, no coder
+pool, no merge phase and no shard plan: a run in mode ``"auto"`` is a
+canonical :class:`core.tool_loop.AgentToolLoop` execution with the Auto
+budget+policy preset (900s / 80 tool calls / 120 touched files / 120k
+model tokens, native tool calling required, fail-closed on any failed
+tool call, approval pause/resume with the same scope checks as before).
+
+What changed relative to the old ``AutoOrchestrator``:
+
+- The fabricated ``AutoPlan`` (a single ``"tool-loop"`` shard with prose
+  acceptance checks) and the ``planner`` / ``plan`` / ``coders`` /
+  ``merge`` / ``pool_size`` progress theatre are gone. Progress state
+  carries only what the run really knows: run id, honest phase, goal,
+  budgets, verifier, approval, error and execution metrics. The UI
+  normalizer still accepts the state shape (missing theatre keys
+  normalize to empty values).
+- The fake ``PASSED`` verifier profiles are gone. A response-only run
+  (no tool calls) and a run in a non-repository workspace make no
+  verification claim at all (``verifier is None``); the canonical
+  outcome derivation says ``NOT_APPLICABLE`` for the former and
+  ``UNKNOWN`` for the latter. Only a repository workspace with a
+  canonical verifier runs a real verifier (``VerifierRuntime``), and
+  a repository workspace without one still fails honestly with
+  ``canonical_repo_verifier_unavailable``.
+- Completion is gated on the canonical outcome derivation
+  (:func:`core.run_outcome.outcome_from_loop_result`): the run reports
+  ``COMPLETED`` only when the canonical derivation says the loop
+  terminated cleanly. ``COMPLETED`` means the run terminated normally;
+  it does not claim full done — that needs a confirmed postcondition
+  (``RunOutcome.is_full_done``), which a preset run without a repo
+  verifier does not have.
+- Budgets, approval pause/resume, capture scope check, skill
+  injection/reporting, usage accounting and the file-effects cap are
+  preserved verbatim from the old engine: they were real mechanisms,
+  not theatre.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -26,6 +65,7 @@ from core.mwv.verifier_runtime import (
 from core.mwv.verifier_summary import extract_verifier_excerpt
 from core.response_preferences import compose_response_preferences
 from core.run_contract import RunBudget
+from core.run_outcome import TerminalReason, outcome_from_loop_result
 from core.skills.index import SkillResolution
 from core.skills.runtime import skill_run_metadata, skill_run_report
 from core.tool_gateway import AutoFileEffects
@@ -39,9 +79,7 @@ from core.tool_loop import (
 )
 from llm.brain_base import Brain
 from shared.auto_models import (
-    AutoPlan,
     AutoRunStatus,
-    AutoShard,
     normalize_auto_state,
     utc_now_iso,
 )
@@ -97,6 +135,15 @@ class AutoBudgets:
             "max_retries": self.max_retries,
         }
 
+    def to_run_budget(self) -> RunBudget:
+        """The preset as a canonical loop budget."""
+        return RunBudget(
+            max_iterations=self.max_tool_calls,
+            max_tool_calls=self.max_tool_calls,
+            max_model_tokens=self.max_llm_tokens,
+            max_runtime_seconds=float(self.max_runtime_seconds),
+        )
+
 
 @dataclass
 class _RunFrame:
@@ -126,7 +173,15 @@ class AutoContinuationUnavailable(ValueError):
     pass
 
 
-class AutoOrchestrator:
+class AutoPresetRunner:
+    """Runs mode ``"auto"`` as a canonical loop with the Auto preset.
+
+    The only orchestration left is the loop itself plus budget/approval
+    bookkeeping around it. There is no plan step, no shard and no merge:
+    the model drives the single canonical loop until it stops, the
+    budget stops it, approval pauses it, or a tool call fails.
+    """
+
     def __init__(
         self,
         parent_agent: Agent,
@@ -139,13 +194,14 @@ class AutoOrchestrator:
         self.progress_callback = progress_callback
         self._paused_runs: dict[str, _PausedRun] = {}
 
-    def run_v1(
+    def run(
         self,
         goal: str,
         *,
         skill_resolution: SkillResolution | None = None,
         run_root_override: Path | None = None,
         capture_binding: CaptureBinding | None = None,
+        cancellation_token: asyncio.Event | None = None,
     ) -> AutoRunOutcome:
         if capture_binding is not None and (
             capture_binding.run.scope.principal_id != self.parent.user_id
@@ -165,16 +221,18 @@ class AutoOrchestrator:
             run_root = self.workspace_root
         state: dict[str, JSONValue] = {
             "run_id": run_id_value,
-            "status": AutoRunStatus.IDLE.value,
+            "status": AutoRunStatus.RUNNING.value,
             "goal": goal,
             "root_path": str(run_root),
-            "pool_size": 1,
             "started_at": started,
             "updated_at": started,
-            "planner": {"status": "idle", "runtime": "auto_v1_tool_loop"},
+            # No fabricated plan: the preset never had planner/coders/merge.
+            # The keys stay present (empty) so paused/cancelled states carry
+            # the same honest shape as finished ones.
+            "planner": {},
             "plan": None,
             "coders": [],
-            "merge": {"status": "idle", "changed_paths": []},
+            "merge": {},
             # The run has not established a trustworthy file-effect count yet.
             # Keep unknown visible through approvals, failures and cancellation.
             "execution_metrics": {"files_touched": None},
@@ -207,7 +265,7 @@ class AutoOrchestrator:
             AutoFileEffects(budgets.max_files_touched),
             capture_binding,
         )
-        return self._execute_frame(frame)
+        return self._execute_frame(frame, cancellation_token=cancellation_token)
 
     def _execute_frame(
         self,
@@ -234,7 +292,7 @@ class AutoOrchestrator:
                         next_steps=["Выбери модель с доступными native tools и повтори запуск."],
                         stop_reason_code=StopReasonCode.WORKER_FAILED,
                         route="auto",
-                        plan_summary="Auto требует native tool-calling provider.",
+                        plan_summary="Auto preset требует native tool-calling provider.",
                         execution_summary=reason,
                         skill=_skill_state(state),
                     ),
@@ -243,7 +301,6 @@ class AutoOrchestrator:
                     verifier=None,
                     next_steps=["Выбери модель с доступными native tools и повтори запуск."],
                 )
-            self._set_status(state, AutoRunStatus.PLANNING)
             budget_stop = _budget_runtime_stop(
                 budgets=budgets,
                 started_monotonic=started_monotonic,
@@ -258,37 +315,7 @@ class AutoOrchestrator:
                     skill=_skill_state(state),
                 )
 
-            if continuation is None:
-                plan = AutoPlan(
-                    plan_id=f"plan-{uuid.uuid4().hex}",
-                    goal=goal,
-                    shards=[
-                        AutoShard(
-                            shard_id="tool-loop",
-                            goal=goal,
-                            path_scope=["."],
-                            acceptance_checks=[
-                                "Native tool loop completed",
-                                "Canonical verifier completed",
-                            ],
-                        )
-                    ],
-                )
-                state["planner"] = {
-                    "status": "completed",
-                    "runtime": "auto_v1_tool_loop",
-                    "shards_total": 1,
-                }
-                state["plan"] = plan.to_dict()
-                self._set_state(state)
-
-            self._set_status(state, AutoRunStatus.CODING)
-            run_budget = RunBudget(
-                max_iterations=budgets.max_tool_calls,
-                max_tool_calls=budgets.max_tool_calls,
-                max_model_tokens=budgets.max_llm_tokens,
-                max_runtime_seconds=budgets.max_runtime_seconds,
-            )
+            run_budget = budgets.to_run_budget()
             gateway = replace(
                 self.parent._build_tool_gateway(budget=run_budget),
                 auto_file_effects=frame.file_effects,
@@ -316,13 +343,6 @@ class AutoOrchestrator:
                 record_model_usage=True,
                 capture_binding=frame.capture_binding,
             )
-            tool_call_states = [_auto_v1_tool_call_state(item) for item in loop_result.tool_calls]
-            state["coders"] = tool_call_states
-            state["merge"] = {
-                "status": "completed",
-                "changed_paths": [],
-                "runtime": "auto_v1_tool_loop",
-            }
             state["execution_metrics"] = {
                 "tool_calls_used": len(loop_result.tool_calls),
                 "iterations": loop_result.iterations,
@@ -391,8 +411,8 @@ class AutoOrchestrator:
                     ]
                     if review_required
                     else [
-                        "Проверь auto_state.coders.",
-                        "Исправь причину ошибки tool call и перезапусти auto.",
+                        "Проверь результат loop и исправь причину ошибки tool call, "
+                        "затем перезапусти auto.",
                     ]
                 )
                 return AutoRunOutcome(
@@ -407,7 +427,7 @@ class AutoOrchestrator:
                         next_steps=next_steps,
                         stop_reason_code=StopReasonCode.WORKER_FAILED,
                         route="auto",
-                        plan_summary="Auto v1 выполнил задачу через native tool loop.",
+                        plan_summary="Auto preset выполнил задачу через canonical tool loop.",
                         execution_summary=loop_error,
                         skill=_skill_state(state),
                     ),
@@ -430,12 +450,12 @@ class AutoOrchestrator:
                         what="Auto-run остановлен: неустранённый сбой tool call",
                         why=reason,
                         next_steps=[
-                            "Проверь auto_state.coders на failed outcome.",
+                            "Проверь выполненные tool calls на failed outcome.",
                             "Докажи выполнение действия verifier-ом или перезапусти auto.",
                         ],
                         stop_reason_code=StopReasonCode.WORKER_FAILED,
                         route="auto",
-                        plan_summary="Auto v1 обнаружил неустранённый сбой tool call.",
+                        plan_summary="Auto preset обнаружил неустранённый сбой tool call.",
                         execution_summary=reason,
                         skill=_skill_state(state),
                     ),
@@ -443,7 +463,7 @@ class AutoOrchestrator:
                     stop_reason_code=StopReasonCode.WORKER_FAILED,
                     verifier=None,
                     next_steps=[
-                        "Проверь auto_state.coders на failed outcome.",
+                        "Проверь выполненные tool calls на failed outcome.",
                         "Докажи выполнение действия verifier-ом или перезапусти auto.",
                     ],
                 )
@@ -465,7 +485,7 @@ class AutoOrchestrator:
                 state["error_code"] = "budget_runtime"
                 self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
                 return _budget_stop_outcome(self.parent, budget_stop, skill=_skill_state(state))
-            verification = self._run_verifier(
+            verification = self._verify_after_loop(
                 run_id=run_id_value,
                 goal=goal,
                 run_root=run_root,
@@ -473,7 +493,9 @@ class AutoOrchestrator:
                 loop_result=loop_result,
                 cancellation_token=cancellation_token,
             )
-            state["verifier"] = _verification_state(verification)
+            state["verifier"] = (
+                _verification_state(verification) if verification is not None else None
+            )
             self._set_state(state)
             if cancellation_token is not None and cancellation_token.is_set():
                 state["error"] = "cancelled_by_user"
@@ -485,7 +507,7 @@ class AutoOrchestrator:
                     verifier=verification,
                     next_steps=[],
                 )
-            if verification.status != VerificationStatus.PASSED:
+            if verification is not None and verification.status != VerificationStatus.PASSED:
                 self._set_status(state, AutoRunStatus.FAILED_VERIFIER)
                 return AutoRunOutcome(
                     text=self.parent._format_stop_response(
@@ -499,7 +521,7 @@ class AutoOrchestrator:
                         route="auto",
                         verifier=verification,
                         attempts=(1, 1),
-                        plan_summary="Auto v1 выполнил native tool loop и дошёл до verifier.",
+                        plan_summary="Auto preset выполнил canonical loop и дошёл до verifier.",
                         execution_summary="Tool loop завершён, но verifier вернул fail/error.",
                         skill=_skill_state(state),
                     ),
@@ -512,6 +534,35 @@ class AutoOrchestrator:
                     ],
                 )
 
+            # The canonical outcome derivation is the completion authority:
+            # a clean loop terminates COMPLETED, and the verification claim
+            # is exactly what the derivation says — NOT_APPLICABLE when the
+            # run changed nothing, UNKNOWN when it may have changed state
+            # without a confirmed postcondition. COMPLETED here means the
+            # run terminated normally, not that full done is proven.
+            canonical = outcome_from_loop_result(
+                loop_result, state_changing=bool(loop_result.tool_calls)
+            )
+            if canonical.terminal_reason is not TerminalReason.COMPLETED:
+                state["error"] = "canonical_outcome_not_completed"
+                state["error_code"] = "outcome_not_completed"
+                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
+                return AutoRunOutcome(
+                    text=self.parent._format_stop_response(
+                        what="Auto-run остановлен: canonical outcome не completed",
+                        why="Tool loop завершился, но канонический outcome — не COMPLETED.",
+                        next_steps=["Проверь логи и trace.", "Повтори запуск auto."],
+                        stop_reason_code=StopReasonCode.MWV_INTERNAL_ERROR,
+                        route="auto",
+                        plan_summary="Auto preset выполнил canonical tool loop.",
+                        execution_summary="canonical_outcome_not_completed",
+                        skill=_skill_state(state),
+                    ),
+                    status=AutoRunStatus.FAILED_INTERNAL,
+                    stop_reason_code=StopReasonCode.MWV_INTERNAL_ERROR,
+                    verifier=verification,
+                    next_steps=["Проверь логи и trace.", "Повтори запуск auto после исправления."],
+                )
             self._set_status(state, AutoRunStatus.COMPLETED)
             response_only = not loop_result.tool_calls
             text = self.parent._append_report_block(
@@ -523,9 +574,9 @@ class AutoOrchestrator:
                 next_steps=[],
                 stop_reason_code=None,
                 plan_summary=(
-                    "Auto v1 определил, что workspace-действия не требуются."
+                    "Auto preset определил, что workspace-действия не требуются."
                     if response_only
-                    else "Auto v1 использовал AgentToolLoop и ToolGateway."
+                    else "Auto preset использовал canonical AgentToolLoop и ToolGateway."
                 ),
                 execution_summary=(
                     "Модель вернула final response без tool calls."
@@ -550,11 +601,9 @@ class AutoOrchestrator:
             metrics = state.get("execution_metrics")
             if isinstance(metrics, dict):
                 metrics["files_touched"] = frame.file_effects.count
+                metrics["tool_calls_used"] = len(exc.continuation.executed)
             _record_model_usage(state, exc.continuation.model_usage)
             if cancellation_token is not None and cancellation_token.is_set():
-                state["coders"] = [
-                    _auto_v1_tool_call_state(item) for item in exc.continuation.executed
-                ]
                 state["error"] = "cancelled_by_user"
                 self._set_status(state, AutoRunStatus.CANCELLED)
                 return AutoRunOutcome(
@@ -565,7 +614,6 @@ class AutoOrchestrator:
                     next_steps=[],
                 )
             self._paused_runs[run_id_value] = _PausedRun(frame, exc.continuation)
-            state["coders"] = [_auto_v1_tool_call_state(item) for item in exc.continuation.executed]
             state["approval"] = {
                 "status": "required",
                 "required_categories": list(exc.request.required_categories),
@@ -580,8 +628,9 @@ class AutoOrchestrator:
                 metrics = state.get("execution_metrics")
                 if isinstance(metrics, dict):
                     metrics["files_touched"] = None
+                    metrics["tool_calls_used"] = len(exc.result.tool_calls)
+                    metrics["iterations"] = exc.result.iterations
                 _record_model_usage(state, exc.result.model_usage)
-                state["coders"] = [_auto_v1_tool_call_state(item) for item in exc.result.tool_calls]
             capture_cause = (
                 exc.cause
                 if isinstance(exc, ToolLoopExecutionError)
@@ -611,7 +660,7 @@ class AutoOrchestrator:
                     next_steps=steps,
                     stop_reason_code=StopReasonCode.MWV_INTERNAL_ERROR,
                     route="auto",
-                    plan_summary="Auto v1 tool loop завершился внутренней ошибкой.",
+                    plan_summary="Auto preset tool loop завершился внутренней ошибкой.",
                     execution_summary=reason,
                     skill=_skill_state(state),
                 ),
@@ -677,7 +726,7 @@ class AutoOrchestrator:
         state["approval"] = {"status": "rejected"}
         return self._set_status(state, AutoRunStatus.CANCELLED)
 
-    def _run_verifier(
+    def _verify_after_loop(
         self,
         *,
         run_id: str,
@@ -686,35 +735,19 @@ class AutoOrchestrator:
         budgets: AutoBudgets,
         loop_result: AgentToolLoopResult,
         cancellation_token: asyncio.Event | None = None,
-    ) -> VerificationResult:
+    ) -> VerificationResult | None:
+        """Honest verification after a clean loop.
+
+        Returns ``None`` when there is nothing real to verify — a
+        response-only run, or a run in a workspace without a canonical
+        repo verifier. No ``PASSED`` is ever claimed from the bare fact
+        that tool calls succeeded or the model answered. A repository
+        workspace runs the real canonical verifier; a repository
+        workspace without one fails honestly with
+        ``canonical_repo_verifier_unavailable``.
+        """
         if not loop_result.tool_calls:
-            response = loop_result.text.strip()
-            if response:
-                return VerificationResult(
-                    status=VerificationStatus.PASSED,
-                    command=[],
-                    exit_code=0,
-                    stdout="Verified non-empty Auto response without workspace actions.",
-                    stderr="",
-                    duration_seconds=0.0,
-                    error=None,
-                    fail_type=None,
-                    excerpt="Auto completed without requesting workspace tools.",
-                    verifier_profile="response_only",
-                )
-            reason = "auto_no_observable_result"
-            return VerificationResult(
-                status=VerificationStatus.FAILED,
-                command=[],
-                exit_code=1,
-                stdout="",
-                stderr=reason,
-                duration_seconds=0.0,
-                error=reason,
-                fail_type="no_observable_result",
-                excerpt=reason,
-                verifier_profile="response_only",
-            )
+            return None
         if not has_canonical_repo_verifier(run_root):
             if is_repo_workspace(run_root):
                 reason = "canonical_repo_verifier_unavailable"
@@ -730,33 +763,7 @@ class AutoOrchestrator:
                     excerpt=reason,
                     verifier_profile="repository",
                 )
-            failed_calls = [item for item in loop_result.tool_calls if not item.result.ok]
-            if failed_calls:
-                first_error = failed_calls[0].result.error or "tool call failed"
-                return VerificationResult(
-                    status=VerificationStatus.FAILED,
-                    command=[],
-                    exit_code=1,
-                    stdout="",
-                    stderr=first_error,
-                    duration_seconds=0.0,
-                    error=first_error,
-                    fail_type="tool_outcome_failed",
-                    excerpt=first_error,
-                    verifier_profile="tool_outcomes",
-                )
-            return VerificationResult(
-                status=VerificationStatus.PASSED,
-                command=[],
-                exit_code=0,
-                stdout=f"Verified {len(loop_result.tool_calls)} successful tool call(s).",
-                stderr="",
-                duration_seconds=0.0,
-                error=None,
-                fail_type=None,
-                excerpt="All native tool calls completed successfully.",
-                verifier_profile="tool_outcomes",
-            )
+            return None
         verifier = VerifierRuntime(project_root=run_root)
         context = RunContext(
             session_id=self.parent.session_id or "local",
@@ -812,21 +819,6 @@ class AutoOrchestrator:
         if self.progress_callback is not None:
             self.progress_callback(dict(normalized))
         return normalized
-
-
-def _auto_v1_tool_call_state(item: ExecutedToolCall) -> dict[str, JSONValue]:
-    result = item.result
-    diagnostics: list[str] = []
-    if result.error:
-        diagnostics.append(result.error)
-    return {
-        "coder_id": item.call.id,
-        "shard_id": "tool-loop",
-        "status": "completed" if result.ok else "failed",
-        "changed_paths": [],
-        "diagnostics": diagnostics,
-        "tool": item.call.name,
-    }
 
 
 def _has_failed_tool_call(tool_calls: list[ExecutedToolCall]) -> bool:
@@ -940,7 +932,7 @@ def _budget_stop_outcome(
             plan_summary=(
                 "Token admission невозможен без reported usage."
                 if usage_unknown
-                else "Auto FSM остановлен бюджетным лимитом."
+                else "Auto preset остановлен бюджетным лимитом."
             ),
             execution_summary=reason,
             skill=skill,

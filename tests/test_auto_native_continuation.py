@@ -5,7 +5,7 @@ import pytest
 
 from core.agent import Agent
 from core.approval_policy import ApprovalRequired
-from core.auto_runtime import AutoContinuationUnavailable, AutoOrchestrator
+from core.auto_preset import AutoContinuationUnavailable, AutoPresetRunner
 from core.response_preferences import ResponsePreferences
 from llm.brain_base import Brain
 from llm.types import LLMResult, LLMUsage, ToolCall
@@ -94,35 +94,35 @@ def test_auto_resume_does_not_repeat_completed_tool(
             parameters_schema={"type": "object"},
         )
     agent.response_preferences = ResponsePreferences("technical", "ORIGINAL_PRIVATE")
-    orchestrator = AutoOrchestrator(agent, workspace_root=tmp_path)
+    preset = AutoPresetRunner(agent, workspace_root=tmp_path)
     try:
         with pytest.raises(ApprovalRequired) as stopped:
             from core.skills.index import SkillIndex
 
             skill = SkillIndex.load_default(dev_mode=False).resolve("workspace-files")
-            orchestrator.run_v1("read both", skill_resolution=skill)
+            preset.run("read both", skill_resolution=skill)
         assert stopped.value.continuation is not None
         assert executions == ["before_approval"]
         run_id = agent.last_auto_state["run_id"]
-        paused = orchestrator._paused_runs[run_id]
+        paused = preset._paused_runs[run_id]
         original_frame = paused.frame
         original_plan = original_frame.state["plan"]
         cancelled = asyncio.Event()
         cancelled.set()
         with pytest.raises(AutoContinuationUnavailable, match="not_started"):
-            orchestrator.resume(run_id, cancellation_token=cancelled)
-        assert orchestrator._paused_runs[run_id] is paused
+            preset.resume(run_id, cancellation_token=cancelled)
+        assert preset._paused_runs[run_id] is paused
         assert executions == ["before_approval"]
         if changed_scope == "expired":
             original_frame.started_monotonic -= original_frame.budgets.max_runtime_seconds + 1
-            stopped_outcome = orchestrator.resume(run_id)
+            stopped_outcome = preset.resume(run_id)
             assert stopped_outcome.stop_reason_code.value == "BUDGET_EXHAUSTED"
             assert executions == ["before_approval"]
             assert brain.initial_requests == 1
-            assert run_id not in orchestrator._paused_runs
+            assert run_id not in preset._paused_runs
             return
         if changed_scope == "skill_cancel":
-            cancelled_state = orchestrator.cancel(run_id)
+            cancelled_state = preset.cancel(run_id)
             assert cancelled_state["skill"]["status"] == "failed"
             assert cancelled_state["status"] == "cancelled"
             assert cancelled_state["plan"] == original_plan
@@ -131,7 +131,7 @@ def test_auto_resume_does_not_repeat_completed_tool(
         if changed_scope == "verifier_unavailable":
             (tmp_path / "Makefile").write_text("check:\n\t@true\n")
             agent.set_session_context("auto-session", {"NETWORK_RISK"})
-            outcome = orchestrator.resume(run_id)
+            outcome = preset.resume(run_id)
             assert outcome.status.value == "failed_verifier"
             assert outcome.verifier.error == "sandbox_execution_unavailable"
             assert outcome.verifier.exit_code is None
@@ -142,19 +142,19 @@ def test_auto_resume_does_not_repeat_completed_tool(
             previous = getattr(agent, changed_scope)
             setattr(agent, changed_scope, "foreign-scope")
             with pytest.raises(AutoContinuationUnavailable):
-                orchestrator.resume(run_id)
-            assert orchestrator._paused_runs[run_id] is paused
+                preset.resume(run_id)
+            assert preset._paused_runs[run_id] is paused
             assert executions == ["before_approval"]
             setattr(agent, changed_scope, previous)
         agent.response_preferences = ResponsePreferences("friendly", "NEW_PRIVATE")
         # Core scope test; exact once authorization проверяется отдельно через HTTP.
         agent.set_session_context("auto-session", {"NETWORK_RISK"})
-        orchestrator.resume(run_id)
+        preset.resume(run_id)
         assert agent.last_auto_state["run_id"] == run_id
         assert agent.last_auto_state["plan"] == original_plan
         assert agent.last_auto_state["started_at"] == original_frame.started_at
         with pytest.raises(AutoContinuationUnavailable):
-            orchestrator.resume(run_id)
+            preset.resume(run_id)
         assert executions == ["before_approval", "pending_network"]
         assert brain.initial_requests == 1
         assert brain.history[-1][-1].tool_call_id == "pending-original"

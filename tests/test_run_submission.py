@@ -324,7 +324,7 @@ def test_stored_report_tampering_is_not_silently_accepted(tmp_path) -> None:
 )
 def test_auto_producer_report_is_not_acceptance_and_omits_runtime_details(tmp_path, status) -> None:
     from core.agent_response import AgentResponse, ResponseFailure
-    from core.auto_runtime import AutoRunOutcome
+    from core.auto_preset import AutoRunOutcome
     from core.mwv.models import StopReasonCode
     from shared.auto_models import AutoRunStatus
 
