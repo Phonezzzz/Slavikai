@@ -58,26 +58,21 @@ def test_agent_chat_uses_main_brain(tmp_path: Path) -> None:
     assert report["route"] == "chat"
 
 
-def test_agent_mwv_route_bypasses_brain(tmp_path: Path, monkeypatch) -> None:
+def test_agent_code_input_uses_chat_loop(tmp_path: Path) -> None:
+    # E01-T08: MWV-пути нет; запрос с кодовыми триггерами идёт в chat loop.
     agent, main = _prepare_agent(tmp_path)
-
-    def _mwv_stub(*_args: object, **_kwargs: object) -> AgentResponse:
-        return AgentResponse("mwv")
-
-    monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
+    assert not hasattr(agent, "_run_mwv_flow")
     response = agent.respond([LLMMessage(role="user", content="исправь тесты")]).text
-    assert response == "mwv"
-    assert main.calls == 0
+    assert response.startswith("main")
+    assert main.calls == 1
+    report = extract_report_block(response)
+    assert report["route"] == "chat"
 
 
 def test_agent_ask_mode_uses_chat_path_for_action_text(tmp_path: Path, monkeypatch) -> None:
     agent, main = _prepare_agent(tmp_path)
     agent.runtime_mode = "ask"
 
-    def _mwv_unreachable(*_args: object, **_kwargs: object) -> str:
-        raise AssertionError("MWV should not run in ask mode")
-
-    monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_unreachable)
     response = agent.respond([LLMMessage(role="user", content="исправь тесты")]).text
     assert response.startswith("main")
     assert main.calls == 1
@@ -140,12 +135,10 @@ def test_agent_auto_mode_execution_request_uses_auto_preset(tmp_path: Path, monk
     assert calls.get("skill_resolution") is None
 
 
-def test_agent_auto_mode_does_not_call_route_classifier(tmp_path: Path, monkeypatch) -> None:
+def test_agent_auto_mode_has_no_mwv_routing(tmp_path: Path, monkeypatch) -> None:
     agent, main = _prepare_agent(tmp_path)
     agent.runtime_mode = "auto"
-
-    def _classifier_unreachable(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("Auto mode must not call classify_request")
+    assert not hasattr(agent, "_run_mwv_flow")
 
     def _auto_stub(
         goal: str,
@@ -155,7 +148,6 @@ def test_agent_auto_mode_does_not_call_route_classifier(tmp_path: Path, monkeypa
         assert skill_resolution is None
         return _auto_outcome(f"auto:{goal}")
 
-    monkeypatch.setattr("core.agent_routing.classify_request", _classifier_unreachable)
     monkeypatch.setattr(agent, "handle_auto_command", _auto_stub)
 
     response = agent.respond([LLMMessage(role="user", content="workspace_read status")]).text
@@ -164,12 +156,10 @@ def test_agent_auto_mode_does_not_call_route_classifier(tmp_path: Path, monkeypa
     assert main.calls == 0
 
 
-def test_agent_auto_stream_does_not_call_route_classifier(tmp_path: Path, monkeypatch) -> None:
+def test_agent_auto_stream_has_no_mwv_routing(tmp_path: Path, monkeypatch) -> None:
     agent, main = _prepare_agent(tmp_path)
     agent.runtime_mode = "auto"
-
-    def _classifier_unreachable(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("Auto stream mode must not call classify_request")
+    assert not hasattr(agent, "_run_mwv_flow")
 
     def _auto_stub(
         goal: str,
@@ -179,7 +169,6 @@ def test_agent_auto_stream_does_not_call_route_classifier(tmp_path: Path, monkey
         assert skill_resolution is None
         return _auto_outcome(f"auto-stream:{goal}")
 
-    monkeypatch.setattr("core.agent_routing.classify_request", _classifier_unreachable)
     monkeypatch.setattr(agent, "handle_auto_command", _auto_stub)
 
     chunks = list(agent.respond_stream([LLMMessage(role="user", content="image_generate plan")]))

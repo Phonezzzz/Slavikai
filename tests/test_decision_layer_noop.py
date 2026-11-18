@@ -54,6 +54,8 @@ def test_decision_layer_noop(tmp_path: Path) -> None:
 
 def test_decision_layer_forced_packet(tmp_path: Path) -> None:
     agent = _make_agent(tmp_path)
+    # E01-T08: decision layer вызывается в fallthrough (act/plan), а не в ask.
+    agent.runtime_mode = "act"
     packet = _sample_packet()
     agent.decision_handler.force_next(packet)
     response = agent.respond([LLMMessage(role="user", content="Нужно решение")]).text

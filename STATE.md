@@ -1,20 +1,20 @@
 # SlavikAI Worker State
 
-**Source of truth:** [ROADMAP.md](ROADMAP.md) · [Рабочее соглашение Muse](slavikai-how-to-work-with-muse.md) · [Git workflow](docs/workflow/dev_workflow.md). Это зафиксированный снимок от 2026-11-18, синхронизирован с merge PR #160 (main `649bf90`); перед любым действием Muse перепроверяет Git, CI, review и актуальный `main`.
+**Source of truth:** [ROADMAP.md](ROADMAP.md) · [Рабочее соглашение Muse](slavikai-how-to-work-with-muse.md) · [Git workflow](docs/workflow/dev_workflow.md). Это зафиксированный снимок от 2026-11-18, синхронизирован с merge PR #161 (main `9a431ed`); перед любым действием Muse перепроверяет Git, CI, review и актуальный `main`.
 
 ## Два Git worktree — подтверждено на ПК владельца 2026-11-16
 
 | Назначение | Путь | Ветка на момент фиксации | HEAD | Право Muse |
 |---|---|---|---|---|
 | Исходный проект владельца | `/home/ki/Project/Slavikai` | `main` | `fca51c2fdcecd5d2b37c554105af44e3d925f348` | **Только read-only без изменения checkout** |
-| Перестройка под Muse | `/home/ki/Project/Slavikai-rebuild` | `muse/slavikai-rebuild` | `649bf906a9cf6b829176cfd7a5a97f312c02f398` | **Единственная рабочая директория для roadmap** |
+| Перестройка под Muse | `/home/ki/Project/Slavikai-rebuild` | `muse/slavikai-rebuild` | `9a431ed338abcf4affdf41b8c93132bb437ac040` | **Единственная рабочая директория для roadmap** |
 
-- Команда `git worktree list --porcelain` подтвердила обе записи. Второе дерево создано от `main` на `470a9a6` и синхронизировано самой Мусей fast-forward до `fca51c2`, затем до `4c9515a` (merge PR #153) 2026-11-16, до `c5e5543` (merge PR #154) 2026-11-17 и до `58ce9f4` (merge PR #155) 2026-11-17 и до `c198659` (merge PR #156) 2026-11-17 и до `637d3ed` (merge PR #157) 2026-11-17 и до `125da46` (merge PR #158) 2026-11-17 и до `09cbd53` (merge PR #159) 2026-11-17 и до `649bf90` (merge PR #160) 2026-11-18; **никаких implementation-изменений внутри не выполнялось**.
-- `origin/main` на момент проверки: `649bf906a9cf6b829176cfd7a5a97f312c02f398`; локальный `main` оригинального checkout — `fca51c2` (позади remote; владелец подтянет сам, Muse исходный checkout не трогает).
+- Команда `git worktree list --porcelain` подтвердила обе записи. Второе дерево создано от `main` на `470a9a6` и синхронизировано самой Мусей fast-forward до `fca51c2`, затем до `4c9515a` (merge PR #153) 2026-11-16, до `c5e5543` (merge PR #154) 2026-11-17 и до `58ce9f4` (merge PR #155) 2026-11-17 и до `c198659` (merge PR #156) 2026-11-17 и до `637d3ed` (merge PR #157) 2026-11-17 и до `125da46` (merge PR #158) 2026-11-17 и до `09cbd53` (merge PR #159) 2026-11-17 и до `649bf90` (merge PR #160) 2026-11-18 и до `9a431ed` (merge PR #161) 2026-11-18; **никаких implementation-изменений внутри не выполнялось**.
+- `origin/main` на момент проверки: `9a431ed338abcf4affdf41b8c93132bb437ac040`; локальный `main` оригинального checkout — `fca51c2` (позади remote; владелец подтянет сам, Muse исходный checkout не трогает).
 - Исходный checkout: tracked-файлы clean, имеется один **посторонний untracked** `ystemctl status cloudflared.service`. Не удалять, не включать в PR и не пытаться очищать.
 - Ветку `muse/slavikai-rebuild` использовать как служебную точку возвращения, не коммитить тикеты в неё. На каждый тикет Muse создаёт новую PR-ветку от актуального `origin/main`.
 - Третьи worktree или копии без отдельного согласования не создавать; параллельные implementation-тикеты запрещены.
-- **Worktree не backup**: исходный code baseline зафиксирован immutable commit `470a9a63280f9dac392f559a6fe99115db2e50d0` (merge PR #151); текущий `main` — `649bf906a9cf6b829176cfd7a5a97f312c02f398` (E01-T06 plan artifact, PR #160). Историю и изменения исходного checkout не переписывать.
+- **Worktree не backup**: исходный code baseline зафиксирован immutable commit `470a9a63280f9dac392f559a6fe99115db2e50d0` (merge PR #151); текущий `main` — `9a431ed338abcf4affdf41b8c93132bb437ac040` (E01-T07 auto preset, PR #161). Историю и изменения исходного checkout не переписывать.
 
 ## PR #151 — завершён
 
@@ -79,12 +79,20 @@
 - Служебная ветка `muse/slavikai-rebuild` обновлена fast-forward `09cbd53..649bf90`.
 - **Статус:** `DONE`. E01-T06 done.
 
-## E01-T07: ветка pr-e01-t07-auto-policy-preset — PR не открыт
+## E01-T07: PR #161 — merged
 
-- Ветка `pr-e01-t07-auto-policy-preset` от `origin/main` `649bf90` (merge PR #160). PR родителем не открыт; merge — после GitHub CI и чистого Codex review, ручной fast-forward push по соглашению.
+- [PR #161](https://github.com/Phonezzzz/Slavikai/pull/161), branch `pr-e01-t07-auto-policy-preset`: **MERGED** 2026-11-18, ручной fast-forward push, новый `main` — `9a431ed338abcf4affdf41b8c93132bb437ac040`.
 - Содержимое: Auto → policy preset — новый `core/auto_preset.py`, удалены `core/auto_runtime.py` / `core/auto_agent.py` / `tests/test_auto_runtime.py`, новый `tests/test_auto_preset.py` с parity-тестом, перепроводка `Agent`/`AgentToolsMixin`/UI-контракта, claims registry sync, ROADMAP.md record + STATE.md sync.
 - Локальные гейты: `make preflight` на чистой ветке зелёный (2552 passed, coverage 83.82%); `make check` зелёный (2553 passed, coverage 83.75%).
-- **Статус:** READY FOR REVIEW. E01-T07 done (по локальным гейтам); E01-T08 next.
+- Служебная ветка `muse/slavikai-rebuild` обновлена fast-forward `649bf90..9a431ed`.
+- **Статус:** `DONE`. E01-T07 done; E01-T08 next.
+
+## E01-T08: ветка pr-e01-t08-remove-legacy-mwv-routing — PR #162 (открыт, gates pending)
+
+- Ветка `pr-e01-t08-remove-legacy-mwv-routing` от `origin/main` `9a431ed` (merge PR #161). PR #162 открыт; merge — после GitHub CI и чистого Codex review, ручной fast-forward push по соглашению.
+- Содержимое: удаление legacy classifier/MWV production routing — удалены `core/agent_mwv.py`, `core/mwv/routing.py`, `core/mwv/manager.py`, `core/mwv/coding_skill.py`, `coding_task.py`, `single_attempt.py`, `worker.py`, `interfaces.py`; `classify_request`/`ManagerRuntime`/`MWVRunResult`/`run_task_packet`/`cancel_mwv_approval` удалены из production; default `runtime_mode` — `ask`, fallthrough — в обычный chat loop; root-gate больше не срабатывает (его триггером был legacy classifier); новый gate-тест `tests/test_legacy_mwv_routing_removed.py`; claims registry sync (3 claims); доки переписаны (`ROUTING_POLICY.md`, `MWV_FLOW.md` — stub); ROADMAP.md record + STATE.md sync.
+- Локальные гейты: `make check` зелёный (2435 passed, coverage 83.19%).
+- **Статус:** IN_REVIEW. E01-T08 done (по локальным гейтам); E01-T09 next.
 
 ## Текущая очередь
 
@@ -98,14 +106,14 @@
 - **E01-T05 — DONE** (канонизирован structured outcome без переписывания ADR-0002: `core/run_outcome.py` (TerminalReason/Disposition/RunPhase/Verification с evidence, инварианты в конструкторе, `communication_class`, `is_full_done`, `ui_label` — 9 меток, `final_success` публикуется только при подтверждённой postcondition); деривации `outcome_from_mwv` / `outcome_from_loop_result`; `_mwv_outcome_label` выводит русскую строку из канонического outcome; baseline `125da46`). Evidence: запись в ROADMAP.md (E01-T05 implementation; известный остающийся fake-DONE — `_execute_mwv_plan_step`, E01-T08), 36 новых тестов в `tests/test_run_outcome.py` (инварианты, маппинг, state-changing dummy без postcondition — не DONE, `tool.ok` alone — не proof, exhaustive UI projection matrix); ветка `pr-e01-t05-outcome`.
 - **E01-T06 — DONE** (Plan как artifact, Execute как обычный run: новый `core/plan_execute.py` — validate/execute/resume approved plan через canonical loop; `run_plan_runner` — свежие запуски только canonical loop, resume старых MWV-чекпоинтов — legacy-ветка; baseline `09cbd53`). Evidence: запись в ROADMAP.md (E01-T06 implementation + mini-audit; исправлен порядок compile пакета в прямом act-пути; ревизия — CAS-счётчик, контент привязан хешем), 11 новых тестов в `tests/test_plan_execute.py` + переведённый на canonical loop `tests/ui_api/test_modes_and_plan.py` (20 кейсов + lifecycle + draft/approve без write tools), `make check` зелёный (2538 passed, coverage 83.73%); ветка `pr-e01-t06-plan-artifact`.
 - **E01-T07 — DONE** (Auto → policy preset: новый `core/auto_preset.py` — Auto как policy preset поверх canonical loop; удалены `core/auto_runtime.py`, `core/auto_agent.py`, `tests/test_auto_runtime.py` (театр planner/coders/merge и фейковые PASSED); честный verifier `_verify_after_loop` + завершение по канонической деривации `outcome_from_loop_result`; baseline `649bf90`). Evidence: запись в ROADMAP.md (E01-T07 implementation + mini-audit; parity-тест `test_auto_preset_parity_write_scenario` — настоящий `WriteFileTool` через canonical loop, файл создан, COMPLETED, `verifier is None`, `files_touched == 1`; claims registry: `runtime.auto.v1_tool_loop` → `runtime.auto.preset_canonical_loop`), новый `tests/test_auto_preset.py` + 9 портированных тестовых файлов, `make check` зелёный (2553 passed, coverage 83.75%); ветка `pr-e01-t07-auto-policy-preset`.
-- **E01-T08 — READY**. Следующий тикет — удалить legacy classifier/MWV production routing.
+- **E01-T08 — DONE** (удалён legacy classifier/MWV production routing: `core/agent_mwv.py`, `core/mwv/routing.py`, `core/mwv/manager.py` и MWV-путь чата удалены; default `runtime_mode` — `ask`; root-gate больше не срабатывает). Evidence: запись в ROADMAP.md (E01-T08 implementation + mini-audit; отступления от брифа — `set_runtime_state` не нормализует режимы, root-gate не срабатывает), новый `tests/test_legacy_mwv_routing_removed.py` (9 тестов) + переведённые тесты, `make check` зелёный (2435 passed, coverage 83.19%); ветка `pr-e01-t08-remove-legacy-mwv-routing`, PR #162.
 
 ## Readiness: 63 последовательных тикета
 
 | Epic | IDs | Count | Status |
 |---|---|---:|---|
 | E00 | T01–T03 | 3 | E00-T01 done; E00-T02 done; E00-T03 done |
-| E01 | T01–T09 | 9 | E01-T07 done; E01-T08 next |
+| E01 | T01–T09 | 9 | E01-T08 done; E01-T09 next |
 | E02 | T01–T08 | 8 | READY после E01 |
 | E03 | T01–T11 | 11 | READY после E02 |
 | E04 | T01–T06 | 6 | NEEDS_REFINEMENT |
@@ -126,4 +134,4 @@
 
 ## Resume
 
-**Next active:** E01-T08 — удалить legacy classifier/MWV production routing. **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.
+**Next active:** E01-T09 — regression E2E canonical loop. **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.

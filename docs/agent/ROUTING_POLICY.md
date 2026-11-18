@@ -1,66 +1,46 @@
-# ROUTING_POLICY — current legacy routing
+# ROUTING_POLICY — текущая маршрутизация (E01-T08)
 
-Документ фиксирует текущую legacy-маршрутизацию между режимами:
-- `chat` — ответы без инструментов (объяснения/консультации).
-- `mwv` — задачи с изменениями/инструментами (Manager → Worker → Verifier).
+E01-T08 удалил legacy classifier/MWV routing: `core/mwv/routing.py`
+(`classify_request`, `RouteDecision`), `core/mwv/manager.py` (`ManagerRuntime`),
+`core/agent_mwv.py` и весь MWV-путь чата удалены. Keyword-маршрутизации по
+тексту запроса больше нет: ни regex-триггеры, ни skill match не запускают
+исполнение.
 
-Политика применяется в runtime (`Agent.respond`) только для режимов, где ещё включена
-keyword/classifier маршрутизация.
+Действующие режимы (`Agent.respond` / `respond_stream`, `core/agent_routing.py`):
+- `runtime_mode=ask` (default): прямой chat-ответ через `AgentToolLoop`
+  (`_run_chat_response` / `_run_chat_response_stream`).
+- `runtime_mode=auto`: Auto preset (`handle_auto_command`); skill deprecated —
+  блок-ответ, ambiguous skill — decision-пакет, иначе auto preset.
+- `runtime_mode=desktop`: Desktop runtime.
+- Любой другой режим (`act`, `plan`, неизвестный) — fail-closed в обычный
+  chat loop: skill-решение берётся напрямую из `SkillIndex.match_decision`
+  (deprecated — блок, ambiguous — decision-пакет, no_match — запись
+  в inbox/candidate), исполнения MWV нет.
 
-- `runtime_mode=ask`: классификатор не используется (прямой chat-ответ).
-- `runtime_mode=act|plan`: используется `chat|mwv` классификация.
-- `runtime_mode=auto`: классификатор не используется; запрос сразу идёт в auto v1 path
-  (`AutoAgent.run_outcome() -> run_v1()`). Модель сама возвращает либо final response без
-  tool calls, либо explicit native tool calls; Python keyword routing это решение не принимает.
-
-Новые tool-capabilities не должны добавляться в этот keyword router. Целевой путь:
-LLM `tool_calls` -> `ToolGateway` -> `role="tool"` message.
-Regression-контракт: native tool names сами по себе (`workspace_read`,
-`workspace_write`, `image_generate`, `web` и т.п.) остаются `chat/no_triggers`;
-router не является tool planner.
-
-## Правила (жёстко, без магии)
-
-Маршрут `mwv`, если обнаружены явные триггеры:
-- “изменить/написать код”, “рефактор”, “почини тесты”, “добавь фичу”.
-- команды/инструменты: `git`, `pip`, `npm`, `docker`, `systemctl`, `sudo`.
-- файловые действия: patch/write/delete/overwrite и т.п.
-
-Маршрут `chat`, если запрос — объяснение/теория/консультация, без явных действий.
-
-## Что отдаёт политика
-
-`RouteDecision`:
-- `route`: `"chat"` или `"mwv"`.
-- `reason`: короткая причина (для логов).
-- `risk_flags`: список флагов (например `code_change`, `tools`, `filesystem`, `install`, `git`, `sudo`).
-
-## Примеры (таблица)
-
-| Пример запроса | Route | Почему |
-| --- | --- | --- |
-| “что такое git” | chat | объяснение, нет действий |
-| “как работает sudo” | chat | объяснение, нет действий |
-| “исправь тесты” | mwv | кодовые изменения (`code_change`) |
-| “рефактор модуля оплаты” | mwv | кодовые изменения (`code_change`) |
-| “добавь фичу логирования” | mwv | кодовые изменения (`code_change`) |
-| “git commit -m 'x'” | mwv | git‑действие (`git`, `tools`) |
-| “сделай PR” | mwv | git‑действие (`git`, `tools`) |
-| “pip install requests” | mwv | установка deps (`install`, `tools`) |
-| “npm install” | mwv | установка deps (`install`, `tools`) |
-| “sudo systemctl restart nginx” | mwv | sudo/системная команда (`sudo`, `tools`) |
-| “systemctl restart nginx” | mwv | системная команда (`tools`) |
-| “удали файл README.md” | mwv | файловое действие (`filesystem`, `tools`) |
-| “перезапиши файл config.yaml” | mwv | файловое действие (`filesystem`, `tools`) |
-| “применить патч для README” | mwv | файловое действие (`filesystem`, `tools`) |
-| “объясни, как работает TCP” | chat | объяснение, без инструментов |
+`set_runtime_state` режимы НЕ нормализует: `core/plan_execute.py` вызывает
+`set_runtime_state(mode="act")` и требует `policy.mode == "act"` для шагов
+canonical loop (E01-T06). Гарантия «нет маршрута в MWV» — default `ask` +
+fallthrough в chat loop, а не нормализация.
 
 ## Skill routing (жёстко)
 
-- `matched` → **всегда MWV**, без скрытого переключения.
+- `matched` → chat loop (skill фиксируется в `_last_skill_match`, исполнения
+  навыка как MWV-задачи нет).
 - `deprecated` → **блок‑ответ** с инструкцией (указать замену или переформулировать запрос).
 - `ambiguous` → структурированный decision‑пакет с выбором навыка (`select_skill`), без исполнения.
-- `no_match` → маршрут определяется триггерами; если триггеры есть, MWV запускается и может создать candidate.
+- `no_match` → chat loop; в legacy fallthrough (act/plan) запрос пишется
+  в inbox/candidate.
+
+## Root-gate
+
+`_request_requires_root_gate` (`server/http/handlers/ui_chat.py`) больше не
+срабатывает: его единственным триггером был legacy classifier — gate решал,
+пойдёт ли запрос в MWV-исполнение. MWV удалён, а auto preset сам управляет
+бюджетами и approval'ами; без classifier'а честно отличить chat-like запрос
+от execution-like нельзя. Функция и call site сохранены: gated-путь
+(202 + `chat.run_root` decision) остаётся рабочим механизмом и покрыт тестами
+через monkeypatch; fingerprint-проверка при `root_context` не зависит от
+этого флага.
 
 ## Command lane
 
@@ -73,6 +53,12 @@ router не является tool planner.
 
 ## Ограничения
 
-- Политика **не** меняет смысл MWV/Verifier.
-- Командный режим остаётся ручным и явно помечается как «без MWV».
+- Политика **не** меняет смысл честного verifier (`core/mwv/verifier_runtime.py`).
+- Командный режим остаётся ручным и явно помечается.
 - Policy не является tool planner и не извлекает аргументы tools из текста.
+
+Целевой путь исполнения: LLM `tool_calls` -> `ToolGateway` -> `role="tool"`;
+утверждённые планы — canonical loop (`core/plan_execute.py`).
+Regression-контракт: само наличие tool names в тексте запроса
+(`workspace_read`, `workspace_write`, `image_generate`, `web` и т.п.) ничего
+не запускает — исполнение только через LLM `tool_calls` или утверждённый план.

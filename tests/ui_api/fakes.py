@@ -31,15 +31,6 @@ from core.approval_policy import (
     ApprovalRequired,
 )
 from core.desktop_policy import DesktopPolicyStore
-from core.mwv.manager import MWVRunResult
-from core.mwv.models import (
-    RunContext,
-    TaskPacket,
-    VerificationResult,
-    VerificationStatus,
-    WorkResult,
-    WorkStatus,
-)
 from core.run_contract import build_run_spec
 from core.tool_gateway import ToolGateway
 from core.tracer import Tracer
@@ -198,59 +189,6 @@ class DummyAgent:
                 "evidence": None,
             }
         ]
-
-    def run_task_packet(
-        self, packet: TaskPacket, context: RunContext, *, cancellation_token=None
-    ) -> MWVRunResult:
-        del context
-        step_results = []
-        for step in packet.steps:
-            operation_raw = step.inputs.get("operation")
-            operation = (
-                operation_raw
-                if isinstance(operation_raw, str) and operation_raw.strip()
-                else (step.allowed_tool_kinds[0] if step.allowed_tool_kinds else None)
-            )
-            step_results.append(
-                {
-                    "step_id": step.step_id,
-                    "description": step.description,
-                    "status": "done",
-                    "operation": operation,
-                    "result": "ok",
-                    "tool_calls_used": 1,
-                    "changes": [],
-                }
-            )
-        work_result = WorkResult(
-            task_id=packet.task_id,
-            status=WorkStatus.SUCCESS,
-            summary="ok",
-            diagnostics={"step_results": step_results},
-            elapsed_ms=1,
-            files_touched=0,
-            tool_calls_used=len(step_results),
-            diff_size=0,
-            root_cause_tag="success",
-        )
-        verification_result = VerificationResult(
-            status=VerificationStatus.PASSED,
-            command=["check"],
-            exit_code=0,
-            stdout="ok",
-            stderr="",
-            duration_seconds=0.01,
-            error=None,
-            excerpt="ok",
-        )
-        return MWVRunResult(
-            task=packet,
-            work_result=work_result,
-            verification_result=verification_result,
-            attempt=1,
-            max_attempts=1,
-            retry_decision=None,
-        )
 
     def call_tool(
         self,

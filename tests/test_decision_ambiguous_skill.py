@@ -49,6 +49,8 @@ def test_decision_packet_ambiguous_skill(tmp_path: Path, monkeypatch) -> None:
         memory_companion_db_path=str(tmp_path / "mc.db"),
         memory_inbox_db_path=str(tmp_path / "inbox.db"),
     )
+    # E01-T08: skill-обработка — в legacy fallthrough (act/plan), не в ask.
+    agent.runtime_mode = "act"
     agent.skill_index = _make_skill_index(
         [
             _skill_entry("alpha", ["alpha"]),
@@ -56,10 +58,6 @@ def test_decision_packet_ambiguous_skill(tmp_path: Path, monkeypatch) -> None:
         ]
     )
 
-    def _mwv_stub(*_args: object, **_kwargs: object) -> str:
-        raise AssertionError("MWV should not be called for ambiguous skill.")
-
-    monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
     response = agent.respond([LLMMessage(role="user", content="alpha request")]).text
 
     payload = json.loads(response)

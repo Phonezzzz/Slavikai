@@ -423,6 +423,8 @@ archival/history recovery остаётся отдельной foundation depende
 
 ## Typed MWV observation — foundation B2e
 
+> **E01-T08: секция описывает удалённый механизм.** `_run_mwv_flow`, `MWVRunResult` и тест `tests/test_mwv_response_observation.py` удалены; production больше не маршрутизирует запросы в MWV. Актуальная граница ответа — claim `runtime.agent.request_local_response` (`docs/runtime_contract_claims.json`): typed `AgentResponse` достигает HTTP через sync return или `ResponseProduced`, без MWV. Секция сохранена как историческая запись foundation-аудита.
+
 `_run_mwv_flow` возвращает `AgentResponse.runtime_result` с исходным
 `ManagerRuntime.run_flow` → `MWVRunResult`. Sync routing передаёт envelope напрямую;
 stream передаёт тот же envelope через `ResponseProduced` до `Done`. Ошибки formatting,

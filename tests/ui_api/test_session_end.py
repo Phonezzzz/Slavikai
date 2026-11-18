@@ -340,8 +340,9 @@ def test_pending_execution_owner_blocks_end_session_without_cancelling(tmp_path,
     async def run():
         agent, brain, syncs = _agent(tmp_path, monkeypatch)
         client, sid, hub = await _setup(agent)
-        checkpoint = object()
-        agent._mwv_checkpoints["pending"] = checkpoint
+        # E01-T08: _mwv_checkpoints удалены; занятость агента — это
+        # _pending_chat_approval (см. session_context_busy).
+        monkeypatch.setattr(agent, "session_context_busy", lambda: True)
         try:
             response = await client.post(
                 "/ui/api/chat/send",
@@ -349,12 +350,11 @@ def test_pending_execution_owner_blocks_end_session_without_cancelling(tmp_path,
                 json={"content": "/end-session"},
             )
             assert response.status == 409
-            assert agent._mwv_checkpoints["pending"] is checkpoint
+            assert agent.session_context_busy()
             assert agent.short_term
             assert await hub.get_session_decision(sid) is None
             assert brain.calls == syncs == []
         finally:
-            agent._mwv_checkpoints.clear()
             await client.close()
 
     asyncio.run(run())

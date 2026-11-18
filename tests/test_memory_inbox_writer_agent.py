@@ -4,7 +4,6 @@ from pathlib import Path
 
 import core.agent as agent_module
 from config.memory_config import MemoryConfig
-from core.agent_response import AgentResponse
 from core.skills.index import SkillMatchDecision
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
@@ -31,7 +30,11 @@ def _make_agent(tmp_path: Path) -> agent_module.Agent:
 
 
 def test_unknown_request_writes_inbox(tmp_path: Path, monkeypatch) -> None:
+    # E01-T08: MWV-пути нет; unknown-запрос пишется в inbox из legacy
+    # fallthrough (plan/act) перед обычным chat loop.
     agent = _make_agent(tmp_path)
+    agent.runtime_mode = "act"
+    monkeypatch.setenv("SKILLS_CANDIDATES_DIR", str(tmp_path / "candidates"))
 
     def _no_match(_text: str) -> SkillMatchDecision:
         return SkillMatchDecision(
@@ -42,10 +45,9 @@ def test_unknown_request_writes_inbox(tmp_path: Path, monkeypatch) -> None:
         )
 
     monkeypatch.setattr(agent.skill_index, "match_decision", _no_match)
-    monkeypatch.setattr(agent, "_run_mwv_flow", lambda *a, **k: AgentResponse("ok"))
 
     response = agent.respond([LLMMessage(role="user", content="поправь баг в коде")]).text
-    assert response == "ok"
+    assert response.startswith("ok")
 
     inbox = agent._memory_inbox_store.list_items(MemoryCategory.INBOX, limit=10)
     assert len(inbox.items) == 1

@@ -4,6 +4,6 @@
 
 - `DevRules.md` — глобальные правила разработки.
 - `COMMAND_LANE_POLICY.md` — политика command lane.
-- `ROUTING_POLICY.md` — маршрутизация chat/MWV.
+- `ROUTING_POLICY.md` — маршрутизация ask/auto/desktop (MWV удалён в E01-T08).
 - `STOP_RESPONSES.md` — формат остановок.
-- `MWV_FLOW.md` — текущий MWV flow.
+- `MWV_FLOW.md` — MWV flow удалён в E01-T08 (stub).

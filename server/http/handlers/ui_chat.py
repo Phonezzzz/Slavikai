@@ -15,7 +15,6 @@ from core.agent_response import AgentResponse, ResponseFailure, ResponseProduced
 from core.agent_tools import ChatApprovalUnavailable
 from core.approval_policy import ApprovalCategory
 from core.desktop_policy import DesktopApprovalRule, DesktopApprovalScope, DesktopPolicyStore
-from core.mwv.routing import classify_request
 from core.response_preferences import ResponsePreferences
 from core.skills.index import SkillIndex
 from core.task_run_storage import RunAlreadyAdmittedError, RunConflictError, TaskRunStore
@@ -235,17 +234,16 @@ def _request_requires_root_gate(
     safe_mode: bool,
     skill_index: SkillIndex | None,
 ) -> bool:
-    if content.strip().startswith("/"):
-        return False
-    if mode in {"ask", "desktop"}:
-        return False
-    route = classify_request(
-        llm_messages,
-        content,
-        context={"safe_mode": safe_mode},
-        skill_index=skill_index,
-    )
-    return route.route == "mwv"
+    # E01-T08: root-gate больше не срабатывает. Его единственным триггером
+    # был legacy classifier (classify_request): gate решал, пойдёт ли запрос
+    # в MWV-исполнение. MWV удалён, а auto preset сам управляет бюджетами и
+    # approval'ами; без classifier'а честно отличить chat-like запрос от
+    # execution-like нельзя, поэтому гейт не решает ничего. Функция и call
+    # site сохранены: gated-путь (202 + chat.run_root decision) остаётся
+    # рабочим и покрыт тестами через monkeypatch; fingerprint-проверка при
+    # root_context от этого флага не зависит.
+    _ = (mode, content, llm_messages, safe_mode, skill_index)
+    return False
 
 
 def _auto_missing_paths(auto_state: dict[str, JSONValue] | None) -> list[str]:
@@ -744,7 +742,7 @@ async def _handle_ui_send_impl(
                 "tool": "chat_run_root",
                 "prompt": {
                     "what": "Подтвердить запуск из выбранного Workspace Root",
-                    "why": "Для auto/mwv запусков root подтверждается на каждый запуск.",
+                    "why": "Для auto-запусков root подтверждается на каждый запуск.",
                     "risk": "Запуск может изменить файлы и/или выполнить команды в проекте.",
                     "changes": [str(session_root)],
                 },

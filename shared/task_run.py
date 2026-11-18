@@ -60,6 +60,8 @@ class ProducerKind(StrEnum):
     MODEL = "model"
     NATIVE_LOOP = "native_loop"
     AUTO = "auto"
+    # Исторический вид: новые submission его не создают (E01-T08 удалил
+    # MWV-путь); оставлен, чтобы чтение старых stored submissions не падало.
     MWV = "mwv"
     DESKTOP = "desktop"
     LOCAL = "local"

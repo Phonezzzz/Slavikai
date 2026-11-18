@@ -297,7 +297,7 @@ def outcome_from_mwv(
       authority (the user accepted an incomplete result; ADR-0002 §2–3).
     - work SUCCESS + verification FAILED -> failed + none: the check ran
       and disproved the claimed result, so the run failed its acceptance
-      (consistent with ManagerRuntime._is_success, which requires both).
+      (успех требует одновременно work SUCCESS и verification PASSED).
     - work SUCCESS + verification ERROR -> completed + full with
       verification unknown: the check did not run, the postcondition was
       not disproved, and unknown must not automatically become failed.

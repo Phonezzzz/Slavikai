@@ -26,7 +26,7 @@ from core.tool_gateway import ToolGateway
 from core.tool_loop import AgentToolLoop
 from llm.brain_base import Brain
 from llm.types import LLMResult, LLMUsage, ModelConfig, ToolCall
-from shared.models import LLMMessage, PlanStep, PlanStepStatus, ToolRequest, ToolResult
+from shared.models import LLMMessage, ToolRequest, ToolResult
 from tools.tool_logger import ToolCallLogger
 from tools.tool_registry import ToolRegistry
 from tools.workspace_tools import set_workspace_root
@@ -117,6 +117,8 @@ def test_agent_call_tool_goes_through_gateway(
     """Acceptance: Agent.call_tool (plan audit, decision resume, UI writes,
     TTS/STT) reaches the tool only via a gateway built by the agent."""
     agent = _build_agent(tmp_path)
+    # E01-T08: default — ask (read-only); прямой write — в act.
+    agent.runtime_mode = "act"
     observed: list[str] = []
     original_call = ToolGateway.call
 
@@ -142,23 +144,6 @@ def test_agent_call_tool_goes_through_gateway(
         assert observed == ["workspace_write", "workspace_read"]
     finally:
         set_workspace_root(None)
-
-
-def test_mwv_plan_step_goes_through_gateway(tmp_path: Path) -> None:
-    """Acceptance: the MWV packet runner executes plan steps via the gateway."""
-    agent = _build_agent(tmp_path)
-    registry, dispatched = _registry(tmp_path)
-    observed: list[str] = []
-    gateway = ToolGateway(
-        registry,
-        run_policy=RunPolicy(mode="act", execution_target="sandbox"),
-        pre_call=lambda request: observed.append(request.name),
-    )
-    step = PlanStep(description="write the file", operation="workspace_write", tool_args={})
-    done = agent._execute_mwv_plan_step(step, gateway)
-    assert done.status == PlanStepStatus.DONE
-    assert observed == ["workspace_write"]
-    assert dispatched == ["workspace_write"]
 
 
 def test_direct_tool_call_fails_gateway_gate(tmp_path: Path) -> None:

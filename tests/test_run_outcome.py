@@ -29,14 +29,7 @@ from pathlib import Path
 import pytest
 
 from core.agent import Agent
-from core.mwv.manager import MWVRunResult
-from core.mwv.models import (
-    TaskPacket,
-    VerificationResult,
-    VerificationStatus,
-    WorkResult,
-    WorkStatus,
-)
+from core.mwv.models import VerificationResult, VerificationStatus, WorkStatus
 from core.run_outcome import (
     Disposition,
     RunOutcome,
@@ -502,35 +495,3 @@ def _make_agent(tmp_path: Path) -> Agent:
         memory_companion_db_path=str(tmp_path / "mc.db"),
         memory_inbox_db_path=str(tmp_path / "inbox.db"),
     )
-
-
-def _mwv_result(work: WorkStatus, verification: VerificationStatus) -> MWVRunResult:
-    task = TaskPacket(task_id="t", session_id="s", trace_id="trace", goal="g")
-    return MWVRunResult(
-        task=task,
-        work_result=WorkResult(task_id="t", status=work, summary="summary"),
-        verification_result=_verification(verification)
-        if verification is not VerificationStatus.PASSED
-        else _passed_verification(),
-        attempt=1,
-        max_attempts=3,
-        retry_decision=None,
-    )
-
-
-def test_mwv_outcome_label_is_canonical_projection(tmp_path: Path) -> None:
-    agent = _make_agent(tmp_path)
-    ok = _mwv_result(WorkStatus.SUCCESS, VerificationStatus.PASSED)
-    assert agent._mwv_outcome_label(ok) == "проверки пройдены"
-    failed_work = _mwv_result(WorkStatus.FAILURE, VerificationStatus.PASSED)
-    assert agent._mwv_outcome_label(failed_work) == "ошибка выполнения"
-    unverified = _mwv_result(WorkStatus.SUCCESS, VerificationStatus.ERROR)
-    assert agent._mwv_outcome_label(unverified) == "результат не подтверждён проверкой"
-    failed_checks = _mwv_result(WorkStatus.SUCCESS, VerificationStatus.FAILED)
-    assert agent._mwv_outcome_label(failed_checks) == "ошибка выполнения"
-
-
-def test_mwv_response_keeps_pinned_success_line(tmp_path: Path) -> None:
-    agent = _make_agent(tmp_path)
-    ok = _mwv_result(WorkStatus.SUCCESS, VerificationStatus.PASSED)
-    assert "Итог: проверки пройдены" in agent._format_mwv_response(ok)

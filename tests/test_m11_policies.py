@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 from core.agent import Agent
-from core.agent_response import AgentResponse
 from core.skills.index import SkillIndex
 from core.skills.models import SkillEntry, SkillManifest
 from llm.brain_base import Brain
@@ -59,10 +58,6 @@ def test_command_lane_manual_mode_without_mwv(tmp_path: Path, monkeypatch) -> No
         memory_inbox_db_path=str(tmp_path / "inbox.db"),
     )
 
-    def _mwv_stub(*_args: object, **_kwargs: object) -> AgentResponse:
-        raise AssertionError("MWV should not be called for / commands.")
-
-    monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
     response = agent.respond([LLMMessage(role="user", content="/plan goal")]).text
 
     assert "без MWV" in response
@@ -70,7 +65,8 @@ def test_command_lane_manual_mode_without_mwv(tmp_path: Path, monkeypatch) -> No
     assert brain.calls == 0
 
 
-def test_skill_match_routes_to_mwv(tmp_path: Path, monkeypatch) -> None:
+def test_skill_match_uses_chat_loop(tmp_path: Path) -> None:
+    # E01-T08: matched skill больше не форсит MWV; запрос идёт в chat loop.
     brain = DummyBrain()
     agent = Agent(
         brain=brain,
@@ -82,14 +78,12 @@ def test_skill_match_routes_to_mwv(tmp_path: Path, monkeypatch) -> None:
     agent.vectors.search = lambda *a, **k: []  # type: ignore[attr-defined]
     agent.skill_index = _make_skill_index([_skill_entry("alpha", ["alpha"])])
 
-    def _mwv_stub(*_args: object, **_kwargs: object) -> AgentResponse:
-        return AgentResponse("mwv")
-
-    monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
     response = agent.respond([LLMMessage(role="user", content="use alpha skill")]).text
 
-    assert response == "mwv"
-    assert brain.calls == 0
+    assert response.startswith("chat")
+    assert brain.calls == 1
+    report = extract_report_block(response)
+    assert report["route"] == "chat"
 
 
 def test_skill_ambiguous_blocks_with_instruction(tmp_path: Path, monkeypatch) -> None:
@@ -99,6 +93,8 @@ def test_skill_ambiguous_blocks_with_instruction(tmp_path: Path, monkeypatch) ->
         memory_companion_db_path=str(tmp_path / "mc.db"),
         memory_inbox_db_path=str(tmp_path / "inbox.db"),
     )
+    # E01-T08: skill-обработка — в legacy fallthrough (act/plan), не в ask.
+    agent.runtime_mode = "act"
     agent.skill_index = _make_skill_index(
         [
             _skill_entry("alpha", ["alpha"]),
@@ -106,10 +102,6 @@ def test_skill_ambiguous_blocks_with_instruction(tmp_path: Path, monkeypatch) ->
         ]
     )
 
-    def _mwv_stub(*_args: object, **_kwargs: object) -> AgentResponse:
-        raise AssertionError("MWV should not be called for ambiguous skill.")
-
-    monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
     response = agent.respond([LLMMessage(role="user", content="alpha request")]).text
 
     payload = json.loads(response)
@@ -126,16 +118,14 @@ def test_skill_deprecated_blocks_with_instruction(tmp_path: Path, monkeypatch) -
         memory_companion_db_path=str(tmp_path / "mc.db"),
         memory_inbox_db_path=str(tmp_path / "inbox.db"),
     )
+    # E01-T08: skill-обработка — в legacy fallthrough (act/plan), не в ask.
+    agent.runtime_mode = "act"
     agent.skill_index = _make_skill_index(
         [
             _skill_entry("legacy", ["legacy"], deprecated=True, replaced_by="alpha"),
         ]
     )
 
-    def _mwv_stub(*_args: object, **_kwargs: object) -> AgentResponse:
-        raise AssertionError("MWV should not be called for deprecated skill.")
-
-    monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
     response = agent.respond([LLMMessage(role="user", content="legacy request")]).text
 
     lowered = response.lower()

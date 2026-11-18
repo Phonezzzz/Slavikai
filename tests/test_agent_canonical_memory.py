@@ -7,8 +7,6 @@ import numpy as np
 from config.memory_config import ContextBudgetConfig
 from core.agent import Agent
 from core.desktop_policy import DesktopPolicyStore
-from core.mwv.models import MWVMessage
-from core.mwv.routing import RouteDecision
 from llm.brain_base import Brain
 from llm.stream_model import Done, TextDelta
 from llm.types import LLMResult
@@ -70,27 +68,6 @@ def test_agent_build_context_includes_canonical_memory(tmp_path, monkeypatch) ->
     assert context[1].role == "user"
     assert "[[SLOT:canonical_memory]]" in system.content
     assert "Каноническая память" in system.content
-
-
-def test_agent_mwv_task_contains_memory_capsule(tmp_path, monkeypatch) -> None:
-    agent = _build_agent(tmp_path, monkeypatch)
-
-    agent.capture_memory_claims_from_text(
-        "remember i prefer concise responses",
-        source_kind="chat.user_input",
-        source_id="session-2",
-    )
-
-    decision = RouteDecision(route="mwv", reason="trigger:tools", risk_flags=["tools"])
-    builder = agent._mwv_task_builder(decision)
-    context = agent._build_mwv_context(trace_id="trace-1")
-    task = builder([MWVMessage(role="user", content="fix tests")], context)
-
-    capsule_raw = task.context.get("memory_capsule")
-    assert isinstance(capsule_raw, dict)
-    count_raw = capsule_raw.get("count")
-    assert isinstance(count_raw, int)
-    assert count_raw >= 1
 
 
 def test_agent_explicit_remember_response_builds_preview_without_write(

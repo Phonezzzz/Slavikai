@@ -1544,8 +1544,6 @@ async def _complete_ui_decision(
                 )
                 # Checkpoint remains resumable if the atomic storage commit fails.
                 checkpoint_id = resume_payload.get("checkpoint_id")
-                if updated and agent is not None and isinstance(checkpoint_id, str):
-                    await asyncio.to_thread(agent.cancel_mwv_approval, checkpoint_id)
                 if updated and isinstance(checkpoint_id, str):
                     # Пауза canonical loop (E01-T06) хранится отдельно от MWV.
                     get_plan_loop_checkpoints(request.app).take(checkpoint_id)

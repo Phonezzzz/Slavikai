@@ -10,7 +10,6 @@ from aiohttp import web
 from core.mwv.verifier_runtime import canonical_check_command, has_canonical_repo_verifier
 from core.plan_compiler import PlanCompilationError
 from llm.chatgpt_plan import ChatGPTPlanError
-from server.agent_provider import ScopedAgentProvider
 from server.http.common.idempotency import (
     IdempotencyStore,
     fingerprint_json_payload,
@@ -20,7 +19,6 @@ from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.plan_cancellation import PlanCancellationRegistry
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import (
-    AgentProtocol,
     RuntimeModelStateProtocol,
     SessionModelChangedError,
     _resolve_runtime_main_for_session,
@@ -803,8 +801,6 @@ async def handle_ui_plan_cancel(request: web.Request) -> web.Response:
     registry: PlanCancellationRegistry = request.app["plan_cancellation_registry"]
     if isinstance(requested_task_id, str):
         registry.request_cancel(_agent_scope(request, session_id), requested_task_id)
-    provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
-    agent = await provider.get_existing_for_current_task(_agent_scope(request, session_id))
     async with _agent_lock_for_request(request, session_id):
         workflow = await hub.get_session_workflow(session_id)
         plan = _normalize_plan_payload(workflow.get("active_plan"))
@@ -864,8 +860,6 @@ async def handle_ui_plan_cancel(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="plan_state_conflict",
             )
-        if isinstance(checkpoint_id, str) and agent is not None:
-            agent.cancel_mwv_approval(checkpoint_id)
         if isinstance(checkpoint_id, str):
             # Пауза canonical loop (E01-T06) хранится отдельно от MWV.
             get_plan_loop_checkpoints(request.app).take(checkpoint_id)

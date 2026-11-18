@@ -5,7 +5,6 @@ from typing import Literal
 
 from core.auto_preset import AutoRunOutcome
 from core.desktop_runtime import DesktopRunOutcome
-from core.mwv.manager import MWVRunResult
 from core.tool_loop import AgentToolLoopResult
 from llm.stream_model import StreamEvent
 from llm.types import LLMResult
@@ -21,12 +20,7 @@ class LocalResponseOutcome:
 
 
 RuntimeResult = (
-    AutoRunOutcome
-    | AgentToolLoopResult
-    | LLMResult
-    | MWVRunResult
-    | DesktopRunOutcome
-    | LocalResponseOutcome
+    AutoRunOutcome | AgentToolLoopResult | LLMResult | DesktopRunOutcome | LocalResponseOutcome
 )
 
 
@@ -56,8 +50,6 @@ class AgentResponse:
             kind = ProducerKind.NATIVE_LOOP
         elif isinstance(result, LLMResult):
             kind = ProducerKind.MODEL
-        elif isinstance(result, MWVRunResult):
-            kind = ProducerKind.MWV
         elif isinstance(result, DesktopRunOutcome):
             kind = ProducerKind.DESKTOP
         elif isinstance(result, LocalResponseOutcome):

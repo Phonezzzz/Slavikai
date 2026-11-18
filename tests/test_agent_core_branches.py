@@ -60,6 +60,9 @@ def test_tts_stt_error_paths(tmp_path: Path) -> None:
     agent.tool_registry = ToolRegistry(safe_block=SAFE_MODE_TOOLS_OFF)
     agent.tool_registry.register("tts", lambda req: _dummy_tool(False), enabled=True)
     agent.tool_registry.register("stt", lambda req: _dummy_tool(False), enabled=True)
+    # E01-T08: default ask блокирует write-инструменты; error-path самих
+    # инструментов проверяется в act.
+    agent.runtime_mode = "act"
 
     tts_result = agent.synthesize_speech("hello")
     assert not tts_result.ok

@@ -35,11 +35,10 @@ from core.mwv.models import (
     VerificationResult,
     VerificationStatus,
 )
-from core.mwv.routing import RouteDecision
 from core.rule_engine import PolicyApplication
 from core.run_contract import RunBudget, RunSpec, build_run_spec
 from core.skills.candidates import CandidateDraft, sanitize_text, suggest_patterns
-from core.skills.index import SkillMatch, SkillResolution
+from core.skills.index import SkillMatch, SkillMatchDecision, SkillResolution
 from core.skills.models import SkillRisk
 from core.tool_gateway import ToolGateway
 from core.tool_loop import (
@@ -93,7 +92,6 @@ _MAX_UX_SUMMARY_CHARS = 220
 
 if TYPE_CHECKING:
     from config.memory_config import MemoryConfig
-    from core.agent_mwv import MWVWorkerCheckpoint
     from core.auto_preset import AutoPresetRunner, AutoRunOutcome
     from core.decision.handler import DecisionHandler
     from core.desktop_policy import DesktopPolicyStore
@@ -155,7 +153,6 @@ class AgentToolsMixin:
         _native_tool_qualification: NativeToolQualification | None
         desktop_runtime: DesktopRuntime
         logger: logging.Logger
-        _mwv_checkpoints: dict[str, MWVWorkerCheckpoint]
         _pending_chat_approval: PendingChatApproval | None
         brain: Brain
         tracer: Tracer
@@ -324,7 +321,6 @@ class AgentToolsMixin:
 
     def _reset_approval_state(self, *, cancel_runtime: bool = True) -> None:
         if cancel_runtime:
-            self._mwv_checkpoints.clear()
             self.desktop_runtime.cancel_pending()
             pending = self._pending_chat_approval
             if pending is not None and pending.auto_run_id is not None:
@@ -339,7 +335,7 @@ class AgentToolsMixin:
         self.last_approval_resume_payload = None
 
     def session_context_busy(self) -> bool:
-        return self._pending_chat_approval is not None or bool(self._mwv_checkpoints)
+        return self._pending_chat_approval is not None
 
     def reset_runtime_transient_state(self) -> None:
         self._reset_workspace_diffs()
@@ -755,7 +751,7 @@ class AgentToolsMixin:
     def _run_spec(self, *, budget: RunBudget | None = None) -> RunSpec:
         """Derive the run contract from the Agent's runtime state."""
         return build_run_spec(
-            mode=getattr(self, "runtime_mode", "act"),
+            mode=getattr(self, "runtime_mode", "ask"),
             active_plan=getattr(self, "runtime_active_plan", None),
             active_task=getattr(self, "runtime_active_task", None),
             enforce_plan_guard=bool(getattr(self, "runtime_plan_guard_enabled", False)),
@@ -860,7 +856,9 @@ class AgentToolsMixin:
         )
         return not any(marker in error_text for marker in ignore_markers)
 
-    def _record_unknown_skill_candidate(self, user_input: str, decision: RouteDecision) -> None:
+    def _record_unknown_skill_candidate(
+        self, user_input: str, skill_decision: SkillMatchDecision | None
+    ) -> None:
         patterns = suggest_patterns(user_input)
         if not patterns:
             patterns = ["unknown"]
@@ -873,8 +871,11 @@ class AgentToolsMixin:
             expected_behavior=[
                 "Handle the request safely using tools and code changes.",
             ],
-            risk=self._risk_from_flags(decision.risk_flags),
-            notes=[f"route_reason={decision.reason}"],
+            risk=self._risk_from_flags([]),
+            notes=[
+                "route_reason=chat_fallback",
+                f"skill_status={skill_decision.status if skill_decision is not None else 'none'}",
+            ],
         )
         key = f"unknown:{patterns[0]}"
         try:
@@ -890,13 +891,15 @@ class AgentToolsMixin:
                 {"reason": draft.reason, "key": key},
             )
 
-    def _record_unknown_inbox(self, user_input: str, decision: RouteDecision) -> None:
+    def _record_unknown_inbox(
+        self, user_input: str, skill_decision: SkillMatchDecision | None
+    ) -> None:
         summary = f"Неизвестный запрос: {sanitize_text(user_input)}"
         meta: dict[str, JSONValue] = {
             "reason": "unknown_request",
-            "route": decision.route,
-            "risk_flags": list(decision.risk_flags),
-            "skill_status": decision.skill_decision.status if decision.skill_decision else "none",
+            "route": "chat",
+            "risk_flags": [],
+            "skill_status": skill_decision.status if skill_decision is not None else "none",
         }
         try:
             item = self._memory_inbox_writer.write_once(
@@ -1561,11 +1564,10 @@ class AgentToolsMixin:
         why_parts = [f"category={request.category}", f"required={required}"]
         if command_lane:
             why_parts.append("mode=command_lane (без MWV)")
-        route = "command" if command_lane else "chat" if self.runtime_mode == "ask" else "mwv"
+        # E01-T08: MWV-маршрута больше нет; не-auto режимы — chat.
+        route = "command" if command_lane else "auto" if self.runtime_mode == "auto" else "chat"
         next_source = source_endpoint.strip() if isinstance(source_endpoint, str) else ""
         next_resume = dict(resume_payload) if isinstance(resume_payload, dict) else {}
-        if not command_lane and self.runtime_mode == "auto":
-            route = "auto"
         self.last_approval_source_endpoint = next_source or None
         self.last_approval_resume_payload = next_resume or None
         error_text = self._format_stop_response(

@@ -12,7 +12,6 @@ from config.shell_config import DEFAULT_SHELL_CONFIG_PATH
 from config.tools_config import ToolsConfig, load_tools_config, save_tools_config
 from core.agent_computer import AgentComputerRuntime
 from core.agent_memory import AgentMemoryMixin
-from core.agent_mwv import AgentMWVMixin, MWVWorkerCheckpoint
 from core.agent_routing import AgentRoutingMixin
 from core.agent_tools import AgentToolsMixin, PendingChatApproval
 from core.approval_policy import ApprovalCategory, ApprovalRequest
@@ -26,8 +25,6 @@ from core.desktop_policy import DesktopPolicyRuntime, DesktopPolicyStore
 from core.desktop_runtime import DesktopExecutionControl, DesktopRunCoordinator, DesktopRuntime
 from core.desktop_security import DesktopPathSecurity
 from core.managed_workspace import ManagedWorkspacePool, WorkspaceAccess
-from core.mwv.manager import ManagerRuntime, MWVRunResult
-from core.mwv.verifier_runtime import VerifierRuntime
 from core.plan_compiler import compile_structured_plan_steps
 from core.response_preferences import ResponsePreferences
 from core.rootless_podman import QUALIFIED_PYTHON_IMAGE
@@ -100,7 +97,7 @@ from tools.tool_registry import ToolCapability, ToolHandler, ToolRegistry
 from tools.tts_tool import TtsTool
 from tools.web_search_tool import WebSearchTool
 from tools.workspace_tools import (
-    MAX_FILE_BYTES,
+    MAX_FILE_BYTES,  # noqa: F401 — re-export для core.agent_tools._max_file_bytes
     WORKSPACE_ROOT,
     ApplyPatchTool,
     CreateFileTool,
@@ -139,16 +136,13 @@ SAFE_MODE_TOOLS_OFF = {
     "workspace_run",
     "workspace_terminal_run",
 }
-MAX_MWV_ATTEMPTS = 3
 SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD = 3
 CHAT_EXPOSED_READ_TOOLS: Final[frozenset[str]] = frozenset(
     {"web", "workspace_list", "workspace_read"}
 )
 
-_COMPAT_EXPORTS = (ManagerRuntime, VerifierRuntime, WORKSPACE_ROOT, MAX_FILE_BYTES)
 
-
-class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin):
+class Agent(AgentRoutingMixin, AgentToolsMixin, AgentMemoryMixin):
     """SlavikAI Core v1.0 — Распределённый рассуждающий агент."""
 
     def compile_plan_steps(
@@ -339,7 +333,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
             workspace_access.session_id if workspace_access is not None else None
         )
         self.approved_categories: set[ApprovalCategory] = set()
-        self.runtime_mode = "act"
+        self.runtime_mode = "ask"
         self.runtime_active_plan: dict[str, JSONValue] | None = None
         self.runtime_active_task: dict[str, JSONValue] | None = None
         self.runtime_auto_state: dict[str, JSONValue] | None = None
@@ -364,8 +358,6 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
             "candidate_written_count": 0,
         }
         self.decision_handler = DecisionHandler()
-        self._mwv_checkpoints: dict[str, MWVWorkerCheckpoint] = {}
-        self.last_mwv_result: MWVRunResult | None = None
         self._pending_chat_approval: PendingChatApproval | None = None
         self.last_approval_request: ApprovalRequest | None = None
         self.last_approval_source_endpoint: str | None = None

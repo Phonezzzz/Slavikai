@@ -4,8 +4,8 @@
 
 - skill blocked (deprecated)
 - approval_required (command lane)
-- verifier_failed (MWV)
-- mwv_internal_error
+- verifier_failed (auto/plan loop)
+- mwv_internal_error (внутренняя ошибка исполнения)
 
 ## Шаблон (обязательный)
 
@@ -33,18 +33,18 @@ MWV_REPORT_JSON=<json>
 | BLOCKED_SKILL_DEPRECATED | навык помечен deprecated |
 | APPROVAL_REQUIRED | требуется подтверждение действия |
 | VERIFIER_FAILED | верификатор вернул FAIL/ERROR |
-| MWV_INTERNAL_ERROR | ошибка MWV‑контуров |
-| COMMAND_LANE_NOTICE | командный режим (без MWV) |
+| MWV_INTERNAL_ERROR | внутренняя ошибка исполнения |
+| COMMAND_LANE_NOTICE | командный режим (только отладочные команды) |
 | WORKER_FAILED | выполнение шагов завершилось ошибкой |
 | REPLAN_REQUIRED | требуется новый TaskPacket (перепланирование в Plan) |
-| BUDGET_EXHAUSTED | исчерпаны budgets auto/mwv исполнения |
+| BUDGET_EXHAUSTED | исчерпаны budgets auto-исполнения |
 
 ## MWV_REPORT_JSON (стабильный блок)
 
 Пример для stop‑ответа:
 
 ```
-MWV_REPORT_JSON={"route":"mwv","trace_id":"...","attempts":{"current":1,"max":2},"verifier":{"status":"fail","duration_ms":1200},"next_steps":["..."],"stop_reason_code":"VERIFIER_FAILED"}
+MWV_REPORT_JSON={"route":"auto","trace_id":"...","attempts":{"current":1,"max":2},"verifier":{"status":"fail","duration_ms":1200},"next_steps":["..."],"stop_reason_code":"VERIFIER_FAILED"}
 ```
 
 Минимум для chat‑route:

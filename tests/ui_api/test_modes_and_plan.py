@@ -1298,39 +1298,17 @@ def test_ui_chat_send_in_auto_mode_returns_auto_state_and_progress_event() -> No
             )
             assert events_response.status == 200
             try:
+                # E01-T08: root-gate больше не срабатывает (его триггером был
+                # legacy classifier) — auto-запрос исполняется напрямую.
                 send_resp = await client.post(
                     "/ui/api/chat/send",
                     headers={"X-Slavik-Session": session_id},
                     json={"content": "исправь тесты и обнови файл src/main.py"},
                 )
-                assert send_resp.status == 202
+                assert send_resp.status == 200
                 send_payload = await send_resp.json()
-                decision = send_payload.get("decision")
-                assert isinstance(decision, dict)
-                assert decision.get("status") == "pending"
-                context_raw = decision.get("context")
-                assert isinstance(context_raw, dict)
-                assert context_raw.get("source_endpoint") == "chat.run_root"
-                decision_id = decision.get("id")
-                assert isinstance(decision_id, str)
-                assert decision_id
-
-                approve_resp = await client.post(
-                    "/ui/api/decision/respond",
-                    headers={"X-Slavik-Session": session_id},
-                    json={
-                        "session_id": session_id,
-                        "decision_id": decision_id,
-                        "choice": "approve_once",
-                    },
-                )
-                assert approve_resp.status == 200
-                approve_payload = await approve_resp.json()
-                resume = approve_payload.get("resume")
-                assert isinstance(resume, dict)
-                assert resume.get("source_endpoint") == "chat.run_root"
-                assert resume.get("ok") is True
-                auto_state = approve_payload.get("auto_state")
+                assert send_payload.get("decision") is None
+                auto_state = send_payload.get("auto_state")
                 assert isinstance(auto_state, dict)
                 assert auto_state.get("status") == "completed"
 

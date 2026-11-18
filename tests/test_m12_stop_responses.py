@@ -2,22 +2,22 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import core.agent as agent_module
 from core.agent import Agent
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
 from shared.models import LLMMessage
-from tests.report_utils import extract_report_block
 
 
-class DummyBrain(Brain):
+class FailingBrain(Brain):
     def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
-        return LLMResult(text="chat")
+        raise RuntimeError("boom")
 
 
-def test_mwv_internal_error_returns_stop_response(tmp_path: Path, monkeypatch) -> None:
+def test_chat_internal_error_returns_error_response_without_mwv(tmp_path: Path) -> None:
+    # E01-T08: MWV-пути нет; внутренняя ошибка chat loop — видимая ошибка,
+    # а не stop-ответ MWV.
     agent = Agent(
-        brain=DummyBrain(),
+        brain=FailingBrain(),
         memory_companion_db_path=str(tmp_path / "mc.db"),
         memory_inbox_db_path=str(tmp_path / "inbox.db"),
     )
@@ -25,17 +25,8 @@ def test_mwv_internal_error_returns_stop_response(tmp_path: Path, monkeypatch) -
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *a, **k: []  # type: ignore[attr-defined]
 
-    def _boom(*_args: object, **_kwargs: object) -> object:
-        raise RuntimeError("boom")
+    response = agent.respond([LLMMessage(role="user", content="поправь баг в коде")])
 
-    monkeypatch.setattr(agent_module.ManagerRuntime, "run_flow", _boom)
-    response = agent.respond([LLMMessage(role="user", content="поправь баг в коде")]).text
-
-    lowered = response.lower()
-    assert "что случилось" in lowered
-    assert "mwv internal error" in lowered
-    assert "что делать дальше" in lowered
-    assert "trace_id=" in response
-    report = extract_report_block(response)
-    assert report["route"] == "mwv"
-    assert report["stop_reason_code"] == "MWV_INTERNAL_ERROR"
+    assert not hasattr(agent, "_run_mwv_flow")
+    assert "mwv" not in response.text.lower()
+    assert response.text.strip()

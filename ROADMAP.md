@@ -418,7 +418,7 @@ Final outcome
 | Epic | Tickets | Статус |
 |---|---:|---|
 | E00 — baseline/docs | 3 | E00-T01 DONE; E00-T02 DONE; E00-T03 DONE |
-| E01 — canonical execution | 9 | E01-T07 DONE; E01-T08 next |
+| E01 — canonical execution | 9 | E01-T08 DONE; E01-T09 next |
 | E02 — persistent browser | 8 | READY после E01 |
 | E03 — Host Bridge / Desktop Commander | 11 | READY после E02 |
 | E04 — workspace/executor | 6 | NEEDS_REFINEMENT |
@@ -917,6 +917,30 @@ This ticket's acceptance (instrumentation test for model-originated state-changi
 
 **Delete-vs-wrap.** Если MWV concepts понадобятся позже, они могут существовать как library, но production routing удаляется.
 
+##### E01-T08 implementation — verified 2026-11-18 (baseline 9a431ed)
+
+**Status:** DONE (acceptance met).
+
+**Mini-audit (read-only, до implementation).** Предпосылки тикета держатся. Живой production-путь в legacy MWV: `Agent` по умолчанию `runtime_mode="act"` (`core/agent.py:343`); `respond`/`respond_stream` (`core/agent_routing.py:346,539`) падали в `classify_request` (`core/mwv/routing.py:83`) для любого режима вне {ask, auto, desktop} — regex-триггеры или любой skill match давали route=mwv; `_run_mwv_flow` (`core/agent_mwv.py:285`) строил `ManagerRuntime`+`WorkerRuntime`+`VerifierRuntime` (псевдо-MWV: verifier всегда ERROR, `_execute_mwv_plan_step` ставил DONE из одного `result.ok` и из прозы); второй caller — `_request_requires_root_gate` (`server/http/handlers/ui_chat.py:230,703`) использовал `classify_request` как root-gate эвристику; третий — legacy MWV resume в `run_plan_runner` (`server/http/common/workflow_runtime.py:1062–1089`) + `validate_mwv_approval`/`cancel_mwv_approval` + `MWVExecutionCancelled`. `core/mwv/coding_skill.py`, `coding_task.py`, `single_attempt.py`, `worker.py` — без production callers вне `core/mwv/` (только тесты). Матрица E01-T01 (строки 610–624) описывает состояние до E01-T08: строки 4, 13, 17 (MWV-пути чата, UI plan execute, approval resume) больше не действуют.
+
+**Удалено (не обёрнуто).** `core/agent_mwv.py` целиком (1607 строк: `_run_mwv_flow`, `_mwv_worker_runner`, `_mwv_task_builder`, `run_task_packet`/`resume_task_packet`, `validate/cancel_mwv_approval`, `_execute_mwv_plan_step`, `_mwv_checkpoints`, `MWVWorkerCheckpoint`, `MWVExecutionCancelled`, `TaskPacketApprovalPending`, `MWVContinuationUnavailable`); `core/mwv/routing.py` (`classify_request`, `RouteDecision`), `core/mwv/manager.py` (`ManagerRuntime`, `decide_retry`/`build_retry_task`), `core/mwv/coding_skill.py`, `coding_task.py`, `single_attempt.py`, `worker.py`, `interfaces.py`; `AgentMWVMixin` из `core/agent.py` + `MAX_MWV_ATTEMPTS`, `_COMPAT_EXPORTS`, `last_mwv_result`, `_mwv_checkpoints`; `MWVRunResult` из union `RuntimeResult` (`core/agent_response.py`) и ветка `ProducerKind.MWV` оттуда же; `run_task_packet`/`cancel_mwv_approval` из `AgentProtocol` (`server/http/common/runtime_contract.py`); legacy MWV resume-ветка, обработка `TaskPacketApprovalPending`/`MWVExecutionCancelled`, `mwv_packet_runner` labels (12 замен → `canonical_tool_loop`) в `server/http/common/workflow_runtime.py`; 18 тестовых файлов, тестировавших удалённое поведение.
+
+**Решения (отступления от брифа — задокументированы).**
+- `set_runtime_state` НЕ нормализует plan/act → "ask": `core/plan_execute.py:403-412` вызывает `agent.set_runtime_state(mode="act")` и требует `policy.mode == "act"` для шагов canonical loop; нормализация сломала бы выполнение планов (E01-T06, DO NOT TOUCH). Вместо этого гарантия «нет маршрута в MWV» — default `runtime_mode="ask"` + fallthrough в обычный chat loop для любого режима кроме ask/auto/desktop. Зафиксировано gate-тестом `test_set_runtime_state_keeps_act_for_canonical_loop`.
+- Root-gate (`_request_requires_root_gate`): ОТСТУПЛЕНИЕ ОТ БРИФА. Бриф требовал «auto всегда gated», но чтение кода и тесты это опровергли: gate срабатывал только для запросов, которые classifier отправлял в MWV (тест `test_ui_chat_send_in_auto_mode_chat_like_request_skips_root_gate` — chat-like запросы в auto намеренно обходили gate, коммит 8e85037), а 40 тестов кодируют прямой запуск auto без gate. Без classifier'а честно отличить chat-like от execution-like нельзя; gate на каждый auto-запрос — подтверждение на каждое сообщение, что противоречит и тикету (удаление, а не добавление трений), и позиции пользователя против карточек на каждый шаг. Поэтому gate больше не срабатывает (всегда False); функция и call site сохранены — gated-путь (202 + `chat.run_root` decision) остаётся рабочим и покрыт тестами через monkeypatch, fingerprint-проверка при `root_context` не тронута. Auto preset сам управляет бюджетами и approval'ами; desktop-режим gate не имел никогда.
+- Skill handling сохранён в fallthrough: `_apply_skill_decision`, deprecated-блок, `decision_handler.evaluate` с route="chat"; `_record_unknown_inbox`/`_record_unknown_skill_candidate` — inbox/candidate writers, не исполнение MWV, вызываются при `no_match` в chat-пути (сигнатуры переведены с `RouteDecision` на `SkillMatchDecision | None`).
+- Прямые `call_tool` write-операции в ask блокируются (`ASK_READ_ONLY_BLOCK`); skill deprecated/ambiguous — только в legacy fallthrough (act/plan) и auto, не в ask.
+
+**Намеренно оставлено.** `core/mwv/models.py` (типы TaskPacket/RunContext/VerificationResult — auto_preset, desktop, plan_execute, run_outcome); честный verifier (`core/mwv/verifier.py`, `core/mwv/verifier_runtime.py` — auto preset, desktop, plan loop); `core/run_outcome.py::outcome_from_mwv` (чистая деривация work+verification); `ProducerKind.MWV` в `shared/task_run.py` — только исторический вид для чтения старых stored submissions; поле `mwv_report` в UI payloads + парсинг `MWV_REPORT_PREFIX` (всегда None, API-совместимость); `StopReasonCode.MWV_INTERNAL_ERROR`/`VERIFIER_FAILED` (используются auto preset и chat/desktop путями); `SESSION_MODES` с plan/act (миграция словаря UI — E06); комментарий в `core/plan_execute.py:17` про fake-DONE `_execute_mwv_plan_step` — исторический контраст.
+
+**Claims registry.** `docs/runtime_contract_claims.json` (65 claims): `runtime.approval.native_continuation` v8→v9 (убран `tests/test_mwv_native_continuation.py` из verified_by, MWV-предложения в summary заменены на canonical loop); `runtime.agent.request_local_response` v7→v8 (убран `tests/test_mwv_response_observation.py`, удалены MWV-предложения); `skills.per_run_instructions` v3→v4 (summary «MWV reporting» → «Response reporting»). Gate `check-contracts` зелёный.
+
+**Доки.** `docs/agent/ROUTING_POLICY.md` переписан под ask/auto/desktop + chat loop; `docs/agent/MWV_FLOW.md` — stub «удалён в E01-T08»; `docs/agent/README.md`, `docs/agent/STOP_RESPONSES.md`, `docs/SOURCE_OF_TRUTH.md`, `docs/workflow/TEST_TAXONOMY.md`, `docs/architecture/TASK_RUN_STORAGE_CONTRACT.md` (§ «Typed MWV observation» — пометка E01-T08).
+
+**Files.** Production: удалены `core/agent_mwv.py`, `core/mwv/routing.py`, `core/mwv/manager.py`, `core/mwv/coding_skill.py`, `core/mwv/coding_task.py`, `core/mwv/single_attempt.py`, `core/mwv/worker.py`, `core/mwv/interfaces.py`; изменены `core/agent.py`, `core/agent_routing.py`, `core/agent_response.py`, `core/agent_tools.py`, `core/mwv/__init__.py`, `core/plan_execute.py` (комментарии), `core/run_outcome.py` (комментарий), `shared/task_run.py` (комментарий), `server/http/handlers/ui_chat.py`, `server/http/common/workflow_runtime.py`, `server/http/common/runtime_contract.py`, `server/http/handlers/plan.py`, `server/http/handlers/decision.py`. Тесты: удалены 18 файлов, переписаны/урезаны 18 файлов, новый `tests/test_legacy_mwv_routing_removed.py`.
+
+**Tests.** `make check` зелёный (2435 passed, coverage 83.19%). Новый gate-тест `tests/test_legacy_mwv_routing_removed.py` (9 тестов: AST-скан production на запрещённые импорты/имена, отсутствие 8 удалённых модулей и 14 MWV-атрибутов у `Agent`, default ask, fallthrough act/plan → chat loop sync+stream, deprecated/ambiguous в fallthrough, root-gate только по режиму, resume legacy чекпоинта отклоняется без эффектов).
+
 #### E01-T09 — regression E2E canonical loop
 
 **ЧТО.** Первый немоканный acceptance test: модель/fixture вызывает read tool, write tool, observation, postcondition.
@@ -924,6 +948,8 @@ This ticket's acceptance (instrumentation test for model-originated state-changi
 **Acceptance.** Fail tool → FAILED/BLOCKED; missing verifier → UNVERIFIED; confirmed postcondition → DONE.
 
 **Gate.** Только после этого E02.
+
+**Статус:** READY.
 
 ### Epic E02 — Persistent Browser Session Resource
 

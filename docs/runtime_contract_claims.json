@@ -343,7 +343,7 @@
       "scope": "skills",
       "status": "implemented",
       "owner": "skills",
-      "version": 3,
+      "version": 4,
       "source": "docs/SOURCE_OF_TRUTH.md",
       "verified_by": [
         "core/skills/manifest.py",
@@ -352,7 +352,7 @@
         "tests/test_engineering_skills_runtime.py",
         "tests/test_auto_preset.py"
       ],
-      "summary": "Manifest body instructions and supporting dependencies are resolved and injected per run into Auto preset; MWV reporting observes the run without changing tool or verification authority."
+      "summary": "Manifest body instructions and supporting dependencies are resolved and injected per run into Auto preset; Response reporting observes the run without changing tool or verification authority."
     },
     {
       "id": "workflow.local_pr_preflight",
@@ -507,28 +507,28 @@
       "scope": "runtime",
       "status": "implemented",
       "owner": "runtime",
-      "version": 8,
+      "version": 9,
       "source": "docs/architecture/TASK_RUN_STORAGE_CONTRACT.md",
       "verified_by": [
         "tests/test_tool_loop.py",
         "tests/test_auto_native_continuation.py",
-        "tests/test_mwv_native_continuation.py",
         "tests/ui_api/test_modes_and_plan.py",
         "tests/ui_api/test_runtime_init.py",
         "tests/ui_api/test_auto_native_approval.py",
         "tests/test_agent_response.py",
         "tests/ui_api/test_stream_and_events.py",
         "tests/ui_api/test_desktop_mode.py",
-        "tests/test_principal_runtime_isolation.py"
+        "tests/test_principal_runtime_isolation.py",
+        "tests/test_plan_execute.py"
       ],
-      "summary": "Native Ask/Desktop/Auto approval continues the captured exact tool call and original history without user replay. Desktop retains a bounded host lease and thread-affine resources until resume or cleanup. Single-use state is principal/session-owned and volatile; missing/expired checkpoints fail closed. Local web search uses this same native loop; admission snapshots, HTTP cancellation settlement, original Ask finalization, compound once-scopes and UI history projection are covered. Auto preserves its original run frame, plan, start time and budgets; legacy auto.run replay is rejected. Act packet runner now owns a volatile exact-request checkpoint preserving original packet, prefix, available typed tool observations and attempt; UI snapshots cannot claim completed execution. Once approval uses Gateway exact scope, pre-dispatch faults preserve pending state, and HTTP session grants roll back if resume did not start. Durable continuation, full canonical capture and payload storage remain target. Plan cancel clears the owned checkpoint and decision under the scoped lock; terminal projection faults retain the last typed MWV result and settle the consumed decision. Initial pre-dispatch model conflict ends the owned task without dispatch. Retry checkpoints validate original lineage while executing their owned retry revision; fault settlement records the active attempt/task. Approval publication uses one UI storage write with rollback/cleanup on failure. Reject cleanup borrows the existing owner; scoped matching initial/resume cancellation signals before lock and preserves terminal results. Reject atomically commits terminal workflow and decision before checkpoint cleanup; storage failure preserves waiting state. Cancellation before first dispatch projects cancelled; shutdown timeout is diagnostic and does not interrupt remaining cleanup. Waiting-plan cancellation atomically commits workflow/decision removal before checkpoint cleanup. Cancelled workers preserve completed step results, available changes and counters. Scoped/static Agent retirement retains borrowers and locks after timeout; packet-thread cancellation drains before releasing ownership. Pending opaque tools do not acquire a durability/recovery guarantee."
+      "summary": "Native Ask/Desktop/Auto approval continues the captured exact tool call and original history without user replay. Desktop retains a bounded host lease and thread-affine resources until resume or cleanup. Single-use state is principal/session-owned and volatile; missing/expired checkpoints fail closed. Local web search uses this same native loop; admission snapshots, HTTP cancellation settlement, original Ask finalization, compound once-scopes and UI history projection are covered. Auto preserves its original run frame, plan, start time and budgets; legacy auto.run replay is rejected. Canonical loop owns a volatile plan checkpoint preserving plan/task binding and completed steps; UI snapshots cannot claim completed execution. Once approval uses Gateway exact scope, pre-dispatch faults preserve pending state, and HTTP session grants roll back if resume did not start. Durable continuation, full canonical capture and payload storage remain target. Plan cancel clears the owned checkpoint and decision under the scoped lock; terminal projection faults fail the workflow without resurrecting the consumed decision. Initial pre-dispatch model conflict ends the owned task without dispatch. Retry checkpoints validate original lineage while executing their owned retry revision; fault settlement records the active attempt/task. Approval publication uses one UI storage write with rollback/cleanup on failure. Reject cleanup borrows the existing owner; scoped matching initial/resume cancellation signals before lock and preserves terminal results. Reject atomically commits terminal workflow and decision before checkpoint cleanup; storage failure preserves waiting state. Cancellation before first dispatch projects cancelled; shutdown timeout is diagnostic and does not interrupt remaining cleanup. Waiting-plan cancellation atomically commits workflow/decision removal before checkpoint cleanup. Cancelled workers preserve completed step results, available changes and counters. Scoped/static Agent retirement retains borrowers and locks after timeout; packet-thread cancellation drains before releasing ownership. Pending opaque tools do not acquire a durability/recovery guarantee."
     },
     {
       "id": "runtime.agent.request_local_response",
       "scope": "runtime",
       "status": "implemented",
       "owner": "runtime",
-      "version": 7,
+      "version": 8,
       "source": "docs/architecture/TASK_RUN_STORAGE_CONTRACT.md",
       "verified_by": [
         "tests/test_agent_modes_logic.py",
@@ -537,10 +537,9 @@
         "tests/test_agent_response.py",
         "tests/test_stream_events.py",
         "tests/test_tool_loop.py",
-        "tests/test_mwv_response_observation.py",
         "tests/ui_api/test_desktop_response_observation.py"
       ],
-      "summary": "Request-local typed Agent response reaches HTTP through sync return or ResponseProduced stream event. Auto outcome and returned Ask LLMResult/AgentToolLoopResult remain separate from text projection; post-result review/logging errors retain observations, explicit stream error/cancellation retains returned loop result, cancellation during dispatch captures completed ToolResult before stopping further calls and HTTP drains the typed observation without publishing cancelled content, provider creation/iteration exceptions retain completed observations through ToolLoopExecutionError, and ApprovalRequired reaches the existing outer approval handler. Missing/duplicate stream results fail without stale mutable result reads or execution rerun. Volatile boundary only: lifecycle authority, exceptional dispatch/serialization capture and canonical durability remain target. Returned MWVRunResult reaches sync/stream HTTP boundary with original work/verifier statuses and bounded retry metadata; formatting/decision/logging faults retain it separately from ResponseFailure. Act packet runner retains available typed tool observations before diff projection and on cancellation; its approval checkpoint is volatile. MWV full raw byte capture, durable continuation and full prior attempt history remain target. Desktop initial/resume responses retain the existing DesktopRunOutcome including verification and loop observations; presentation faults preserve it separately. No durable/canonical capture guarantee added."
+      "summary": "Request-local typed Agent response reaches HTTP through sync return or ResponseProduced stream event. Auto outcome and returned Ask LLMResult/AgentToolLoopResult remain separate from text projection; post-result review/logging errors retain observations, explicit stream error/cancellation retains returned loop result, cancellation during dispatch captures completed ToolResult before stopping further calls and HTTP drains the typed observation without publishing cancelled content, provider creation/iteration exceptions retain completed observations through ToolLoopExecutionError, and ApprovalRequired reaches the existing outer approval handler. Missing/duplicate stream results fail without stale mutable result reads or execution rerun. Volatile boundary only: lifecycle authority, exceptional dispatch/serialization capture and canonical durability remain target. Full raw byte capture, durable continuation and full prior attempt history remain target. Desktop initial/resume responses retain the existing DesktopRunOutcome including verification and loop observations; presentation faults preserve it separately. No durable/canonical capture guarantee added."
     },
     {
       "id": "settings.principal_preferences",

@@ -877,6 +877,11 @@ def test_auto_root_approval_preserves_original_request_identity(
     from shared.models import ToolResult
 
     monkeypatch.chdir(tmp_path)
+    from server.http.handlers import ui_chat
+
+    # E01-T08: root-gate больше не срабатывает сам (триггером был legacy
+    # classifier); gated-путь покрываем принудительно, как в test_model_switch.
+    monkeypatch.setattr(ui_chat, "_request_requires_root_gate", lambda **_: True)
     executions = []
 
     class RootBrain(CountingBrain):
@@ -967,6 +972,11 @@ def test_auto_root_approval_preserves_original_request_identity(
 @pytest.mark.parametrize("changed", ["mode", "model", "policy", "tools", "grants"])
 def test_root_approval_rejects_changed_execution_context(tmp_path, monkeypatch, changed):  # noqa: ANN001, ANN201
     monkeypatch.chdir(tmp_path)
+    from server.http.handlers import ui_chat
+
+    # E01-T08: root-gate больше не срабатывает сам (триггером был legacy
+    # classifier); gated-путь покрываем принудительно, как в test_model_switch.
+    monkeypatch.setattr(ui_chat, "_request_requires_root_gate", lambda **_: True)
     brain = CountingBrain()
     brain.supports_native_tools = True
     agent = _RealStreamingAgent(brain=brain)

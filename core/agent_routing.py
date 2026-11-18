@@ -17,7 +17,6 @@ from core.approval_policy import ApprovalRequired
 from core.decision.handler import DecisionContext
 from core.decision.memory_save import build_memory_save_packet
 from core.mwv.models import StopReasonCode
-from core.mwv.routing import RouteDecision, classify_request
 from core.skills.index import SkillMatchDecision
 from core.tool_loop import AgentToolLoop, AgentToolLoopResult, ToolLoopExecutionError
 from llm.cancellation import GenerationCancelled, cancellation_requested
@@ -155,13 +154,6 @@ class AgentRoutingMixin:
             retrieved_memory_ids: list[str] | None = None,
             applied_policy_ids: list[str] | None = None,
         ) -> str: ...
-        def _run_mwv_flow(
-            self,
-            messages: list[LLMMessage],
-            last_content: str,
-            route_decision: RouteDecision,
-            record_in_history: bool,
-        ) -> AgentResponse: ...
         def _handle_approval_required(
             self,
             request: ApprovalRequest,
@@ -179,11 +171,13 @@ class AgentRoutingMixin:
             raw_input: str,
             record_in_history: bool,
         ) -> str: ...
-        def _record_unknown_inbox(self, user_input: str, decision: RouteDecision) -> None: ...
+        def _record_unknown_inbox(
+            self, user_input: str, decision: SkillMatchDecision | None
+        ) -> None: ...
         def _record_unknown_skill_candidate(
             self,
             user_input: str,
-            decision: RouteDecision,
+            decision: SkillMatchDecision | None,
         ) -> None: ...
         def _apply_policies(self, user_input: str) -> PolicyApplication: ...
         def _build_context_messages(
@@ -345,20 +339,22 @@ class AgentRoutingMixin:
             if runtime_mode == "desktop":
                 return self._run_desktop_response(messages, last_content, record_in_history)
 
-            decision = classify_request(
-                messages,
-                last_content,
-                context={"safe_mode": bool(self.tools_enabled.get("safe_mode", False))},
-                skill_index=self.skill_index,
+            # E01-T08: legacy classifier/MWV routing удалён. Любой режим
+            # кроме ask/auto/desktop — fail-closed в обычный chat loop:
+            # skill-решение берётся напрямую из SkillIndex, MWV нет.
+            skill_decision = (
+                self.skill_index.match_decision(last_content)
+                if self.skill_index is not None
+                else None
             )
-            self._apply_skill_decision(decision.skill_decision)
+            self._apply_skill_decision(skill_decision)
             self.tracer.log(
                 "routing_decision",
-                decision.route,
-                {"reason": decision.reason, "flags": decision.risk_flags},
+                "chat",
+                {"reason": "chat_fallback", "flags": []},
             )
-            if decision.skill_decision and decision.skill_decision.status == "deprecated":
-                response = self._format_skill_block(decision.skill_decision)
+            if skill_decision is not None and skill_decision.status == "deprecated":
+                response = self._format_skill_block(skill_decision)
                 self._log_chat_interaction(raw_input=last_content, response_text=response)
                 if record_in_history:
                     self._append_short_term([LLMMessage(role="assistant", content=response)])
@@ -366,10 +362,10 @@ class AgentRoutingMixin:
             decision_packet = self.decision_handler.evaluate(
                 DecisionContext(
                     user_input=last_content,
-                    route=decision.route,
-                    routing_reason=decision.reason,
-                    risk_flags=list(decision.risk_flags),
-                    skill_decision=decision.skill_decision,
+                    route="chat",
+                    routing_reason="chat_fallback",
+                    risk_flags=[],
+                    skill_decision=skill_decision,
                 ),
             )
             if decision_packet is not None:
@@ -380,11 +376,9 @@ class AgentRoutingMixin:
                         record_in_history=record_in_history,
                     )
                 )
-            if decision.route == "mwv":
-                if decision.skill_decision and decision.skill_decision.status == "no_match":
-                    self._record_unknown_inbox(last_content, decision)
-                    self._record_unknown_skill_candidate(last_content, decision)
-                return self._run_mwv_flow(messages, last_content, decision, record_in_history)
+            if skill_decision is not None and skill_decision.status == "no_match":
+                self._record_unknown_inbox(last_content, skill_decision)
+                self._record_unknown_skill_candidate(last_content, skill_decision)
             return self._run_chat_response(messages, last_content, record_in_history)
         except ApprovalRequired as exc:
             self._capture_chat_approval(exc, last_content, record_in_history=record_in_history)
@@ -538,20 +532,21 @@ class AgentRoutingMixin:
                 )
                 return
 
-            decision = classify_request(
-                messages,
-                last_content,
-                context={"safe_mode": bool(self.tools_enabled.get("safe_mode", False))},
-                skill_index=self.skill_index,
+            # E01-T08: legacy classifier/MWV routing удалён (см. respond):
+            # fail-closed в обычный chat loop, skill — напрямую из SkillIndex.
+            skill_decision = (
+                self.skill_index.match_decision(last_content)
+                if self.skill_index is not None
+                else None
             )
-            self._apply_skill_decision(decision.skill_decision)
+            self._apply_skill_decision(skill_decision)
             self.tracer.log(
                 "routing_decision",
-                decision.route,
-                {"reason": decision.reason, "flags": decision.risk_flags},
+                "chat",
+                {"reason": "chat_fallback", "flags": []},
             )
-            if decision.skill_decision and decision.skill_decision.status == "deprecated":
-                response = self._format_skill_block(decision.skill_decision)
+            if skill_decision is not None and skill_decision.status == "deprecated":
+                response = self._format_skill_block(skill_decision)
                 self.last_stream_response_raw = response
                 yield from _text_response_events(response)
                 return
@@ -559,10 +554,10 @@ class AgentRoutingMixin:
             decision_packet = self.decision_handler.evaluate(
                 DecisionContext(
                     user_input=last_content,
-                    route=decision.route,
-                    routing_reason=decision.reason,
-                    risk_flags=list(decision.risk_flags),
-                    skill_decision=decision.skill_decision,
+                    route="chat",
+                    routing_reason="chat_fallback",
+                    risk_flags=[],
+                    skill_decision=skill_decision,
                 ),
             )
             if decision_packet is not None:
@@ -575,23 +570,9 @@ class AgentRoutingMixin:
                 yield from _text_response_events(response)
                 return
 
-            if decision.route == "mwv":
-                if decision.skill_decision and decision.skill_decision.status == "no_match":
-                    self._record_unknown_inbox(last_content, decision)
-                    self._record_unknown_skill_candidate(last_content, decision)
-                mwv_response = self._run_mwv_flow(
-                    messages, last_content, decision, record_in_history
-                )
-                self.last_stream_response_raw = mwv_response.text
-                if mwv_response.failure is not None:
-                    yield Error(
-                        code=mwv_response.failure.code, message=mwv_response.failure.message
-                    )
-                if mwv_response.text:
-                    yield TextDelta(text=mwv_response.text)
-                yield ResponseProduced(mwv_response)
-                yield Done(finish_reason="error" if mwv_response.failure is not None else "stop")
-                return
+            if skill_decision is not None and skill_decision.status == "no_match":
+                self._record_unknown_inbox(last_content, skill_decision)
+                self._record_unknown_skill_candidate(last_content, skill_decision)
 
             yield from self._run_chat_response_stream(
                 messages,

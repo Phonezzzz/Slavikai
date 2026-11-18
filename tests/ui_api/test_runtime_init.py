@@ -129,12 +129,24 @@ def test_ui_runtime_init_preserves_session_history() -> None:
 
 
 def test_ui_runtime_init_blocks_running_task_without_force() -> None:
+    class _SlowPlanBrain:
+        """Обёртка над scripted brain: тормозит canonical loop."""
+
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+
+        def generate(self, *args: object, **kwargs: object) -> object:
+            time.sleep(0.5)
+            return self._inner.generate(*args, **kwargs)  # type: ignore[attr-defined]
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._inner, name)
+
     class SlowTaskAgent(DummyAgent):
-        def run_task_packet(
-            self, packet: TaskPacket, context: RunContext, *, cancellation_token=None
-        ) -> MWVRunResult:
-            time.sleep(0.2)
-            return super().run_task_packet(packet, context)
+        # E01-T08: run_task_packet удалён; медленный путь — canonical loop:
+        # тормозим brain, чтобы задача оставалась running во время init.
+        def _get_main_brain(self):  # type: ignore[no-untyped-def]
+            return _SlowPlanBrain(super()._get_main_brain())
 
     async def run() -> None:
         client = await _create_client(SlowTaskAgent())

@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.agent import Agent
-from core.agent_response import AgentResponse
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
 from shared.models import LLMMessage
@@ -31,10 +30,6 @@ def test_routing_chat_path_uses_llm(tmp_path: Path, monkeypatch) -> None:
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *a, **k: []  # type: ignore[attr-defined]
 
-    def _mwv_stub(*_args: object, **_kwargs: object) -> AgentResponse:
-        raise AssertionError("MWV path should not be used for chat input.")
-
-    monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
     response = agent.respond([LLMMessage(role="user", content="какая погода")]).text
     assert response.startswith("chat")
     assert brain.calls == 1
@@ -53,10 +48,6 @@ def test_routing_chat_path_for_explanation(tmp_path: Path, monkeypatch) -> None:
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *a, **k: []  # type: ignore[attr-defined]
 
-    def _mwv_stub(*_args: object, **_kwargs: object) -> AgentResponse:
-        raise AssertionError("MWV path should not be used for chat input.")
-
-    monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
     response = agent.respond([LLMMessage(role="user", content="объясни термин git")]).text
     assert response.startswith("chat")
     assert brain.calls == 1
@@ -64,7 +55,8 @@ def test_routing_chat_path_for_explanation(tmp_path: Path, monkeypatch) -> None:
     assert report["route"] == "chat"
 
 
-def test_routing_mwv_path_bypasses_llm(tmp_path: Path, monkeypatch) -> None:
+def test_routing_code_input_uses_chat_loop(tmp_path: Path) -> None:
+    # E01-T08: MWV-пути нет; запрос с кодовыми триггерами идёт в chat loop.
     brain = DummyBrain("chat")
     agent = Agent(
         brain=brain,
@@ -75,10 +67,8 @@ def test_routing_mwv_path_bypasses_llm(tmp_path: Path, monkeypatch) -> None:
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *a, **k: []  # type: ignore[attr-defined]
 
-    def _mwv_stub(*_args: object, **_kwargs: object) -> AgentResponse:
-        return AgentResponse("mwv")
-
-    monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
     response = agent.respond([LLMMessage(role="user", content="поправь баг в коде")]).text
-    assert response == "mwv"
-    assert brain.calls == 0
+    assert response.startswith("chat")
+    assert brain.calls == 1
+    report = extract_report_block(response)
+    assert report["route"] == "chat"

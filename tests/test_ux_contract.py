@@ -3,16 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.agent import Agent
-from core.mwv.manager import MWVRunResult
-from core.mwv.models import (
-    ChangeType,
-    TaskPacket,
-    VerificationResult,
-    VerificationStatus,
-    WorkChange,
-    WorkResult,
-    WorkStatus,
-)
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
 from shared.models import LLMMessage
@@ -61,43 +51,4 @@ def test_ux_contract_present_in_command_lane_response(tmp_path: Path) -> None:
     response = agent.handle_tool_command("/trace")
     report = extract_report_block(response)
     assert report["route"] == "command"
-    _assert_required_contract_fields(report)
-
-
-def test_ux_contract_present_in_mwv_response(tmp_path: Path) -> None:
-    agent = _prepare_agent(tmp_path)
-    run_result = MWVRunResult(
-        task=TaskPacket(
-            task_id="task-1",
-            session_id="session-1",
-            trace_id="trace-1",
-            goal="fix tests",
-        ),
-        work_result=WorkResult(
-            task_id="task-1",
-            status=WorkStatus.SUCCESS,
-            summary="1. ✅ Применить фикс",
-            changes=[
-                WorkChange(
-                    path="src/app.py",
-                    change_type=ChangeType.UPDATE,
-                    summary="+3/-1",
-                )
-            ],
-        ),
-        verification_result=VerificationResult(
-            status=VerificationStatus.PASSED,
-            command=["make", "check"],
-            exit_code=0,
-            stdout="ok",
-            stderr="",
-            duration_seconds=0.1,
-        ),
-        attempt=1,
-        max_attempts=1,
-        retry_decision=None,
-    )
-    response = agent._format_mwv_response(run_result)
-    report = extract_report_block(response)
-    assert report["route"] == "mwv"
     _assert_required_contract_fields(report)

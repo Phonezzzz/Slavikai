@@ -10,9 +10,9 @@ RunSpec с ``intent=execute``, plan guard привязывает каждый в
 Правила этого модуля:
 
 - Нет адаптера вокруг MWV и нет fallback на него: свежий запуск идёт
-  только через ``AgentToolLoop`` + ``ToolGateway``. Resume старых
-  MWV-чекпоинтов остаётся в ``run_plan_runner`` и для запусков после
-  этого PR недостижим — его удаление принадлежит E01-T08.
+  только через ``AgentToolLoop`` + ``ToolGateway``. Legacy resume
+  MWV-чекпоинтов удалён в E01-T08 (``run_plan_runner`` отклоняет
+  старые чекпоинты: локальные runtime-данные одноразовые).
 - Шаг считается done только при чистом завершении loop и ``is_full_done``
   его outcome. Fake-DONE уровня шага из ``_execute_mwv_plan_step``
   (DONE из одного ``result.ok``) здесь не воспроизводится.
@@ -150,7 +150,7 @@ class PlanExecuteResult:
 
 @dataclass(frozen=True)
 class PlanLoopCheckpoint:
-    """Пауза loop-выполнения плана на approval (аналог MWVWorkerCheckpoint)."""
+    """Пауза loop-выполнения плана на approval."""
 
     checkpoint_id: str
     plan_id: str
@@ -168,7 +168,7 @@ class PlanLoopCheckpoint:
 
 
 class PlanLoopCheckpoints:
-    """In-memory хранилище пауз loop-выполнения плана (как _mwv_checkpoints)."""
+    """In-memory хранилище пауз loop-выполнения плана."""
 
     def __init__(self) -> None:
         self._checkpoints: dict[str, PlanLoopCheckpoint] = {}
@@ -212,8 +212,7 @@ class ValidatedPlan:
 class PlanLoopApprovalPending(Exception):
     """Loop запросил approval на шаге плана: выполнение приостановлено.
 
-    Несёт чекпоинт для resume через ``run_plan_runner`` (как
-    ``TaskPacketApprovalPending`` у MWV-пути).
+    Несёт чекпоинт для resume через ``run_plan_runner``.
     """
 
     def __init__(self, *, checkpoint: PlanLoopCheckpoint, approval: ApprovalRequest) -> None:
@@ -1033,9 +1032,9 @@ def resume_approved_plan(
     ):
         raise PlanLoopContinuationUnavailable("plan_loop_continuation_unavailable")
     if checkpoint.workspace_root != agent.runtime_workspace_root:
-        # Привязка паузы к исходному workspace root (паритет
-        # validate_mwv_approval: checkpoint.workspace_root обязан
-        # совпадать с текущим root агента): подтверждение, данное в
+        # Привязка паузы к исходному workspace root
+        # (checkpoint.workspace_root обязан совпадать с текущим root
+        # агента): подтверждение, данное в
         # root A, не разрешает эффекты в root B, если root сессии
         # сменили во время ожидания approval. Отказ — до любого
         # эффекта: чекпоинт и decision остаются pending, вернуться

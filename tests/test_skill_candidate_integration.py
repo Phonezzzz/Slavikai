@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.agent import SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD, Agent
-from core.mwv.routing import RouteDecision
 from core.skills.candidates import SkillCandidateWriter
+from core.skills.index import SkillMatchDecision
 from llm.brain_base import Brain
 from llm.types import LLMResult
 from shared.models import LLMMessage, ToolRequest, ToolResult
@@ -30,17 +30,30 @@ def _make_agent(tmp_path: Path) -> Agent:
 
 def test_unknown_request_creates_candidate(tmp_path: Path) -> None:
     agent = _make_agent(tmp_path)
-    decision = RouteDecision(route="mwv", reason="trigger:tools", risk_flags=["tools"])
-    agent._record_unknown_skill_candidate("fix tests", decision)  # noqa: SLF001
+    agent._record_unknown_skill_candidate(
+        "fix tests",
+        SkillMatchDecision(
+            status="no_match", match=None, alternatives=[], reason="no_pattern_match"
+        ),
+    )  # noqa: SLF001
     files = list((tmp_path / "skills" / "_candidates").glob("*.md"))
     assert files
 
 
 def test_unknown_request_deduped(tmp_path: Path) -> None:
     agent = _make_agent(tmp_path)
-    decision = RouteDecision(route="mwv", reason="trigger:tools", risk_flags=["tools"])
-    agent._record_unknown_skill_candidate("fix tests", decision)  # noqa: SLF001
-    agent._record_unknown_skill_candidate("fix tests", decision)  # noqa: SLF001
+    agent._record_unknown_skill_candidate(
+        "fix tests",
+        SkillMatchDecision(
+            status="no_match", match=None, alternatives=[], reason="no_pattern_match"
+        ),
+    )  # noqa: SLF001
+    agent._record_unknown_skill_candidate(
+        "fix tests",
+        SkillMatchDecision(
+            status="no_match", match=None, alternatives=[], reason="no_pattern_match"
+        ),
+    )  # noqa: SLF001
     files = list((tmp_path / "skills" / "_candidates").glob("*.md"))
     assert len(files) == 1
 

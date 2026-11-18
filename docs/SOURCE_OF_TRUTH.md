@@ -151,7 +151,7 @@ Providers без complete reported usage не могут продолжить м
   отдельного Memory confirm. Закрытие не удаляет историю чата. Точный flow описан в
   `docs/agent/COMMAND_LANE_POLICY.md`.
 - Engineering skills: current `implemented` contract — instructions и supporting dependencies
-  внедряются per run в Auto v1; MWV report/UI наблюдают выбранный skill и terminal status. Brain
+  внедряются per run в Auto v1; UI наблюдает выбранный skill и terminal status. Brain
   не мутируется, tool/approval/sandbox/verifier полномочия не расширяются.
 
 ## Submitted producer report
@@ -198,7 +198,7 @@ Snapshot verified principal читается под существующим age
 user-role сообщение с preferences входит в Ask/chat (sync/stream), Auto и Desktop перед
 исходным user goal; system prompts и policy/approval authority не изменяются.
 Balanced + пустые инструкции сохраняют прежний request. Preferences не добавляются
-в историю чата, Memory или context logs. Structured Plan/MWV без model request
+в историю чата, Memory или context logs. Structured Plan без model request
 не использует их для изменения packet/operations. Существующий native tool continuation
 сохраняет исходные messages даже после изменения Settings. Bearer `/v1` использует defaults
 и не импортирует browser preferences.

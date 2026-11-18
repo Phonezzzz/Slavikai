@@ -12,17 +12,12 @@ from typing import Literal, Protocol, cast
 
 from aiohttp import web
 
-from core.agent_mwv import MWVExecutionCancelled, TaskPacketApprovalPending
-from core.mwv.manager import MWVRunResult
 from core.mwv.models import (
     MWVMessage,
     TaskPacket,
     TaskStepContract,
-    VerificationStatus,
-    WorkStatus,
     with_task_packet_hash,
 )
-from core.mwv.verifier_summary import extract_verifier_excerpt
 from core.plan_execute import (
     PlanExecuteResult,
     PlanLoopApprovalPending,
@@ -118,7 +113,7 @@ class RuntimeModelResolverProtocol(Protocol):
 
 
 class PlanRunnerAgentProtocol(Protocol):
-    """Протокол Agent, достаточный для запуска плана (MWV и canonical loop)."""
+    """Протокол Agent, достаточный для запуска плана (canonical loop)."""
 
     tools_enabled: dict[str, bool]
     tool_registry: ToolRegistry
@@ -140,26 +135,6 @@ class PlanRunnerAgentProtocol(Protocol):
     def _build_tool_gateway(self, *, budget: RunBudget | None = None) -> ToolGateway: ...
 
     def _get_main_brain(self) -> Brain: ...
-
-    def run_task_packet(
-        self,
-        packet: TaskPacket,
-        context: object,
-        *,
-        cancellation_token: asyncio.Event | None = None,
-    ) -> MWVRunResult: ...
-
-    def resume_task_packet(
-        self,
-        identity: str,
-        packet: TaskPacket,
-        *,
-        cancellation_token: asyncio.Event | None = None,
-    ) -> MWVRunResult: ...
-
-    def validate_mwv_approval(self, identity: str, packet: TaskPacket) -> None: ...
-
-    def cancel_mwv_approval(self, identity: str) -> None: ...
 
 
 def get_plan_loop_checkpoints(app: web.Application) -> PlanLoopCheckpoints:
@@ -696,47 +671,11 @@ def compute_plan_completion_state(plan: dict[str, JSONValue]) -> str:
     return "running"
 
 
-def _task_execution_payload(
-    *,
-    packet: TaskPacket,
-    run_result: MWVRunResult,
-    step_results: list[dict[str, JSONValue]],
-    stop_reason_code: str | None,
-) -> dict[str, JSONValue]:
-    verification = run_result.verification_result
-    excerpt = verification.excerpt or extract_verifier_excerpt(
-        verification,
-        max_lines=3,
-        max_chars=300,
-    )
-    payload: dict[str, JSONValue] = {
-        "runner": "mwv_packet_runner",
-        "task_packet_hash": packet.packet_hash,
-        "attempt": run_result.attempt,
-        "max_attempts": run_result.max_attempts,
-        "work_status": run_result.work_result.status.value,
-        "verifier_status": verification.status.value,
-        "work_summary": run_result.work_result.summary,
-        "verification_excerpt": excerpt,
-        "step_results": step_results,
-        "elapsed_ms": run_result.work_result.elapsed_ms,
-        "files_touched": run_result.work_result.files_touched,
-        "tool_calls_used": run_result.work_result.tool_calls_used,
-        "diff_size": run_result.work_result.diff_size,
-        "root_cause_tag": run_result.work_result.root_cause_tag,
-        "verifier_fail_type": verification.fail_type,
-        "verifier_profile": verification.verifier_profile,
-    }
-    if stop_reason_code is not None:
-        payload["stop_reason_code"] = stop_reason_code
-    return payload
-
-
 def _step_evidence(
     snapshot: dict[str, JSONValue],
     *,
     utc_now_iso_fn: Callable[[], str],
-    runner: str = "mwv_packet_runner",
+    runner: str = "canonical_tool_loop",
 ) -> dict[str, JSONValue]:
     return {
         "runner": runner,
@@ -757,7 +696,7 @@ def _apply_step_results_to_plan(
         dict[str, JSONValue],
     ],
     utc_now_iso_fn: Callable[[], str],
-    runner: str = "mwv_packet_runner",
+    runner: str = "canonical_tool_loop",
 ) -> dict[str, JSONValue]:
     updated = plan
     for snapshot in step_results:
@@ -841,7 +780,7 @@ async def run_plan_runner(
         failed_plan = plan_with_status_fn(plan, "failed")
         failed_task = task_with_status_fn(task, "failed", None)
         failed_task["execution"] = {
-            "runner": "mwv_packet_runner",
+            "runner": "canonical_tool_loop",
             "status": "failed",
             "error": "task_packet_invalid",
         }
@@ -864,7 +803,7 @@ async def run_plan_runner(
         failed_plan = plan_with_status_fn(plan, "failed")
         failed_task = task_with_status_fn(task, "failed", None)
         failed_task["execution"] = {
-            "runner": "mwv_packet_runner",
+            "runner": "canonical_tool_loop",
             "status": "failed",
             "error": "model_not_selected",
         }
@@ -917,7 +856,7 @@ async def run_plan_runner(
         cancellation_token = execution_token
         started = False
         loop_result: PlanExecuteResult | None = None
-        failure_runner = "mwv_packet_runner"
+        failure_runner = "canonical_tool_loop"
 
         async def publish_cancelled(
             owned_plan: dict[str, JSONValue], owned_task: dict[str, JSONValue]
@@ -925,7 +864,7 @@ async def run_plan_runner(
             cancelled_plan = plan_with_status_fn(owned_plan, "cancelled")
             cancelled_task = task_with_status_fn(owned_task, "cancelled", None)
             cancelled_task["execution"] = {
-                "runner": "mwv_packet_runner",
+                "runner": "canonical_tool_loop",
                 "status": "cancelled",
                 "cancelled": True,
             }
@@ -933,9 +872,6 @@ async def run_plan_runner(
                 session_id, mode="act", active_plan=cancelled_plan, active_task=cancelled_task
             )
             if resume_checkpoint_id is not None:
-                existing = await provider.get_existing_for_current_task(scope)
-                if existing is not None:
-                    existing.cancel_mwv_approval(resume_checkpoint_id)
                 get_plan_loop_checkpoints(app).take(resume_checkpoint_id)
 
         try:
@@ -961,7 +897,7 @@ async def run_plan_runner(
                     failed_plan = plan_with_status_fn(plan, "failed")
                     failed_task = task_with_status_fn(task, "failed", None)
                     failed_task["execution"] = {
-                        "runner": "mwv_packet_runner",
+                        "runner": "canonical_tool_loop",
                         "status": "failed",
                         "error": "model_configuration_changed",
                     }
@@ -1059,35 +995,9 @@ async def run_plan_runner(
                                 session_id, approved_categories - added_categories
                             )
                 else:
-                    # Legacy resume MWV-чекпоинта (E01-T08 удалит эту ветку).
-                    if (
-                        checkpoint_id != resume_checkpoint_id
-                        or execution.get("status") != "waiting_approval"
-                    ):
-                        return False
-                    agent.validate_mwv_approval(resume_checkpoint_id, packet)
-                    added_categories = (session_categories or set()) - approved_categories
-                    try:
-                        if added_categories:
-                            await session_store.approve(scope, added_categories)
-                            approved_categories |= added_categories
-                            agent.set_session_context(session_id, approved_categories)
-                        run_result = await _run_owned_sync_thread(
-                            lambda: agent.resume_task_packet(
-                                resume_checkpoint_id, packet, cancellation_token=execution_token
-                            ),
-                            execution_token,
-                        )
-                        started = True
-                    except TaskPacketApprovalPending:
-                        started = True
-                        raise
-                    finally:
-                        if not started and added_categories:
-                            await session_store.revoke(scope, added_categories)
-                            agent.set_session_context(
-                                session_id, approved_categories - added_categories
-                            )
+                    # E01-T08: legacy MWV-чекпоинты не резюмятся: локальные
+                    # runtime-данные одноразовые, старый чекпоинт отклоняется.
+                    return False
             elif execution.get("status") == "waiting_approval":
                 return False
             else:
@@ -1109,94 +1019,6 @@ async def run_plan_runner(
                 )
                 started = True
 
-        except TaskPacketApprovalPending as exc:
-            try:
-                approval_payload = serialize_approval_request_fn(exc.request)
-                if approval_payload is None:
-                    agent.cancel_mwv_approval(exc.checkpoint_id)
-                    failed_plan = plan_with_status_fn(plan, "failed")
-                    failed_task = task_with_status_fn(task, "failed", exc.blocked_step_id)
-                    failed_task["execution"] = {
-                        "runner": "mwv_packet_runner",
-                        "status": "failed",
-                        "error": "approval_payload_missing",
-                    }
-                    await hub.set_session_workflow(
-                        session_id,
-                        mode="act",
-                        active_plan=failed_plan,
-                        active_task=failed_task,
-                    )
-                    return True
-                plan = _apply_step_results_to_plan(
-                    plan,
-                    step_results=exc.step_results
-                    + [
-                        {
-                            "step_id": exc.blocked_step_id,
-                            "description": next(
-                                (
-                                    snapshot.get("description")
-                                    for snapshot in exc.step_results
-                                    if snapshot.get("step_id") == exc.blocked_step_id
-                                ),
-                                exc.blocked_step_id,
-                            ),
-                            "status": "waiting_approval",
-                            "operation": None,
-                            "result": "Требуется подтверждение",
-                            "tool_calls_used": 0,
-                            "changes": [],
-                        }
-                    ],
-                    plan_mark_step_fn=plan_mark_step_fn,
-                    utc_now_iso_fn=utc_now_iso_fn,
-                )
-                task = task_with_status_fn(task, "running", exc.blocked_step_id)
-                task["execution"] = {
-                    "runner": "mwv_packet_runner",
-                    "status": "waiting_approval",
-                    "blocked_step_id": exc.blocked_step_id,
-                    "checkpoint_id": exc.checkpoint_id,
-                }
-                ui_decision = build_ui_approval_decision_fn(
-                    approval_payload,
-                    session_id,
-                    "plan.execute_runner",
-                    {
-                        "plan_id": plan_id,
-                        "task_id": task_id,
-                        "plan_revision": plan.get("plan_revision"),
-                        "blocked_step_id": exc.blocked_step_id,
-                        "checkpoint_id": exc.checkpoint_id,
-                    },
-                    packet.trace_id,
-                    decision_workflow_context_fn("act", plan, task),
-                )
-                await hub.set_session_workflow_and_decision(
-                    session_id,
-                    mode="act",
-                    active_plan=plan,
-                    active_task=task,
-                    decision=ui_decision,
-                )
-            except Exception:  # noqa: BLE001
-                agent.cancel_mwv_approval(exc.checkpoint_id)
-                logging.getLogger(__name__).exception("MWV approval publication failed")
-                failed_plan = dict(plan, status="failed")
-                failed_task = dict(task, status="failed", current_step_id=None)
-                failed_task["execution"] = {
-                    "runner": "mwv_packet_runner",
-                    "status": "failed",
-                    "error": "approval_publication_failed",
-                }
-                try:
-                    await hub.set_session_workflow(
-                        session_id, active_plan=failed_plan, active_task=failed_task
-                    )
-                except Exception:  # noqa: BLE001
-                    logging.getLogger(__name__).exception("MWV approval failure publication failed")
-            return True
         except PlanLoopApprovalPending as exc:
             checkpoint = exc.checkpoint
             try:
@@ -1305,9 +1127,6 @@ async def run_plan_runner(
                         "plan loop approval failure publication failed"
                     )
             return True
-        except MWVExecutionCancelled:
-            await publish_cancelled(plan, task)
-            return True
         except Exception as exc:  # noqa: BLE001
             if resume_checkpoint_id is not None and not started:
                 return False
@@ -1379,67 +1198,9 @@ async def run_plan_runner(
                     logging.getLogger(__name__).exception("plan loop terminal publication failed")
             return True
 
-        try:
-            step_results_raw = run_result.work_result.diagnostics.get("step_results")
-            step_results = (
-                [dict(item) for item in step_results_raw if isinstance(item, dict)]
-                if isinstance(step_results_raw, list)
-                else []
-            )
-            plan = _apply_step_results_to_plan(
-                plan,
-                step_results=step_results,
-                plan_mark_step_fn=plan_mark_step_fn,
-                utc_now_iso_fn=utc_now_iso_fn,
-            )
-            stop_reason_code_raw = run_result.work_result.diagnostics.get("stop_reason_code")
-            stop_reason_code = (
-                stop_reason_code_raw if isinstance(stop_reason_code_raw, str) else None
-            )
-            if run_result.work_result.diagnostics.get("cancelled") is True:
-                plan = plan_with_status_fn(plan, "cancelled")
-                task = task_with_status_fn(task, "cancelled", None)
-            elif (
-                run_result.work_result.status == WorkStatus.SUCCESS
-                and run_result.verification_result.status == VerificationStatus.PASSED
-            ):
-                plan = plan_with_status_fn(plan, "completed")
-                task = task_with_status_fn(task, "completed", None)
-            else:
-                plan = plan_with_status_fn(plan, "failed")
-                task = task_with_status_fn(task, "failed", None)
-            task["execution"] = _task_execution_payload(
-                packet=packet,
-                run_result=run_result,
-                step_results=step_results,
-                stop_reason_code=stop_reason_code,
-            )
-            await hub.set_session_workflow(
-                session_id,
-                mode="act",
-                active_plan=plan,
-                active_task=task,
-            )
-        except Exception:  # noqa: BLE001
-            # Execution is already settled in the owning Agent. Projection cannot
-            # make its consumed approval pending again or discard typed evidence.
-            logging.getLogger(__name__).exception("MWV terminal projection failed")
-            failed_plan = dict(plan, status="failed")
-            failed_task = dict(task, status="failed", current_step_id=None)
-            failed_task["execution"] = {
-                "runner": "mwv_packet_runner",
-                "status": "failed",
-                "error": "terminal_projection_failed",
-                "task_id": packet.task_id,
-            }
-            try:
-                await hub.set_session_workflow(
-                    session_id, active_plan=failed_plan, active_task=failed_task
-                )
-            except Exception:  # noqa: BLE001
-                logging.getLogger(__name__).exception("MWV terminal publication failed")
-
-        return True
+        # E01-T08: legacy MWV-путь удалён; сюда доходит только canonical loop,
+        # чей результат обработан выше. Без loop_result — fail-closed.
+        return False
 
 
 def utc_now_iso() -> str:

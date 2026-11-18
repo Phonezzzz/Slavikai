@@ -15,7 +15,7 @@
 
 В репозитории уже есть устойчивые тестовые слои, которые фактически выражены через path/name conventions:
 
-- `tests/test_mwv_*.py` — MWV, runtime и verifier orchestration.
+- `tests/test_verifier_*.py` — честный verifier и его orchestration; `tests/test_legacy_mwv_routing_removed.py` — gate E01-T08 (production не маршрутизирует в MWV).
 - `tests/test_auto_*.py` — auto runtime и orchestrator flows.
 - `tests/test_http*.py` — HTTP/server/API слой.
 - `tests/ui_api/*.py` — UI API, sessions, approvals, settings, events и workspace flows.
@@ -29,7 +29,6 @@
 
 В `pyproject.toml` зарегистрирован vocabulary markers:
 
-- `mwv`
 - `auto`
 - `http_api`
 - `ui_api`
@@ -46,7 +45,7 @@
 Текущий рекомендуемый selection в этом репозитории основан на path/name conventions:
 
 ```bash
-venv/bin/python -m pytest tests/test_mwv_*.py
+venv/bin/python -m pytest tests/test_verifier_*.py
 venv/bin/python -m pytest tests/test_auto_*.py
 venv/bin/python -m pytest tests/test_http*.py
 venv/bin/python -m pytest tests/ui_api
@@ -58,7 +57,7 @@ make test-behavior
 Если нужен только просмотр состава suite без запуска:
 
 ```bash
-venv/bin/python -m pytest --collect-only -q tests/test_mwv_*.py
+venv/bin/python -m pytest --collect-only -q tests/test_verifier_*.py
 venv/bin/python -m pytest --collect-only -q tests/test_auto_*.py
 venv/bin/python -m pytest --collect-only -q tests/test_http*.py
 venv/bin/python -m pytest --collect-only -q tests/ui_api
@@ -73,7 +72,7 @@ venv/bin/python -m pytest --no-cov --collect-only -m behavior -q
 
 Текущий explicit behavior layer в этом репозитории специально узкий. Он включает только curated subset уже существующих сильных сценарных тестов:
 
-- MWV happy path с реальным workspace change.
+- Canonical loop happy path с реальным workspace change (auto preset parity, `tests/test_auto_preset.py`).
 - Auto approval/resume flow.
 - UI approval persistence.
 - UI retry/resume flow.
@@ -88,7 +87,7 @@ venv/bin/python -m pytest --no-cov --collect-only -m behavior -q
 
 Ниже зафиксирован минимальный mapping "тип изменения -> какие suites запускать". Это guidance для selection, а не новый policy gate.
 
-- MWV/runtime/verifier changes -> `tests/test_mwv_*.py`
+- Verifier/runtime changes -> `tests/test_verifier_*.py`, `tests/test_plan_execute.py`, `tests/test_legacy_mwv_routing_removed.py`
   Если меняется внешний workflow или пользовательский runtime flow, дополнительно смотреть `tests/test_*contract*.py` или `tests/test_*e2e*.py` по релевантности.
 - Auto orchestration changes -> `tests/test_auto_*.py`
   Если change затрагивает cross-flow orchestration, дополнительно смотреть `tests/test_*e2e*.py`.
