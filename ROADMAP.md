@@ -418,10 +418,10 @@ Final outcome
 | Epic | Tickets | Статус |
 |---|---:|---|
 | E00 — baseline/docs | 3 | E00-T01 DONE; E00-T02 DONE; E00-T03 DONE |
-| E01 — canonical execution | 9 | E01 T01–T08 DONE, T09 BLOCKED; E02 blocked |
+| E01 — canonical execution | 9 | E01 T01–T08 DONE, T09 IN_REVIEW (stock verifier); E02 blocked |
 | E02 — persistent browser | 8 | BLOCKED (E01-T09 blocked) |
 | E03 — Host Bridge / Desktop Commander | 11 | READY после E02 |
-| E04 — workspace/executor | 6 | T03 slice IN_PROGRESS (prerequisite E01-T09); остальное NEEDS_REFINEMENT |
+| E04 — workspace/executor | 6 | T03 slice DONE (PR #164, main 7affb3f); остальное NEEDS_REFINEMENT |
 | E05 — verification/recovery | 7 | NEEDS_REFINEMENT |
 | E06 — modes/policy/UI | 6 | NEEDS_REFINEMENT |
 | E07 — memory/context | 5 | NEEDS_REFINEMENT |
@@ -949,11 +949,11 @@ This ticket's acceptance (instrumentation test for model-originated state-changi
 
 **Gate.** Только после этого E02.
 
-##### E01-T09 implementation — verified 2026-11-18 (baseline d36fd64)
+##### E01-T09 implementation — verified 2026-11-19 (baseline 7affb3f)
 
-**Status:** BLOCKED (Codex P1 round 5, 2026-11-18, комментарий 4617540542). E01 T01–T08 DONE, T09 BLOCKED; gate перед E02 НЕ пройден. Проводка и тесты в ветке сохранены (см. ниже); merge не делать до решения Technical Director.
+**Status:** IN_REVIEW (prerequisite E04-T03 slice MERGED, PR #164, main 7affb3f). E01 T01–T08 DONE, T09 — E2E через штатный verifier; gate перед E02 НЕ пройден до merge PR #163.
 
-**Что сделано.** Новый `tests/test_canonical_loop_e2e.py` (6 тестов): scripted brain (fixture модели) вызывает настоящие `workspace_read`/`workspace_write` через настоящие `ToolRegistry` + `ToolGateway` + `AgentToolLoop` во временном managed workspace; observation возвращается модели (write делается из прочитанного содержимого). Production-проводка: `_execute_frame()` (`AutoPresetRunner.run()` и `resume()`) передаёт результат `_verify_after_loop()` в каноническую деривацию `outcome_from_loop_result()` через `Verification.from_verification_result()`; `verifier=None` и ранний выход `FAILED_VERIFIER` при провале проверки сохранены; деривация доступна наружу как `AutoRunOutcome.canonical_outcome`. Новый E2E успеха доказывает цепочку runner → verifier result → DONE: сценарий идёт через `AutoPresetRunner.run()` с реальным canonical verifier, а DONE проверяется на outcome самого runner.
+**Что сделано.** Новый `tests/test_canonical_loop_e2e.py` (7 тестов): scripted brain (fixture модели) вызывает настоящие `workspace_read`/`workspace_write` через настоящие `ToolRegistry` + `ToolGateway` + `AgentToolLoop` во временном managed workspace; observation возвращается модели (write делается из прочитанного содержимого). Production-проводка: `_execute_frame()` (`AutoPresetRunner.run()` и `resume()`) передаёт результат `_verify_after_loop()` в каноническую деривацию `outcome_from_loop_result()` через `Verification.from_verification_result()`; `verifier=None` и ранний выход `FAILED_VERIFIER` при провале проверки сохранены; деривация доступна наружу как `AutoRunOutcome.canonical_outcome`. Новый E2E успеха доказывает цепочку runner → verifier result → DONE: сценарий идёт через `AutoPresetRunner.run()` со штатным `VerifierRuntime` (canonical make check в контейнере на staged snapshot через квалифицированный rootless backend среза E04-T03; executor + binding выводятся из production wiring агента), а DONE проверяется на outcome самого runner. Плюс отдельный тест без backend: Makefile есть, критерий зафиксирован, executor не подключён → FAILED_VERIFIER (`sandbox_execution_unavailable`), процесс не запускается.
 
 **Ветви acceptance.**
 - Fail tool → FAILED: запись `../escape.txt` — настоящий отказ gateway (`Путь вне рабочей директории запрещён`); loop завершается чисто (отказ — observation, не ошибка loop), а preset возвращает FAILED_WORKER через fail-closed gate `_has_failed_tool_call` (`error_code=tool_failure_unrecovered`).
@@ -963,11 +963,11 @@ This ticket's acceptance (instrumentation test for model-originated state-changi
 
 **Находка при реализации (не баг продукта, зафиксирована тестом).** `ManagedWorkspace.create` выделяет подкаталог внутри tmp_path — `workspace.root`, а не сам tmp_path; source.txt пишется в `workspace.root`. `workspace_read` обязан регистрироваться с `capability="read"`: с capability по умолчанию (`exec`) gateway считает эффекты чтения неизвестными (`AutoFileEffects.complete=False`), и последующий write через preset отклоняется (`workspace_file_effects_unknown`). В production-регистрации read-инструментов capability уже read; тест фиксирует это требование.
 
-**Намеренно оставлено.** BLOCKED как отдельный исход не покрыт: `RunPhase.BLOCKED` — нетерминальная фаза, loop её как терминал не выдаёт; approval-пауза (WAITING_APPROVAL) покрыта портированными тестами `tests/test_auto_preset.py`. Замокана только модель (scripted Brain); canonical verifier в новом E2E — тестовый executor (`_ExecutingVerifierRuntime`), гоняющий реальную canonical команду (`make check` по `result.txt`) через subprocess: штатный `VerifierRuntime.run()` команду не исполняет вообще и всегда возвращает `sandbox_verification_unavailable` — это отдельный пробел исполнения, зафиксирован здесь без расширения PR #163 (ближайшая зависимость — E04-T03 real workspace executor; поведение при недоступном executor — E05-T03; не в этот тикет).
+**Намеренно оставлено.** BLOCKED как отдельный исход не покрыт: `RunPhase.BLOCKED` — нетерминальная фаза, loop её как терминал не выдаёт; approval-пауза (WAITING_APPROVAL) покрыта портированными тестами `tests/test_auto_preset.py`. Замокана только модель (scripted Brain); test-only executor `_ExecutingVerifierRuntime` удалён — E2E идёт штатным `VerifierRuntime` на квалифицированном backend. Полная семантика UNVERIFIED/BLOCKED — E05-T03, не в этот тикет.
 
-**Tests.** `make check` зелёный (2446 passed, coverage 83.18%). Новый `tests/test_canonical_loop_e2e.py` (6 тестов: missing verifier → UNVERIFIED, confirmed postcondition → DONE через production-деривацию, failing tool → FAILED_WORKER, preset run без fake verification, preset run с canonical verifier → DONE на `canonical_outcome`, failing canonical verifier → FAILED_VERIFIER). Чувствительность нового E2E проверена двумя красными прогонами по отдельности: verifier пропущен (`verification=None`) — тест падает при COMPLETED с UNKNOWN; результат verifier потерян до деривации — тест падает при PASSED verifier и UNKNOWN canonical outcome.
+**Tests.** `make check` зелёный (2486 passed, coverage 83.11%). Новый `tests/test_canonical_loop_e2e.py` (7 тестов: missing verifier → UNVERIFIED, confirmed postcondition → DONE через production-деривацию, failing tool → FAILED_WORKER, preset run без fake verification, preset run со штатным canonical verifier → DONE на `canonical_outcome`, preset run без backend → FAILED_VERIFIER (`sandbox_execution_unavailable`), failing canonical verifier → FAILED_VERIFIER). Real-backend E2E на хосте (opt-in `SLAVIK_RUN_QUALIFIED_VERIFIER_E2E=1`): верный result.txt → DONE (36.48s), неверный → FAILED_VERIFIER (37.08s); живой workspace не изменён, кроме созданного loop result.txt. Чувствительность перепроверена на штатном пути двумя красными прогонами по отдельности: verifier пропущен (`verification=None`) — тест падает (`outcome.verifier is None`); аргумент `verification=` убран из деривации — тест падает (`canonical_outcome` не DONE).
 
-**Зависимость.** Gate требует штатного process verifier: узкий срез E04-T03 — prerequisite; до его merge E01-T09 не закрывается, E02 не начинается. Работа по тикету сохранена в PR #163 (ветка `pr-e01-t09-e2e-canonical-loop`); после merge среза — возврат к #163 и прогон E2E без `_ExecutingVerifierRuntime` через штатный `VerifierRuntime`.
+**Зависимость.** Prerequisite выполнен: срез E04-T03 MERGED (PR #164, 2026-11-19, main 7affb3f); E2E в PR #163 идёт штатным `VerifierRuntime` без test-only executor. E01-T09 закрывается merge PR #163 после зелёного CI и чистого Codex review; E02 начинается только после этого.
 
 ### Epic E02 — Persistent Browser Session Resource
 
@@ -1222,9 +1222,9 @@ upload → external/write
 
 **Доказательство (отдельный PR).** Штатный `VerifierRuntime` на реальном квалифицированном backend: верный `result.txt` → PASSED, неверный → FAILED, недоступный backend → ERROR без запуска процесса. Полный `make check` самого SlavikAI внутри sandbox — вне scope среза (репозиторий нельзя заснять в managed workspace: symlink/размеры; в образе нет node/venv). Публикация shell tools модели — E04-T04, полная семантика UNVERIFIED/BLOCKED — E05-T03.
 
-**Порядок.** Срез — prerequisite перед закрытием E01-T09: после merge среза возврат к PR #163, E2E без `_ExecutingVerifierRuntime` через штатный путь; E01-T09 закрывается только после DONE через штатный путь + негативные сценарии без DONE. До этого #163 остаётся BLOCKED, E02 ждёт.
+**Порядок.** Срез MERGED (PR #164, 2026-11-19, main 7affb3f); возврат к PR #163 выполнен — E2E идёт штатным путём без `_ExecutingVerifierRuntime`. E01-T09 закрывается только после DONE через штатный путь + негативные сценарии без DONE; до merge #163 E02 ждёт.
 
-**Статус:** IN_PROGRESS, ветка `pr-e04-t03-slice-process-verifier` от `origin/main` `d36fd64`.
+**Статус:** DONE — PR #164 MERGED 2026-11-19 ручным fast-forward push, новый `main` — `7affb3f`.
 
 #### E04-T04 — tool qualification
 
