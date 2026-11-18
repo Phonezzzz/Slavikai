@@ -25,6 +25,7 @@ from llm.stream_model import Done, Error, StreamEvent, TextDelta, Usage
 from llm.types import LLMResult, ToolSpec, WebSearchEvidence
 from shared.models import LLMMessage, ToolRequest, ToolResult
 from shared.tool_capture import CaptureBinding
+from tools.tool_registry import ExecutionMode
 
 if TYPE_CHECKING:
     import logging
@@ -199,6 +200,7 @@ class AgentRoutingMixin:
             *,
             safe_mode_override: bool | None = None,
             confirmed_decision: bool = False,
+            run_mode: ExecutionMode | None = None,
         ) -> ToolResult: ...
         def _build_tool_gateway(
             self,
@@ -208,6 +210,7 @@ class AgentRoutingMixin:
             safe_mode_override: bool | None = None,
             confirmed_decision: bool = False,
             budget: RunBudget | None = None,
+            run_mode: ExecutionMode | None = None,
         ) -> ToolGateway: ...
         def _append_report_block(
             self,
@@ -376,9 +379,6 @@ class AgentRoutingMixin:
                         record_in_history=record_in_history,
                     )
                 )
-            if skill_decision is not None and skill_decision.status == "no_match":
-                self._record_unknown_inbox(last_content, skill_decision)
-                self._record_unknown_skill_candidate(last_content, skill_decision)
             return self._run_chat_response(messages, last_content, record_in_history)
         except ApprovalRequired as exc:
             self._capture_chat_approval(exc, last_content, record_in_history=record_in_history)
@@ -569,10 +569,6 @@ class AgentRoutingMixin:
                 self.last_stream_response_raw = response
                 yield from _text_response_events(response)
                 return
-
-            if skill_decision is not None and skill_decision.status == "no_match":
-                self._record_unknown_inbox(last_content, skill_decision)
-                self._record_unknown_skill_candidate(last_content, skill_decision)
 
             yield from self._run_chat_response_stream(
                 messages,

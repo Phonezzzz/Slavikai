@@ -197,8 +197,9 @@ class DummyAgent:
         raw_input: str | None = None,
         *,
         confirmed_decision: bool = False,
+        run_mode: str | None = None,
     ) -> ToolResult:
-        del args, raw_input, confirmed_decision
+        del args, raw_input, confirmed_decision, run_mode
         return ToolResult.failure(f"Инструмент {name} не поддерживается в тестовом агенте")
 
 
@@ -213,6 +214,7 @@ class TtsAgent(DummyAgent):
         self.audio_path = audio_path
         self.fail_message = fail_message
         self.last_tts_args: dict[str, JSONValue] | None = None
+        self.last_tts_run_mode: str | None = None
 
     def call_tool(
         self,
@@ -221,8 +223,10 @@ class TtsAgent(DummyAgent):
         raw_input: str | None = None,
         *,
         confirmed_decision: bool = False,
+        run_mode: str | None = None,
     ) -> ToolResult:
         del confirmed_decision
+        self.last_tts_run_mode = run_mode
         if name != "tts":
             return super().call_tool(name, args=args, raw_input=raw_input)
         self.last_tts_args = dict(args or {})

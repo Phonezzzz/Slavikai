@@ -991,10 +991,14 @@ async def handle_ui_tts_speak(request: web.Request) -> web.Response:
         args["format"] = format_raw.strip().lower()
 
     try:
+        # User-initiated speak action: explicit act execution context.
+        # The chat default stays ask (TTS is capability="exec" and would
+        # otherwise hit ASK_READ_ONLY_BLOCK in a fresh session).
         result = agent.call_tool(
             "tts",
             args,
             raw_input="ui:tts",
+            run_mode="act",
         )
     except ApprovalRequired:
         return error_response(

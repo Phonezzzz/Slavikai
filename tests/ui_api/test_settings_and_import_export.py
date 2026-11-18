@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from core.agent import Agent
+from llm.brain_base import Brain
+from llm.types import LLMResult, ModelConfig
+from shared.models import LLMMessage
+
 # ruff: noqa: F403,F405
 from .fakes import *
 
@@ -945,3 +950,61 @@ def test_ui_chats_export_import_endpoints() -> None:
             await client.close()
 
     asyncio.run(run())
+
+
+class _TtsSpeakDummyBrain(Brain):
+    def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
+        del messages, config
+        return LLMResult(text="ok")
+
+
+def test_ui_tts_speak_works_in_default_ask_mode(monkeypatch, tmp_path) -> None:
+    """Codex P2, PR #162: /ui/api/tts/speak must work in a fresh session.
+
+    The default runtime mode is ask and TTS is capability="exec", so the
+    endpoint has to run the user-initiated speak action under an explicit
+    act execution context instead of relying on the chat mode.
+    """
+    audio_dir = tmp_path / "sandbox" / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = audio_dir / "tts_test.mp3"
+    audio_path.write_bytes(b"fake-mp3")
+    monkeypatch.setattr("server.http.handlers.settings._SANDBOX_AUDIO_ROOT", audio_dir.resolve())
+
+    agent = Agent(
+        brain=_TtsSpeakDummyBrain(),
+        enable_tools={"tts": True, "safe_mode": False},
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
+    assert agent.runtime_mode == "ask"
+
+    def _stub_tts(request: ToolRequest) -> ToolResult:
+        del request
+        return ToolResult.success(
+            {
+                "file_path": str(audio_path),
+                "format": "mp3",
+                "voice": "test-voice",
+                "voice_id": "test-voice",
+            }
+        )
+
+    agent.tool_registry.register("tts", _stub_tts, enabled=True, capability="exec")
+
+    async def run() -> None:
+        client = await _create_client(agent)
+        try:
+            response = await client.post(
+                "/ui/api/tts/speak",
+                json={"text": "Привет, мир", "voice_id": "nova"},
+            )
+            assert response.status == 200
+            assert response.headers.get("Content-Type") == "audio/mp3"
+            assert await response.read() == b"fake-mp3"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+    # The speak action must not flip the chat default.
+    assert agent.runtime_mode == "ask"

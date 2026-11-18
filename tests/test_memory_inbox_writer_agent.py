@@ -29,33 +29,60 @@ def _make_agent(tmp_path: Path) -> agent_module.Agent:
     return agent
 
 
-def test_unknown_request_writes_inbox(tmp_path: Path, monkeypatch) -> None:
-    # E01-T08: MWV-пути нет; unknown-запрос пишется в inbox из legacy
-    # fallthrough (plan/act) перед обычным chat loop.
+def _no_match_decision(_text: str) -> SkillMatchDecision:
+    return SkillMatchDecision(
+        status="no_match",
+        match=None,
+        alternatives=[],
+        reason="no_pattern_match",
+    )
+
+
+def _assert_no_unknown_side_effects(agent, tmp_path: Path) -> None:
+    inbox = agent._memory_inbox_store.list_items(MemoryCategory.INBOX, limit=10)
+    assert len(inbox.items) == 0
+    candidates_dir = tmp_path / "candidates"
+    assert list(candidates_dir.glob("*.md")) == []
+
+
+def test_unknown_request_does_not_write_inbox(tmp_path: Path, monkeypatch) -> None:
+    # Codex P1, PR #162: ordinary chat ("привет", no skill match) in the
+    # plan/act chat-fallback must NOT write to the Memory inbox or create
+    # a skill candidate file. Memory writes stay behind an explicit
+    # confirmed action.
+    from core.skills.candidates import SkillCandidateWriter
+
     agent = _make_agent(tmp_path)
-    agent.runtime_mode = "act"
-    monkeypatch.setenv("SKILLS_CANDIDATES_DIR", str(tmp_path / "candidates"))
+    agent.runtime_mode = "plan"
+    agent._skill_candidate_writer = SkillCandidateWriter(  # noqa: SLF001
+        candidates_dir=tmp_path / "candidates"
+    )
+    monkeypatch.setattr(agent.skill_index, "match_decision", _no_match_decision)
 
-    def _no_match(_text: str) -> SkillMatchDecision:
-        return SkillMatchDecision(
-            status="no_match",
-            match=None,
-            alternatives=[],
-            reason="no_pattern_match",
-        )
-
-    monkeypatch.setattr(agent.skill_index, "match_decision", _no_match)
-
-    response = agent.respond([LLMMessage(role="user", content="поправь баг в коде")]).text
+    response = agent.respond([LLMMessage(role="user", content="привет")]).text
     assert response.startswith("ok")
 
-    inbox = agent._memory_inbox_store.list_items(MemoryCategory.INBOX, limit=10)
-    assert len(inbox.items) == 1
-    assert inbox.items[0].category == MemoryCategory.INBOX
-    assert "Неизвестный запрос" in inbox.items[0].content
+    _assert_no_unknown_side_effects(agent, tmp_path)
 
-    notes = agent._memory_inbox_store.list_items(MemoryCategory.NOTES, limit=10)
-    assert len(notes.items) == 0
+
+def test_unknown_request_does_not_write_inbox_stream(tmp_path: Path, monkeypatch) -> None:
+    # Same as above, streaming branch of the chat-fallback.
+    from core.skills.candidates import SkillCandidateWriter
+    from llm.stream_model import Done
+
+    agent = _make_agent(tmp_path)
+    agent.runtime_mode = "plan"
+    agent._skill_candidate_writer = SkillCandidateWriter(  # noqa: SLF001
+        candidates_dir=tmp_path / "candidates"
+    )
+    monkeypatch.setattr(agent.skill_index, "match_decision", _no_match_decision)
+
+    events = list(
+        agent.respond_stream([LLMMessage(role="user", content="привет")], cancellation_token=None)
+    )
+    assert any(isinstance(event, Done) for event in events)
+
+    _assert_no_unknown_side_effects(agent, tmp_path)
 
 
 def test_disabled_command_lane_tool_does_not_write_tool_fail_inbox(

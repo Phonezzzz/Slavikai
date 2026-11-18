@@ -30,6 +30,7 @@ from shared.memory_companion_models import FeedbackLabel, FeedbackRating
 from shared.models import JSONValue, LLMMessage, ToolResult
 from shared.task_run import TaskRun
 from shared.tool_capture import CaptureBinding
+from tools.tool_registry import ExecutionMode
 
 
 class SessionApprovalStore:
@@ -204,6 +205,7 @@ class AgentProtocol(Protocol):
         raw_input: str | None = None,
         *,
         confirmed_decision: bool = False,
+        run_mode: ExecutionMode | None = None,
     ) -> ToolResult: ...
 
     def build_memory_save_preview(

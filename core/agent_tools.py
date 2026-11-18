@@ -81,6 +81,7 @@ from shared.sandbox import normalize_sandbox_path
 from shared.sandbox_execution import sandbox_execution_failure
 from shared.task_run import TaskRun
 from shared.tool_capture import CaptureBinding
+from tools.tool_registry import ExecutionMode
 from tools.workspace_tools import MAX_FILE_BYTES, WORKSPACE_ROOT
 
 SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD = 3
@@ -748,10 +749,21 @@ class AgentToolsMixin:
             return
         self.runtime_workspace_root = str(candidate)
 
-    def _run_spec(self, *, budget: RunBudget | None = None) -> RunSpec:
-        """Derive the run contract from the Agent's runtime state."""
+    def _run_spec(
+        self,
+        *,
+        budget: RunBudget | None = None,
+        mode: ExecutionMode | None = None,
+    ) -> RunSpec:
+        """Derive the run contract from the Agent's runtime state.
+
+        An explicit ``mode`` overrides the Agent's runtime mode for this
+        single run only (e.g. a user-initiated UI action such as TTS speak
+        runs under an act context while the chat default stays ask).
+        The Agent's ``runtime_mode`` is never mutated here.
+        """
         return build_run_spec(
-            mode=getattr(self, "runtime_mode", "ask"),
+            mode=getattr(self, "runtime_mode", "ask") if mode is None else mode,
             active_plan=getattr(self, "runtime_active_plan", None),
             active_task=getattr(self, "runtime_active_task", None),
             enforce_plan_guard=bool(getattr(self, "runtime_plan_guard_enabled", False)),
@@ -782,11 +794,12 @@ class AgentToolsMixin:
         safe_mode_override: bool | None = None,
         confirmed_decision: bool = False,
         budget: RunBudget | None = None,
+        run_mode: ExecutionMode | None = None,
     ) -> ToolGateway:
         # E01-T02: the run carries its own policy snapshot, built here
         # from the runtime state. The global ToolRegistry mode is no
         # longer mutated on the run path.
-        spec = self._run_spec(budget=budget)
+        spec = self._run_spec(budget=budget, mode=run_mode)
 
         computer_log: ComputerActivityLog | None = getattr(self, "_computer_log", None)
 
@@ -1098,6 +1111,7 @@ class AgentToolsMixin:
         raw_input: str | None = None,
         *,
         confirmed_decision: bool = False,
+        run_mode: ExecutionMode | None = None,
     ) -> ToolResult:
         if name == "workspace_run":
             # Ручной resume хранит категории, а не immutable workspace approval.
@@ -1108,6 +1122,7 @@ class AgentToolsMixin:
             raw_input or f"tool:{name}",
             request,
             confirmed_decision=confirmed_decision,
+            run_mode=run_mode,
         )
 
     def _call_tool_logged(
@@ -1117,6 +1132,7 @@ class AgentToolsMixin:
         *,
         safe_mode_override: bool | None = None,
         confirmed_decision: bool = False,
+        run_mode: ExecutionMode | None = None,
     ) -> ToolResult:
         pre_call = None
         post_call = None
@@ -1128,6 +1144,7 @@ class AgentToolsMixin:
             post_call=post_call,
             safe_mode_override=safe_mode_override,
             confirmed_decision=confirmed_decision,
+            run_mode=run_mode,
         )
         try:
             result = gateway.call(request)

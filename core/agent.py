@@ -721,7 +721,8 @@ class Agent(AgentRoutingMixin, AgentToolsMixin, AgentMemoryMixin):
             args["voice_id"] = voice_id
         if fmt:
             args["format"] = fmt
-        return self.call_tool("tts", args=args, raw_input="api:tts")
+        # User-initiated speak: explicit act context, chat default stays ask.
+        return self.call_tool("tts", args=args, raw_input="api:tts", run_mode="act")
 
     def transcribe_audio(self, file_path: str, language: str | None = None) -> ToolResult:
         args: dict[str, JSONValue] = {"file_path": file_path}
