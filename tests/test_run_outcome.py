@@ -32,6 +32,7 @@ from core.agent import Agent
 from core.mwv.models import VerificationResult, VerificationStatus, WorkStatus
 from core.run_outcome import (
     Disposition,
+    PostconditionCheck,
     RunOutcome,
     RunPhase,
     TerminalReason,
@@ -478,6 +479,62 @@ def test_outcome_from_loop_result_policy_stop_is_aborted_not_failed() -> None:
     errored = AgentToolLoopResult(text="", messages=[], error="provider down")
     outcome = outcome_from_loop_result(errored, state_changing=True)
     assert outcome.terminal_reason is TerminalReason.FAILED
+    assert outcome.ui_label == "FAILED"
+
+
+def test_outcome_from_loop_result_attached_verification() -> None:
+    # Codex review (PR #163, P1): the E2E DONE branch hand-built its
+    # RunOutcome, so a runtime that stopped running the verifier or
+    # ignored its result would not break the test. The derivation now
+    # accepts a verification produced by a real postcondition check,
+    # and DONE still depends on production code (is_full_done).
+    loop_result = AgentToolLoopResult(text="done", messages=[])
+    passed = Verification(
+        outcome=VerificationOutcome.PASSED,
+        checks=(PostconditionCheck(name="result.txt content", passed=True),),
+        source="workspace_read result.txt",
+    )
+    outcome = outcome_from_loop_result(loop_result, state_changing=True, verification=passed)
+    assert outcome.verification is passed
+    assert outcome.terminal_reason is TerminalReason.COMPLETED
+    assert outcome.disposition is Disposition.FULL
+    assert outcome.is_full_done is True
+    assert outcome.ui_label == "DONE"
+    assert outcome.communication_class == "final_success"
+
+
+def test_outcome_from_loop_result_attached_failed_verification_is_not_done() -> None:
+    # An attached failed check never becomes DONE and never rewrites
+    # the terminal reason: completed + full with verification failed
+    # is UNVERIFIED, and no final is published.
+    loop_result = AgentToolLoopResult(text="done", messages=[])
+    failed = Verification(
+        outcome=VerificationOutcome.FAILED,
+        checks=(PostconditionCheck(name="result.txt content", passed=False),),
+        source="workspace_read result.txt",
+    )
+    outcome = outcome_from_loop_result(loop_result, state_changing=True, verification=failed)
+    assert outcome.terminal_reason is TerminalReason.COMPLETED
+    assert outcome.is_full_done is False
+    assert outcome.ui_label == "UNVERIFIED"
+    assert outcome.communication_class is None
+
+
+def test_outcome_from_loop_result_attached_verification_ignored_on_loop_error() -> None:
+    # A loop that stopped says nothing about the postcondition, even
+    # when the caller passes a verification: cancelled / errored
+    # branches keep verification unknown.
+    passed = Verification(outcome=VerificationOutcome.PASSED)
+    cancelled = AgentToolLoopResult(text="", messages=[], cancelled=True)
+    outcome = outcome_from_loop_result(cancelled, state_changing=True, verification=passed)
+    assert outcome.terminal_reason is TerminalReason.CANCELLED
+    assert outcome.verification.outcome is VerificationOutcome.UNKNOWN
+    assert outcome.ui_label == "CANCELLED"
+
+    errored = AgentToolLoopResult(text="", messages=[], error="provider down")
+    outcome = outcome_from_loop_result(errored, state_changing=True, verification=passed)
+    assert outcome.terminal_reason is TerminalReason.FAILED
+    assert outcome.verification.outcome is VerificationOutcome.UNKNOWN
     assert outcome.ui_label == "FAILED"
 
 

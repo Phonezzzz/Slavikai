@@ -14,8 +14,10 @@ observation возвращается модели, а исход выводит�
 - нет verifier -> UNVERIFIED, не DONE: completed + full +
   verification unknown, final не публикуется;
 - подтверждённый postcondition -> DONE: completed + full +
-  verification passed (настоящая перепроверка чтением файла через
-  тот же gateway), ``is_full_done``, final_success.
+  verification passed (настоящая перепроверка чтением файла через тот
+  же gateway), приложенная к деривации ``outcome_from_loop_result``:
+  phase / terminal_reason / disposition вычисляет production-код,
+  а не сам тест; ``is_full_done``, final_success.
 
 Замокано только одно: сама модель (scripted Brain). Loop, gateway,
 registry, tools, workspace, postcondition-check и деривация outcome —
@@ -35,7 +37,6 @@ from core.response_preferences import ResponsePreferences
 from core.run_outcome import (
     Disposition,
     PostconditionCheck,
-    RunOutcome,
     RunPhase,
     TerminalReason,
     Verification,
@@ -285,13 +286,12 @@ def test_e2e_confirmed_postcondition_is_done(tmp_path) -> None:
     assert verification.outcome is VerificationOutcome.PASSED
     assert verification.checks[0].passed is True
 
-    outcome = RunOutcome(
-        phase=RunPhase.TERMINAL,
-        terminal_reason=TerminalReason.COMPLETED,
-        disposition=Disposition.FULL,
-        verification=verification,
-        state_changing=True,
-    )
+    # Исход — через production-деривацию, с приложенной проверкой:
+    # если runtime перестанет учитывать verification, is_full_done /
+    # ui_label / final это покажут — DONE требует verification=passed
+    # именно от деривации, а не от конструктора, собранного тестом.
+    outcome = outcome_from_loop_result(loop_result, state_changing=True, verification=verification)
+    assert outcome.verification is verification
     assert outcome.is_full_done is True
     assert outcome.ui_label == "DONE"
     assert outcome.communication_class == "final_success"

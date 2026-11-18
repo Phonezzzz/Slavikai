@@ -359,6 +359,7 @@ def outcome_from_loop_result(
     loop_result: AgentToolLoopResult,
     *,
     state_changing: bool,
+    verification: Verification | None = None,
     accepted_by: str | None = None,
 ) -> RunOutcome:
     """Derive a terminal outcome from an AgentToolLoopResult.
@@ -374,6 +375,15 @@ def outcome_from_loop_result(
       postcondition: for a state-changing task the verification stays
       unknown (UNVERIFIED, not DONE) until a real check passes; for a
       task that changes no state, not_applicable confirms it.
+    - A caller that ran a real postcondition check after the loop may
+      attach its ``verification``: it replaces the default unknown /
+      not_applicable evidence on the clean-finish branch only, and it
+      never rewrites the terminal reason — DONE still requires
+      verification=passed (or not_applicable for a task that changes
+      no state). A failed check therefore yields completed + full with
+      verification failed: UNVERIFIED, no final published, never DONE.
+      Cancelled / errored loops keep verification unknown: the loop
+      stopping says nothing about the postcondition.
     """
     disposition = Disposition.ACCEPTED_PARTIAL if accepted_by else Disposition.NONE
     if loop_result.cancelled:
@@ -404,11 +414,12 @@ def outcome_from_loop_result(
             state_changing=state_changing,
             accepted_by=accepted_by if disposition is Disposition.ACCEPTED_PARTIAL else None,
         )
-    verification = (
-        Verification.unknown(source="tool_loop")
-        if state_changing
-        else Verification.not_applicable(source="tool_loop")
-    )
+    if verification is None:
+        verification = (
+            Verification.unknown(source="tool_loop")
+            if state_changing
+            else Verification.not_applicable(source="tool_loop")
+        )
     disposition = Disposition.ACCEPTED_PARTIAL if accepted_by else Disposition.FULL
     return RunOutcome(
         phase=RunPhase.TERMINAL,
