@@ -949,7 +949,23 @@ This ticket's acceptance (instrumentation test for model-originated state-changi
 
 **Gate.** Только после этого E02.
 
-**Статус:** READY.
+##### E01-T09 implementation — verified 2026-11-18 (baseline d36fd64)
+
+**Status:** DONE (acceptance met). E01 закрыт 9/9; gate перед E02 пройден.
+
+**Что сделано.** Новый `tests/test_canonical_loop_e2e.py` (4 теста): scripted brain (fixture модели) вызывает настоящие `workspace_read`/`workspace_write` через настоящие `ToolRegistry` + `ToolGateway` + `AgentToolLoop` во временном managed workspace; observation возвращается модели (write делается из прочитанного содержимого); исход выводится канонической деривацией `outcome_from_loop_result` / конструктором `RunOutcome` с настоящим postcondition-check (перечитывание файла через тот же gateway).
+
+**Ветви acceptance.**
+- Fail tool → FAILED: запись `../escape.txt` — настоящий отказ gateway (`Путь вне рабочей директории запрещён`); loop завершается чисто (отказ — observation, не ошибка loop), а preset возвращает FAILED_WORKER через fail-closed gate `_has_failed_tool_call` (`error_code=tool_failure_unrecovered`).
+- Missing verifier → UNVERIFIED: чистый loop, `outcome_from_loop_result(state_changing=True)` → completed + full + verification unknown → `ui_label=UNVERIFIED`, `is_full_done=False`, `communication_class=None`.
+- Confirmed postcondition → DONE: тот же сценарий + настоящий postcondition-check (`workspace_read` перечитывает `result.txt`, сравнение с ожидаемым) → verification passed → `RunOutcome` completed + full + passed → `is_full_done`, `ui_label=DONE`, `final_success`.
+- Плюс preset-level: тот же сценарий через `AutoPresetRunner` → COMPLETED, `verifier=None`, `tool_calls_used=2`, `files_touched=1` — production wiring не заявляет верификации, которой нет.
+
+**Находка при реализации (не баг продукта, зафиксирована тестом).** `ManagedWorkspace.create` выделяет подкаталог внутри tmp_path — `workspace.root`, а не сам tmp_path; source.txt пишется в `workspace.root`. `workspace_read` обязан регистрироваться с `capability="read"`: с capability по умолчанию (`exec`) gateway считает эффекты чтения неизвестными (`AutoFileEffects.complete=False`), и последующий write через preset отклоняется (`workspace_file_effects_unknown`). В production-регистрации read-инструментов capability уже read; тест фиксирует это требование.
+
+**Намеренно оставлено.** BLOCKED как отдельный исход не покрыт: `RunPhase.BLOCKED` — нетерминальная фаза, loop её как терминал не выдаёт; approval-пауза (WAITING_APPROVAL) покрыта портированными тестами `tests/test_auto_preset.py`. Замокана только модель (scripted Brain); verifier — отсутствие canonical verifier в non-repo workspace (честный `None`, не stub).
+
+**Tests.** `make check` зелёный (2441 passed, coverage 83.17%). Новый `tests/test_canonical_loop_e2e.py` (4 теста: missing verifier → UNVERIFIED, confirmed postcondition → DONE, failing tool → FAILED_WORKER, preset run без fake verification).
 
 **Зависимость.** Gate требует штатного process verifier: узкий срез E04-T03 — prerequisite; до его merge E01-T09 не закрывается, E02 не начинается. Работа по тикету сохранена в PR #163 (ветка `pr-e01-t09-e2e-canonical-loop`); после merge среза — возврат к #163 и прогон E2E без `_ExecutingVerifierRuntime` через штатный `VerifierRuntime`.
 

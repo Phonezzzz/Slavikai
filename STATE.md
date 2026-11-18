@@ -1,20 +1,20 @@
 # SlavikAI Worker State
 
-**Source of truth:** [ROADMAP.md](ROADMAP.md) · [Рабочее соглашение Muse](slavikai-how-to-work-with-muse.md) · [Git workflow](docs/workflow/dev_workflow.md). Это зафиксированный снимок от 2026-11-18, синхронизирован с merge PR #161 (main `9a431ed`); перед любым действием Muse перепроверяет Git, CI, review и актуальный `main`.
+**Source of truth:** [ROADMAP.md](ROADMAP.md) · [Рабочее соглашение Muse](slavikai-how-to-work-with-muse.md) · [Git workflow](docs/workflow/dev_workflow.md). Это зафиксированный снимок от 2026-11-18, синхронизирован с merge PR #162 (main `d36fd64`); перед любым действием Muse перепроверяет Git, CI, review и актуальный `main`.
 
 ## Два Git worktree — подтверждено на ПК владельца 2026-11-16
 
 | Назначение | Путь | Ветка на момент фиксации | HEAD | Право Muse |
 |---|---|---|---|---|
 | Исходный проект владельца | `/home/ki/Project/Slavikai` | `main` | `fca51c2fdcecd5d2b37c554105af44e3d925f348` | **Только read-only без изменения checkout** |
-| Перестройка под Muse | `/home/ki/Project/Slavikai-rebuild` | `muse/slavikai-rebuild` | `9a431ed338abcf4affdf41b8c93132bb437ac040` | **Единственная рабочая директория для roadmap** |
+| Перестройка под Muse | `/home/ki/Project/Slavikai-rebuild` | `muse/slavikai-rebuild` | `d36fd64e23e444c1304932d6a5c0000e6abfa8ef` | **Единственная рабочая директория для roadmap** |
 
-- Команда `git worktree list --porcelain` подтвердила обе записи. Второе дерево создано от `main` на `470a9a6` и синхронизировано самой Мусей fast-forward до `fca51c2`, затем до `4c9515a` (merge PR #153) 2026-11-16, до `c5e5543` (merge PR #154) 2026-11-17 и до `58ce9f4` (merge PR #155) 2026-11-17 и до `c198659` (merge PR #156) 2026-11-17 и до `637d3ed` (merge PR #157) 2026-11-17 и до `125da46` (merge PR #158) 2026-11-17 и до `09cbd53` (merge PR #159) 2026-11-17 и до `649bf90` (merge PR #160) 2026-11-18 и до `9a431ed` (merge PR #161) 2026-11-18; **никаких implementation-изменений внутри не выполнялось**.
-- `origin/main` на момент проверки: `9a431ed338abcf4affdf41b8c93132bb437ac040`; локальный `main` оригинального checkout — `fca51c2` (позади remote; владелец подтянет сам, Muse исходный checkout не трогает).
+- Команда `git worktree list --porcelain` подтвердила обе записи. Второе дерево создано от `main` на `470a9a6` и синхронизировано самой Мусей fast-forward до `fca51c2`, затем до `4c9515a` (merge PR #153) 2026-11-16, до `c5e5543` (merge PR #154) 2026-11-17 и до `58ce9f4` (merge PR #155) 2026-11-17 и до `c198659` (merge PR #156) 2026-11-17 и до `637d3ed` (merge PR #157) 2026-11-17 и до `125da46` (merge PR #158) 2026-11-17 и до `09cbd53` (merge PR #159) 2026-11-17 и до `649bf90` (merge PR #160) 2026-11-18 и до `9a431ed` (merge PR #161) 2026-11-18 и до `d36fd64` (merge PR #162) 2026-11-18; **никаких implementation-изменений внутри не выполнялось**.
+- `origin/main` на момент проверки: `d36fd64e23e444c1304932d6a5c0000e6abfa8ef`; локальный `main` оригинального checkout — `fca51c2` (позади remote; владелец подтянет сам, Muse исходный checkout не трогает).
 - Исходный checkout: tracked-файлы clean, имеется один **посторонний untracked** `ystemctl status cloudflared.service`. Не удалять, не включать в PR и не пытаться очищать.
 - Ветку `muse/slavikai-rebuild` использовать как служебную точку возвращения, не коммитить тикеты в неё. На каждый тикет Muse создаёт новую PR-ветку от актуального `origin/main`.
 - Третьи worktree или копии без отдельного согласования не создавать; параллельные implementation-тикеты запрещены.
-- **Worktree не backup**: исходный code baseline зафиксирован immutable commit `470a9a63280f9dac392f559a6fe99115db2e50d0` (merge PR #151); текущий `main` — `9a431ed338abcf4affdf41b8c93132bb437ac040` (E01-T07 auto preset, PR #161). Историю и изменения исходного checkout не переписывать.
+- **Worktree не backup**: исходный code baseline зафиксирован immutable commit `470a9a63280f9dac392f559a6fe99115db2e50d0` (merge PR #151); текущий `main` — `d36fd64e23e444c1304932d6a5c0000e6abfa8ef` (E01-T08 legacy MWV removal, PR #162). Историю и изменения исходного checkout не переписывать.
 
 ## PR #151 — завершён
 
@@ -87,9 +87,9 @@
 - Служебная ветка `muse/slavikai-rebuild` обновлена fast-forward `649bf90..9a431ed`.
 - **Статус:** `DONE`. E01-T07 done; E01-T08 next.
 
-## E01-T08: ветка pr-e01-t08-remove-legacy-mwv-routing — PR #162 (открыт, gates pending)
+## E01-T08: ветка pr-e01-t08-remove-legacy-mwv-routing — PR #162 (MERGED, main d36fd64)
 
-- Ветка `pr-e01-t08-remove-legacy-mwv-routing` от `origin/main` `9a431ed` (merge PR #161). PR #162 открыт; merge — после GitHub CI и чистого Codex review, ручной fast-forward push по соглашению.
+- Ветка `pr-e01-t08-remove-legacy-mwv-routing` от `origin/main` `9a431ed` (merge PR #161). PR #162 MERGED 2026-11-18, ручной fast-forward push по соглашению, новый `main` — `d36fd64`.
 - Содержимое: удаление legacy classifier/MWV production routing — удалены `core/agent_mwv.py`, `core/mwv/routing.py`, `core/mwv/manager.py`, `core/mwv/coding_skill.py`, `coding_task.py`, `single_attempt.py`, `worker.py`, `interfaces.py`; `classify_request`/`ManagerRuntime`/`MWVRunResult`/`run_task_packet`/`cancel_mwv_approval` удалены из production; default `runtime_mode` — `ask`, fallthrough — в обычный chat loop; root-gate больше не срабатывает (его триггером был legacy classifier); новый gate-тест `tests/test_legacy_mwv_routing_removed.py`; claims registry sync (3 claims); доки переписаны (`ROUTING_POLICY.md`, `MWV_FLOW.md` — stub); ROADMAP.md record + STATE.md sync.
 - Локальные гейты: `make check` зелёный (2435 passed, coverage 83.19%).
 - **Статус:** IN_REVIEW. E01-T08 done (по локальным гейтам); E01-T09 — после merge среза E04-T03.
@@ -99,6 +99,15 @@
 - Ветка `pr-e04-t03-slice-process-verifier` от `origin/main` `d36fd64`. Узкий срез E04-T03 как prerequisite перед закрытием E01-T09; один активный тикет.
 - Содержимое: отдельный pinned image `python:3.12.16-bookworm` с make (Id `28d30c15…`, digest `sha256:3c3ba8ad…`) и его квалификация (профиль `i1-ubuntu-podman-5.7-command-bounded-v1`, Python profile не тронут); `create_command_container` с allowlist ровно `["make", "-B", "-r", "-f", "Makefile", "check"]`; no-publish исполнитель на staged snapshot (`release_unpublished`); опциональный `executor` в `VerifierRuntime` с маппингом PASSED/FAILED/ERROR; fail-closed `_verify_after_loop` (backend недоступен → ERROR, не `None`); два условия владельца в спеках: (1) запуск `make check` явно разрешён для конкретного run и привязан к principal/workspace/qualified environment — наличие Makefile разрешения не даёт; (2) критерий проверки задаёт доверенная сторона до запуска агента, хэш `Makefile` фиксируется до loop, несовпадение → ERROR. Доказательство: верный `result.txt` → PASSED, неверный → FAILED, недоступный backend → ERROR без запуска процесса; полный `make check` репозитория в sandbox — вне scope. ROADMAP.md record (E04-T01 решение, E04-T03 slice, E01-T09 зависимость) + STATE.md sync.
 - **Статус:** IN_PROGRESS. После merge — возврат к PR #163 и E2E без `_ExecutingVerifierRuntime`; E01-T09 закрывается только после DONE через штатный путь + негативные сценарии без DONE.
+
+- **Статус:** `DONE`. E01-T08 done; E01-T09 next.
+
+## E01-T09: ветка pr-e01-t09-e2e-canonical-loop — PR (открыт, gates pending)
+
+- Ветка `pr-e01-t09-e2e-canonical-loop` от `origin/main` `d36fd64` (merge PR #162). PR открыт; merge — после GitHub CI и чистого Codex review, ручной fast-forward push по соглашению.
+- Содержимое: первый немоканный acceptance test канонического цикла — новый `tests/test_canonical_loop_e2e.py` (4 теста): scripted brain вызывает настоящие read/write tools через настоящие ToolRegistry + ToolGateway + AgentToolLoop; ветви acceptance: fail tool → FAILED_WORKER (preset, fail-closed gate), missing verifier → UNVERIFIED (не DONE), confirmed postcondition → DONE (настоящая перепроверка чтением файла); preset-level: COMPLETED + `verifier=None`, без fake verification. ROADMAP.md record + STATE.md sync; E01 закрыт 9/9, gate перед E02 пройден.
+- Локальные гейты: `make check` зелёный (2441 passed, coverage 83.17%).
+- **Статус:** IN_REVIEW. E01-T09 done (по локальным гейтам); E02 next.
 
 ## Текущая очередь
 
@@ -113,6 +122,7 @@
 - **E01-T06 — DONE** (Plan как artifact, Execute как обычный run: новый `core/plan_execute.py` — validate/execute/resume approved plan через canonical loop; `run_plan_runner` — свежие запуски только canonical loop, resume старых MWV-чекпоинтов — legacy-ветка; baseline `09cbd53`). Evidence: запись в ROADMAP.md (E01-T06 implementation + mini-audit; исправлен порядок compile пакета в прямом act-пути; ревизия — CAS-счётчик, контент привязан хешем), 11 новых тестов в `tests/test_plan_execute.py` + переведённый на canonical loop `tests/ui_api/test_modes_and_plan.py` (20 кейсов + lifecycle + draft/approve без write tools), `make check` зелёный (2538 passed, coverage 83.73%); ветка `pr-e01-t06-plan-artifact`.
 - **E01-T07 — DONE** (Auto → policy preset: новый `core/auto_preset.py` — Auto как policy preset поверх canonical loop; удалены `core/auto_runtime.py`, `core/auto_agent.py`, `tests/test_auto_runtime.py` (театр planner/coders/merge и фейковые PASSED); честный verifier `_verify_after_loop` + завершение по канонической деривации `outcome_from_loop_result`; baseline `649bf90`). Evidence: запись в ROADMAP.md (E01-T07 implementation + mini-audit; parity-тест `test_auto_preset_parity_write_scenario` — настоящий `WriteFileTool` через canonical loop, файл создан, COMPLETED, `verifier is None`, `files_touched == 1`; claims registry: `runtime.auto.v1_tool_loop` → `runtime.auto.preset_canonical_loop`), новый `tests/test_auto_preset.py` + 9 портированных тестовых файлов, `make check` зелёный (2553 passed, coverage 83.75%); ветка `pr-e01-t07-auto-policy-preset`.
 - **E01-T08 — DONE** (удалён legacy classifier/MWV production routing: `core/agent_mwv.py`, `core/mwv/routing.py`, `core/mwv/manager.py` и MWV-путь чата удалены; default `runtime_mode` — `ask`; root-gate больше не срабатывает). Evidence: запись в ROADMAP.md (E01-T08 implementation + mini-audit; отступления от брифа — `set_runtime_state` не нормализует режимы, root-gate не срабатывает), новый `tests/test_legacy_mwv_routing_removed.py` (9 тестов) + переведённые тесты, `make check` зелёный (2435 passed, coverage 83.19%); ветка `pr-e01-t08-remove-legacy-mwv-routing`, PR #162.
+- **E01-T09 — DONE** (regression E2E canonical loop: первый немоканный acceptance test — scripted brain, настоящие read/write tools, ToolRegistry + ToolGateway + AgentToolLoop, observation, postcondition; ветви: fail tool → FAILED_WORKER, missing verifier → UNVERIFIED, confirmed postcondition → DONE). Evidence: запись в ROADMAP.md (E01-T09 implementation; находка — `workspace_read` обязан регистрироваться с `capability="read"`, иначе file-effects accounting preset'а отклоняет write; BLOCKED как терминал не покрыт — нетерминальная фаза, approval-пауза в `tests/test_auto_preset.py`), новый `tests/test_canonical_loop_e2e.py` (4 теста), `make check` зелёный (2441 passed, coverage 83.17%); ветка `pr-e01-t09-e2e-canonical-loop`.
 
 ## Readiness: 63 последовательных тикета
 
