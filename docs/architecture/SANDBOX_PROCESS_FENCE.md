@@ -182,20 +182,34 @@ terminal acceptance остаются target. Required process verifier оста�
   с frame (principal/session) и с текущей revision квалифицированного
   executor (live; в самом frame environment revision не хранится),
   а также требует совпадения run_root и квалифицированного профиля/
-  staging pool. Без binding или без доступного backend
-  `VerifierRuntime.run()` возвращает ERROR
+  staging pool. Тот же frame несёт обязательность проверки,
+  зафиксированную до loop: `repo_verification_required` (репозиторий
+  без доверенного критерия на старте) и `verifier_criterion_rejected`
+  (критерий отклонён безопасным чтением). Без binding или без доступного
+  backend `VerifierRuntime.run()` возвращает ERROR
   `sandbox_execution_unavailable`, процесс не запускается.
 - Условие 2 (критерий задаёт доверенная сторона): содержимое `Makefile`
   (цель `check`) задаётся до запуска агента; его sha256 фиксируется
   доверенным кодом раннера до начала loop и хранится вне agent-writable
-  workspace. Хэш сверяется дважды: ранний fail по живому workspace и
-  авторитетный — на байтах того же snapshot, который пойдёт в контейнер
-  (executor вычисляет sha256 snapshot'ного `Makefile` до `pool.prepare`).
+  workspace. Чтение критерия — ограниченное, по схеме bounded capture:
+  открытие через `O_NOFOLLOW | O_NONBLOCK` (FIFO не блокирует, symlink
+  не следует), сверка идентичности иноды через `fstat` до и после
+  чтения, лимит фактически прочитанных байтов (1 МиБ). Отсутствующий
+  критерий отличается от отклонённого: отклонённый (symlink, FIFO,
+  каталог, hardlink, переполнение лимита, изменение во время чтения)
+  даёт явный ERROR `verifier_criterion_rejected`, а не молчаливое
+  отсутствие проверки. Хэш сверяется дважды: ранний fail по живому
+  workspace (тем же безопасным чтением) и авторитетный — на байтах
+  того же snapshot, который пойдёт в контейнер (executor вычисляет
+  sha256 snapshot'ного `Makefile` до `pool.prepare`).
   Несовпадение или удаление файла даёт ERROR `verifier_criterion_changed`,
   никогда PASSED. Решение о том, что проверка обязательна, живёт вместе
-  с критерием до конца run: если критерий был зафиксирован, а `Makefile`
-  к концу run исчез, `_verify_after_loop` возвращает ERROR
-  `verifier_criterion_changed`, а не `None`. Без зафиксированного критерия
+  с критерием до конца run и переживает resume: если критерий был
+  зафиксирован, а `Makefile` к концу run исчез, `_verify_after_loop`
+  возвращает ERROR `verifier_criterion_changed`, а не `None`; если
+  репозиторий был без критерия на старте, тот же frame обязывает
+  вернуть ERROR `canonical_repo_verifier_unavailable` независимо от
+  файлов, появившихся во время loop. Без зафиксированного критерия
   `Makefile`, появившийся во время loop, никогда не исполняется.
 - Валидация до выделения stage: проверки скрипта (`workspace_run`) и
   критерия (verifier) выполняются до `pool.prepare()`, поэтому

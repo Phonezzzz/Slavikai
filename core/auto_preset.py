@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import stat
 import time
 import uuid
 from collections.abc import Callable
@@ -171,6 +172,15 @@ class _RunFrame:
     # Хэш Makefile, зафиксированный доверенным кодом до начала loop (условие 2
     # владельца): критерий проверки задаёт доверенная сторона, а не агент.
     verifier_criterion_sha256: str | None = None
+    # Обязательность repository verification, зафиксированная до loop:
+    # репозиторий без доверенного критерия на старте. Живёт в frame до
+    # конца run и переживает resume — файлы, появившиеся во время loop
+    # (в т.ч. подложенный Makefile), это решение не меняют.
+    repo_verification_required: bool = False
+    # Доверенный критерий на старте существовал, но был отклонён
+    # безопасным чтением (symlink, FIFO, нерегулярный файл, переполнение
+    # лимита): явный ERROR при verify, а не молчаливое None.
+    verifier_criterion_rejected: bool = False
 
 
 @dataclass
@@ -183,16 +193,82 @@ class AutoContinuationUnavailable(ValueError):
     pass
 
 
-def _criterion_sha256(run_root: Path) -> str | None:
-    """Хэш доверенного критерия проверки (Makefile) до запуска агента.
+# Верхний предел критерия (Makefile) при безопасном чтении: хэш считается
+# только по фактически прочитанным байтам, файл большего размера отклоняется.
+CRITERION_MAX_BYTES = 1_048_576
 
-    None — Makefile отсутствует или нечитаем: критерий не задан, verifier
-    такой run не проверяет.
+
+@dataclass(frozen=True)
+class _CriterionRead:
+    """Исход безопасного чтения критерия (Makefile) доверенным кодом.
+
+    ``ok`` — обычный файл прочитан целиком, ``sha256`` задан.
+    ``absent`` — файла нет: критерий не задан.
+    ``rejected`` — файл есть, но читать его как критерий нельзя
+    (symlink, FIFO, каталог, hardlink, переполнение лимита, изменение
+    во время чтения): ``reason`` называет причину отказа.
     """
+
+    status: str
+    sha256: str | None = None
+    reason: str | None = None
+
+
+def _criterion_fingerprint(info: os.stat_result) -> tuple[int, ...]:
+    """Идентичность иноды для сверки до/после чтения (схема bounded capture)."""
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+    )
+
+
+def _read_criterion(run_root: Path) -> _CriterionRead:
+    """Безопасно прочитать критерий проверки (Makefile) до запуска агента.
+
+    Та же схема, что у bounded capture в ``core.managed_workspace``:
+    открытие через ``O_NOFOLLOW | O_NONBLOCK`` (FIFO не блокирует,
+    symlink не следует), сверка идентичности иноды через ``fstat``
+    до и после чтения, лимит фактически прочитанных байтов. Проверка
+    типа делается по ``lstat`` до открытия, поэтому TOCTOU между
+    проверкой и открытием закрыт сверкой fingerprint, а не надеждой
+    на неизменность пути.
+    """
+    path = run_root / "Makefile"
     try:
-        return hashlib.sha256((run_root / "Makefile").read_bytes()).hexdigest()
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return _CriterionRead(status="absent")
     except OSError:
-        return None
+        return _CriterionRead(status="rejected", reason="criterion_unreadable")
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        return _CriterionRead(status="rejected", reason="criterion_not_regular_file")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    except OSError:
+        return _CriterionRead(status="rejected", reason="criterion_unreadable")
+    try:
+        if _criterion_fingerprint(os.fstat(fd)) != _criterion_fingerprint(info):
+            return _CriterionRead(status="rejected", reason="criterion_changed")
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(fd, min(65536, CRITERION_MAX_BYTES + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > CRITERION_MAX_BYTES:
+                return _CriterionRead(status="rejected", reason="criterion_too_large")
+            digest.update(chunk)
+        if _criterion_fingerprint(os.fstat(fd)) != _criterion_fingerprint(info):
+            return _CriterionRead(status="rejected", reason="criterion_changed")
+        return _CriterionRead(status="ok", sha256=digest.hexdigest())
+    except OSError:
+        return _CriterionRead(status="rejected", reason="criterion_unreadable")
+    finally:
+        os.close(fd)
 
 
 def _unavailable_verification() -> VerificationResult:
@@ -260,8 +336,14 @@ class AutoPresetRunner:
             run_root = self.workspace_root
         # Критерий проверки фиксируется доверенным кодом до запуска агента
         # (условие 2 владельца); resume его не перезахватывает — frame
-        # персистится в _PausedRun.
-        criterion_sha256 = _criterion_sha256(run_root)
+        # персистится в _PausedRun. Вместе с критерием фиксируется и
+        # обязательность проверки: репозиторий без доверенного критерия
+        # на старте (нет файла или критерий отклонён чтением) требует
+        # repository verification до конца run, что бы агент ни подложил
+        # во время loop.
+        criterion = _read_criterion(run_root)
+        criterion_sha256 = criterion.sha256 if criterion.status == "ok" else None
+        repo_verification_required = is_repo_workspace(run_root) and criterion.status != "ok"
         state: dict[str, JSONValue] = {
             "run_id": run_id_value,
             "status": AutoRunStatus.RUNNING.value,
@@ -309,6 +391,8 @@ class AutoPresetRunner:
             AutoFileEffects(budgets.max_files_touched),
             capture_binding,
             verifier_criterion_sha256=criterion_sha256,
+            repo_verification_required=repo_verification_required,
+            verifier_criterion_rejected=criterion.status == "rejected",
         )
         return self._execute_frame(frame, cancellation_token=cancellation_token)
 
@@ -538,6 +622,8 @@ class AutoPresetRunner:
                 loop_result=loop_result,
                 cancellation_token=cancellation_token,
                 criterion_sha256=frame.verifier_criterion_sha256,
+                criterion_rejected=frame.verifier_criterion_rejected,
+                repo_verification_required=frame.repo_verification_required,
                 principal_id=frame.principal_id,
                 session_id=frame.session_id,
             )
@@ -789,6 +875,8 @@ class AutoPresetRunner:
         loop_result: AgentToolLoopResult,
         cancellation_token: asyncio.Event | None = None,
         criterion_sha256: str | None = None,
+        criterion_rejected: bool = False,
+        repo_verification_required: bool = False,
         principal_id: str | None = None,
         session_id: str | None = None,
     ) -> VerificationResult | None:
@@ -806,13 +894,17 @@ class AutoPresetRunner:
         ``criterion_sha256`` was fixed before the loop, verification is
         mandatory until the end of the run. A Makefile deleted afterwards
         (or changed, or replaced on the staged snapshot) fails with
-        ``verifier_criterion_changed`` — never ``None``. Without a
-        pre-loop criterion there is no mandatory verification: a Makefile
-        planted by the agent mid-run is never executed. The only
-        exception is a repository workspace without a Makefile, which
-        fails honestly with ``canonical_repo_verifier_unavailable``.
-        A Makefile workspace whose backend is unavailable fails closed
-        with ``sandbox_execution_unavailable`` (ERROR, never ``None``).
+        ``verifier_criterion_changed`` — never ``None``. A criterion that
+        existed at start but was rejected by the bounded read fails with
+        ``verifier_criterion_rejected`` — never ``None`` either. The
+        repository obligation is fixed in ``_RunFrame`` before the loop
+        and survives resume: a repository without a trusted criterion at
+        start fails with ``canonical_repo_verifier_unavailable`` no matter
+        which files appeared by the end of the run. Without a recorded
+        obligation there is no mandatory verification: a Makefile planted
+        by the agent mid-run is never executed. A Makefile workspace
+        whose backend is unavailable fails closed with
+        ``sandbox_execution_unavailable`` (ERROR, never ``None``).
         The verifier runs the explicit ``make -f Makefile check`` on the
         staged snapshot; the executor re-checks the criterion hash on
         those exact bytes before any process starts.
@@ -833,11 +925,31 @@ class AutoPresetRunner:
                     verifier_profile="response_only",
                 )
             return None
+        if criterion_rejected:
+            # Критерий на старте существовал, но безопасное чтение его
+            # отклонило (symlink, FIFO, нерегулярный файл, переполнение
+            # лимита, изменение во время чтения): явный ERROR, а не
+            # молчаливое None и не запуск непроверенного файла.
+            reason = "verifier_criterion_rejected"
+            return VerificationResult(
+                status=VerificationStatus.ERROR,
+                command=[],
+                exit_code=None,
+                stdout="",
+                stderr=reason,
+                duration_seconds=0.0,
+                error=reason,
+                fail_type="criterion_rejected",
+                excerpt=reason,
+                verifier_profile="canonical",
+            )
         if criterion_sha256 is None:
             # Доверенный критерий до loop не зафиксирован: обязательной
             # проверки нет, и Makefile, появившийся во время loop
             # (его мог подложить агент), никогда не исполняется.
-            if is_repo_workspace(run_root) and not has_canonical_check_definition(run_root):
+            # Единственное исключение — обязанность, зафиксированная в
+            # frame до loop: репозиторий без критерия на старте.
+            if repo_verification_required:
                 reason = "canonical_repo_verifier_unavailable"
                 return VerificationResult(
                     status=VerificationStatus.ERROR,
@@ -873,8 +985,8 @@ class AutoPresetRunner:
         )
         if executor is None or binding is None or not executor.is_available():
             return _unavailable_verification()
-        current = _criterion_sha256(run_root)
-        if current != criterion_sha256:
+        current = _read_criterion(run_root)
+        if current.status != "ok" or current.sha256 != criterion_sha256:
             reason = "verifier_criterion_changed"
             return VerificationResult(
                 status=VerificationStatus.ERROR,

@@ -557,6 +557,8 @@ def test_verify_after_loop_missing_makefile_non_repo_returns_none(tmp_path):
 
 
 def test_verify_after_loop_repo_without_makefile_fails_honestly(tmp_path):
+    # Обязанность зафиксирована в frame до loop (репозиторий без
+    # критерия на старте): живого Makefile нет — ERROR, а не None.
     stub, workspace = _stub_parent(tmp_path)
     (workspace.root / ".git").mkdir()
     preset = AutoPresetRunner(stub, workspace_root=workspace.root)
@@ -566,10 +568,41 @@ def test_verify_after_loop_repo_without_makefile_fails_honestly(tmp_path):
         run_root=workspace.root,
         budgets=_budgets(),
         loop_result=_loop_result(),
+        repo_verification_required=True,
     )
     assert result is not None
     assert result.status == VerificationStatus.ERROR
     assert result.error == "canonical_repo_verifier_unavailable"
+
+
+def test_verify_after_loop_repo_planted_makefile_still_fails(tmp_path, monkeypatch):
+    # P1 round 4: репозиторий без критерия на старте, агент подложил
+    # Makefile во время loop. Флаг из frame обязывает вернуть ERROR
+    # независимо от появившегося файла; executor не вызывается.
+    stub, workspace = _stub_parent(tmp_path)
+    (workspace.root / ".git").mkdir()
+    (workspace.root / "Makefile").write_text(CHECK_MAKEFILE)
+    calls = []
+    executor = _fake_executor(_finished(0, stdout=b"ok\n"), calls=calls)
+    binding = workspace.bind(principal_id="alice", session_id="chat-a")
+    preset = AutoPresetRunner(stub, workspace_root=workspace.root)
+    monkeypatch.setattr(
+        AutoPresetRunner,
+        "_verifier_command_executor",
+        lambda self, root, **kwargs: (executor, binding),
+    )
+    result = preset._verify_after_loop(
+        run_id="r",
+        goal="check",
+        run_root=workspace.root,
+        budgets=_budgets(),
+        loop_result=_loop_result(),
+        repo_verification_required=True,
+    )
+    assert result is not None
+    assert result.status == VerificationStatus.ERROR
+    assert result.error == "canonical_repo_verifier_unavailable"
+    assert calls == []
 
 
 def test_verify_after_loop_deleted_criterion_fails(tmp_path, monkeypatch):
@@ -625,6 +658,133 @@ def test_verify_after_loop_planted_makefile_without_criterion_returns_none(tmp_p
         loop_result=_loop_result(),
     )
     assert result is None
+    assert calls == []
+
+
+# --- _read_criterion: bounded read, missing vs rejected ----------------
+
+
+def test_read_criterion_ok_for_regular_makefile(tmp_path):
+    from core.auto_preset import _read_criterion
+
+    (tmp_path / "Makefile").write_text(CHECK_MAKEFILE)
+    read = _read_criterion(tmp_path)
+    assert read.status == "ok"
+    assert read.sha256 == hashlib.sha256(CHECK_MAKEFILE.encode()).hexdigest()
+    assert read.reason is None
+
+
+def test_read_criterion_absent_when_no_makefile(tmp_path):
+    from core.auto_preset import _read_criterion
+
+    read = _read_criterion(tmp_path)
+    assert read.status == "absent"
+    assert read.sha256 is None
+
+
+def test_read_criterion_rejects_symlink(tmp_path):
+    from core.auto_preset import _read_criterion
+
+    target = tmp_path / "real.mk"
+    target.write_text(CHECK_MAKEFILE)
+    (tmp_path / "Makefile").symlink_to(target)
+    read = _read_criterion(tmp_path)
+    assert read.status == "rejected"
+    assert read.sha256 is None
+
+
+def test_read_criterion_rejects_fifo_without_blocking(tmp_path):
+    from core.auto_preset import _read_criterion
+
+    os.mkfifo(tmp_path / "Makefile")
+    read = _read_criterion(tmp_path)
+    assert read.status == "rejected"
+    assert read.sha256 is None
+
+
+def test_read_criterion_rejects_directory_and_hardlink(tmp_path):
+    from core.auto_preset import _read_criterion
+
+    (tmp_path / "Makefile").mkdir()
+    assert _read_criterion(tmp_path).status == "rejected"
+    (tmp_path / "Makefile").rmdir()
+    target = tmp_path / "real.mk"
+    target.write_text(CHECK_MAKEFILE)
+    os.link(target, tmp_path / "Makefile")
+    assert _read_criterion(tmp_path).status == "rejected"
+
+
+def test_read_criterion_rejects_oversized_makefile(tmp_path, monkeypatch):
+    from core import auto_preset
+    from core.auto_preset import _read_criterion
+
+    (tmp_path / "Makefile").write_bytes(b"x" * (auto_preset.CRITERION_MAX_BYTES + 1))
+    read = _read_criterion(tmp_path)
+    assert read.status == "rejected"
+    assert read.reason == "criterion_too_large"
+
+
+def test_verify_after_loop_rejected_criterion_fails(tmp_path, monkeypatch):
+    # P2 round 4: критерий на старте существовал, но был отклонён
+    # безопасным чтением — явный ERROR, а не None; executor не вызван.
+    # Проверяется и без репозитория: отклонённый критерий — ошибка сам
+    # по себе, а не только в repo-контексте.
+    stub, workspace = _stub_parent(tmp_path)
+    calls = []
+    executor = _fake_executor(_finished(0, stdout=b"ok\n"), calls=calls)
+    binding = workspace.bind(principal_id="alice", session_id="chat-a")
+    preset = AutoPresetRunner(stub, workspace_root=workspace.root)
+    monkeypatch.setattr(
+        AutoPresetRunner,
+        "_verifier_command_executor",
+        lambda self, root, **kwargs: (executor, binding),
+    )
+    result = preset._verify_after_loop(
+        run_id="r",
+        goal="check",
+        run_root=workspace.root,
+        budgets=_budgets(),
+        loop_result=_loop_result(),
+        criterion_rejected=True,
+    )
+    assert result is not None
+    assert result.status == VerificationStatus.ERROR
+    assert result.error == "verifier_criterion_rejected"
+    assert result.fail_type == "criterion_rejected"
+    assert calls == []
+
+
+def test_verify_after_loop_symlinked_makefile_after_loop_fails(tmp_path, monkeypatch):
+    # P2 round 4: критерий зафиксирован до loop, а к verify-time Makefile
+    # подменён symlink — живое перечитывание идёт тем же безопасным
+    # путём и даёт ERROR verifier_criterion_changed; executor не вызван.
+    stub, workspace = _stub_parent(tmp_path)
+    (workspace.root / "Makefile").write_text(CHECK_MAKEFILE)
+    criterion = hashlib.sha256(CHECK_MAKEFILE.encode()).hexdigest()
+    target = workspace.root / "real.mk"
+    target.write_text(CHECK_MAKEFILE)
+    (workspace.root / "Makefile").unlink()
+    (workspace.root / "Makefile").symlink_to(target)
+    calls = []
+    executor = _fake_executor(_finished(0, stdout=b"ok\n"), calls=calls)
+    binding = workspace.bind(principal_id="alice", session_id="chat-a")
+    preset = AutoPresetRunner(stub, workspace_root=workspace.root)
+    monkeypatch.setattr(
+        AutoPresetRunner,
+        "_verifier_command_executor",
+        lambda self, root, **kwargs: (executor, binding),
+    )
+    result = preset._verify_after_loop(
+        run_id="r",
+        goal="check",
+        run_root=workspace.root,
+        budgets=_budgets(),
+        loop_result=_loop_result(),
+        criterion_sha256=criterion,
+    )
+    assert result is not None
+    assert result.status == VerificationStatus.ERROR
+    assert result.error == "verifier_criterion_changed"
     assert calls == []
 
 

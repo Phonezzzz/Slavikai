@@ -335,6 +335,47 @@ def test_auto_resume_publishes_running_before_continuation(tmp_path, monkeypatch
     assert AutoRunStatus.RUNNING.value in seen_statuses[waiting_index:]
 
 
+def test_auto_resume_keeps_repo_verification_obligation(tmp_path, monkeypatch):
+    # P1 round 4: обязанность repository verification зафиксирована в
+    # _RunFrame до loop и переживает resume. Репозиторий без критерия
+    # на старте; пока run на паузе, агент подкладывает Makefile —
+    # после resume run всё равно завершается FAILED_VERIFIER с
+    # canonical_repo_verifier_unavailable, а не COMPLETED.
+    from core.approval_policy import ApprovalContext
+    from tests.test_tool_call_cap import BatchBrain, calls
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+    agent = _PresetAgent()
+    agent._brain = BatchBrain([calls("echo"), calls("network")])
+    dispatched = []
+    agent.tool_registry.register(
+        "echo",
+        lambda request, seen=dispatched: seen.append(request.name) or ToolResult.success({}),
+        capability="read",
+    )
+    agent.tool_registry.register(
+        "network",
+        lambda request, seen=dispatched: seen.append(request.name) or ToolResult.success({}),
+        capability="read",
+        risk_classes=["network"],
+    )
+    gateway = ToolGateway(
+        agent.tool_registry, approval_context=ApprovalContext(True, agent.user_id, set())
+    )
+    agent._build_tool_gateway = lambda current=gateway, budget=None: current
+    preset = auto_preset.AutoPresetRunner(agent, workspace_root=tmp_path)
+    with pytest.raises(ApprovalRequired):
+        preset.run("count")
+    assert agent.last_auto_state["status"] == AutoRunStatus.WAITING_APPROVAL.value
+    (tmp_path / "Makefile").write_text("check:\n\t@true\n")
+    outcome = preset.resume(agent.last_auto_state["run_id"])
+    assert dispatched == ["echo", "network"]
+    assert outcome.status == AutoRunStatus.FAILED_VERIFIER
+    assert outcome.verifier is not None
+    assert outcome.verifier.error == "canonical_repo_verifier_unavailable"
+
+
 def test_auto_keeps_available_prefix_after_dispatch_observation_fault(tmp_path, monkeypatch):
     from tests.test_tool_call_cap import BatchBrain, calls
 
