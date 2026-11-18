@@ -705,6 +705,11 @@ class AutoPresetRunner:
             raise AutoContinuationUnavailable("auto_continuation_not_started")
         paused = self._paused_runs.pop(run_id)
         paused.frame.state["approval"] = None
+        # The resumed frame still carries waiting_approval: publish
+        # RUNNING before the loop starts so last_auto_state and the UI
+        # progress show execution, not a pending approval, while the
+        # confirmed tool runs and the next model request happens.
+        self._set_status(paused.frame.state, AutoRunStatus.RUNNING)
         return self._execute_frame(
             paused.frame,
             continuation=paused.continuation,
@@ -739,14 +744,31 @@ class AutoPresetRunner:
         """Honest verification after a clean loop.
 
         Returns ``None`` when there is nothing real to verify — a
-        response-only run, or a run in a workspace without a canonical
-        repo verifier. No ``PASSED`` is ever claimed from the bare fact
-        that tool calls succeeded or the model answered. A repository
+        non-empty response-only run, or a run in a workspace without a
+        canonical repo verifier. No ``PASSED`` is ever claimed from the
+        bare fact that tool calls succeeded or the model answered. An
+        empty response-only run is rejected with
+        ``auto_no_observable_result`` instead of completing: the user
+        got neither an answer nor an executed action. A repository
         workspace runs the real canonical verifier; a repository
         workspace without one fails honestly with
         ``canonical_repo_verifier_unavailable``.
         """
         if not loop_result.tool_calls:
+            if not (loop_result.text or "").strip():
+                reason = "auto_no_observable_result"
+                return VerificationResult(
+                    status=VerificationStatus.FAILED,
+                    command=[],
+                    exit_code=1,
+                    stdout="",
+                    stderr=reason,
+                    duration_seconds=0.0,
+                    error=reason,
+                    fail_type="no_observable_result",
+                    excerpt=reason,
+                    verifier_profile="response_only",
+                )
             return None
         if not has_canonical_repo_verifier(run_root):
             if is_repo_workspace(run_root):

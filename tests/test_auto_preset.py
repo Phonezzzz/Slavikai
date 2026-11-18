@@ -293,6 +293,48 @@ def test_auto_call_cap_is_run_scoped_and_retained_across_approval(tmp_path, monk
             preset.resume(run_id)
 
 
+def test_auto_resume_publishes_running_before_continuation(tmp_path, monkeypatch):
+    from core.approval_policy import ApprovalContext
+    from tests.test_tool_call_cap import BatchBrain, calls
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(auto_preset.AUTO_MAX_TOOL_CALLS_ENV, "2")
+    agent = _PresetAgent()
+    agent._brain = BatchBrain([calls("echo", "network", "network")])
+    dispatched = []
+    agent.tool_registry.register(
+        "echo",
+        lambda request, seen=dispatched: seen.append(request.name) or ToolResult.success({}),
+        capability="read",
+    )
+    agent.tool_registry.register(
+        "network",
+        lambda request, seen=dispatched: seen.append(request.name) or ToolResult.success({}),
+        capability="read",
+        risk_classes=["network"],
+    )
+    gateway = ToolGateway(
+        agent.tool_registry, approval_context=ApprovalContext(True, agent.user_id, set())
+    )
+    agent._build_tool_gateway = lambda current=gateway, budget=None: current
+    seen_statuses: list[str] = []
+    preset = auto_preset.AutoPresetRunner(
+        agent,
+        workspace_root=tmp_path,
+        progress_callback=lambda state: seen_statuses.append(str(state.get("status"))),
+    )
+    with pytest.raises(ApprovalRequired):
+        preset.run("count")
+    assert agent.last_auto_state["status"] == AutoRunStatus.WAITING_APPROVAL.value
+    monkeypatch.setenv(auto_preset.AUTO_MAX_TOOL_CALLS_ENV, "100")
+    outcome = preset.resume(agent.last_auto_state["run_id"])
+    assert outcome.stop_reason_code == StopReasonCode.BUDGET_EXHAUSTED
+    # The resumed frame must publish RUNNING before the continuation
+    # runs, so the UI stops showing a pending approval mid-execution.
+    waiting_index = seen_statuses.index(AutoRunStatus.WAITING_APPROVAL.value)
+    assert AutoRunStatus.RUNNING.value in seen_statuses[waiting_index:]
+
+
 def test_auto_keeps_available_prefix_after_dispatch_observation_fault(tmp_path, monkeypatch):
     from tests.test_tool_call_cap import BatchBrain, calls
 
@@ -373,6 +415,25 @@ class _ResponseOnlyAgent(_FakeAgent):
     def __init__(self) -> None:
         super().__init__(brain_text="")
         self._brain = _ResponseOnlyBrain()
+        self.tool_registry = ToolRegistry()
+
+    def _build_tool_gateway(self, *, budget=None):
+        del budget
+        return ToolGateway(self.tool_registry)
+
+
+class _EmptyResponseOnlyBrain(Brain):
+    supports_native_tools = True
+
+    def generate(self, messages, config=None, tools=None):  # noqa: ANN001
+        del messages, config, tools
+        return LLMResult(usage=LLMUsage(0, 0, 0), text="   \n")
+
+
+class _EmptyResponseOnlyAgent(_FakeAgent):
+    def __init__(self) -> None:
+        super().__init__(brain_text="")
+        self._brain = _EmptyResponseOnlyBrain()
         self.tool_registry = ToolRegistry()
 
     def _build_tool_gateway(self, *, budget=None):
@@ -699,6 +760,21 @@ def test_auto_preset_returns_conversation_without_forcing_tool_action(tmp_path) 
     assert agent.last_auto_state.get("verifier") is None
     # No native dispatch means the run itself cannot have changed workspace files.
     assert agent.last_auto_state["execution_metrics"]["files_touched"] == 0
+
+
+def test_auto_preset_rejects_empty_response_only_result(tmp_path) -> None:
+    agent = _EmptyResponseOnlyAgent()
+    preset = auto_preset.AutoPresetRunner(agent, workspace_root=tmp_path)
+
+    outcome = preset.run("privet", run_root_override=tmp_path)
+
+    # A blank answer with no tool calls is not a completion: the user
+    # got neither an answer nor an executed action.
+    assert outcome.status == AutoRunStatus.FAILED_VERIFIER
+    assert outcome.stop_reason_code == StopReasonCode.VERIFIER_FAILED
+    assert outcome.verifier is not None
+    assert outcome.verifier.error == "auto_no_observable_result"
+    assert agent.last_auto_state["status"] == AutoRunStatus.FAILED_VERIFIER.value
 
 
 def test_auto_preset_injects_skill_per_run_without_changing_tools_or_brain(tmp_path) -> None:
