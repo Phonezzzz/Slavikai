@@ -144,7 +144,7 @@ terminal acceptance остаются target. Required process verifier оста�
 ## Узкое исключение: штатный process verifier (make check)
 
 Второе явное исключение — только штатный `VerifierRuntime` с canonical check
-`["make", "check"]` в managed workspace. Все остальные process paths из списка
+`["make", "-f", "Makefile", "check"]` в managed workspace. Все остальные process paths из списка
 выше остаются закрыты; shell tools модели не публикуются (это E04-T04),
 полная семантика UNVERIFIED/BLOCKED — E05-T03.
 
@@ -154,8 +154,10 @@ terminal acceptance остаются target. Required process verifier оста�
   отдельный профиль `i1-ubuntu-podman-5.7-command-bounded-v1`. Python-профиль
   (`…-python-bounded-v3`) не трогается; command-ревизия квалифицируется
   независимо — её отсутствие не ломает Python-путь.
-- Allowlist ровно `["make", "check"]`: любой другой argv отклоняется до
-  любого обращения к engine. Confinement — тот же, что у Python-пути
+- Allowlist ровно `["make", "-f", "Makefile", "check"]`: любой другой argv отклоняется до
+  любого обращения к engine. Явный `-f Makefile` фиксирует проверяемый
+  файл: без него make сам выбрал бы `GNUmakefile`/`makefile`, и хэш
+  `Makefile` ничего бы не гарантировал. Confinement — тот же, что у Python-пути
   (network none, private namespaces, cap-drop ALL, no-new-privileges,
   readonly rootfs, 256 МиБ / 64 PID, ровно один bind mount staged копии,
   ровно те же 7 env-записей), реальный exit code — через `finished_exit`.
@@ -165,15 +167,28 @@ terminal acceptance остаются target. Required process verifier оста�
 - Условие 1 (явное разрешение на run): запуск `make check` привязан к
   доверенному `WorkspaceBinding` — principal, session, environment revision
   и квалифицированный профиль/staging pool обязаны совпадать с run; само
-  наличие Makefile разрешения не даёт. Без binding или без доступного
-  backend `VerifierRuntime.run()` возвращает ERROR
+  наличие Makefile разрешения не даёт. Источник разрешения — вызов auto
+  run владельцем (`handle_auto_command` после routing decision gate);
+  запись о нём — `_RunFrame` этого run, и `_verifier_command_executor`
+  сверяет binding именно с ним перед возвратом executor. Без binding или
+  без доступного backend `VerifierRuntime.run()` возвращает ERROR
   `sandbox_execution_unavailable`, процесс не запускается.
 - Условие 2 (критерий задаёт доверенная сторона): содержимое `Makefile`
   (цель `check`) задаётся до запуска агента; его sha256 фиксируется
   доверенным кодом раннера до начала loop и хранится вне agent-writable
-  workspace. При проверке хэш staged snapshot обязан совпасть с
-  предзапусковым; несовпадение даёт ERROR `verifier_criterion_changed`,
-  никогда PASSED.
+  workspace. Хэш сверяется дважды: ранний fail по живому workspace и
+  авторитетный — на байтах того же snapshot, который пойдёт в контейнер
+  (executor вычисляет sha256 snapshot'ного `Makefile` до `pool.prepare`).
+  Несовпадение или удаление файла даёт ERROR `verifier_criterion_changed`,
+  никогда PASSED. Решение о том, что проверка обязательна, живёт вместе
+  с критерием до конца run: если критерий был зафиксирован, а `Makefile`
+  к концу run исчез, `_verify_after_loop` возвращает ERROR
+  `verifier_criterion_changed`, а не `None`. Без зафиксированного критерия
+  `Makefile`, появившийся во время loop, никогда не исполняется.
+- Валидация до выделения stage: проверки скрипта (`workspace_run`) и
+  критерия (verifier) выполняются до `pool.prepare()`, поэтому
+  предзапусковой отказ не занимает staging slot и не блокирует следующие
+  запуски principal.
 - Маппинг исходов: finished+0 → PASSED; finished+≠0 → FAILED
   (`check_failed`); unavailable → ERROR зеркалом
   `sandbox_verification_unavailable`; unknown/conflict → ERROR, никогда

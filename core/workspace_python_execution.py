@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import os
@@ -30,6 +31,7 @@ from shared.tool_capture import (
 from shared.workspace_binding import (
     WorkspaceBinding,
     WorkspaceConflict,
+    WorkspaceCriterionChanged,
     WorkspaceFileBudgetExceeded,
     WorkspaceUnavailable,
 )
@@ -243,6 +245,7 @@ class _IsolatedRunner:
         capture: _CaptureAttempt | None,
         admit: Callable[[WorkspaceSnapshot, BoundedStage], PreparedContainer],
         publish: bool,
+        validate: Callable[[WorkspaceSnapshot], None] | None = None,
         max_files_touched: int | None = None,
         already_touched: frozenset[str] = frozenset(),
     ) -> WorkspacePythonOutcome:
@@ -256,6 +259,11 @@ class _IsolatedRunner:
                 raise WorkspaceUnavailable("bounded staging environment unavailable")
             if binding.environment_revision != self.environment_revision:
                 raise WorkspaceConflict("workspace staging environment binding changed")
+            # Валидация — до pool.prepare: предзапусковой отказ не должен
+            # занимать staging slot (иначе следующие запуски principal
+            # блокируются retained stage без механизма восстановления).
+            if validate is not None:
+                validate(snapshot)
             bounded = pool.prepare(self.workspace, snapshot)
             stage = bounded.stage
             prepared = admit(snapshot, bounded)
@@ -521,12 +529,17 @@ class RootlessPythonExecutor:
         max_files_touched: int | None,
         already_touched: frozenset[str],
     ) -> WorkspacePythonOutcome:
-        def admit(snapshot: WorkspaceSnapshot, bounded: BoundedStage) -> PreparedContainer:
-            relative = Path(script)
+        relative = Path(script)
+
+        def validate(snapshot: WorkspaceSnapshot) -> None:
             if relative.is_absolute() or ".." in relative.parts or relative.suffix != ".py":
                 raise WorkspaceUnavailable("invalid workspace Python script")
+            if relative.as_posix() in snapshot.directories:
+                raise WorkspaceUnavailable("workspace Python script unavailable")
             if not any(file.path == relative.as_posix() for file in snapshot.files):
                 raise WorkspaceUnavailable("workspace Python script unavailable")
+
+        def admit(snapshot: WorkspaceSnapshot, bounded: BoundedStage) -> PreparedContainer:
             return self.profile.create_python_container(bounded, relative.as_posix())
 
         return self._runner()._execute_isolated(
@@ -535,6 +548,7 @@ class RootlessPythonExecutor:
             capture=capture,
             admit=admit,
             publish=True,
+            validate=validate,
             max_files_touched=max_files_touched,
             already_touched=already_touched,
         )
@@ -551,7 +565,8 @@ class RootlessPythonExecutor:
 
 @dataclass(frozen=True)
 class RootlessCommandExecutor:
-    """No-publish executor штатного process verifier: только ["make", "check"].
+    """No-publish executor штатного process verifier: только
+    ["make", "-f", "Makefile", "check"].
 
     Исполняет canonical check на staged snapshot managed workspace; ничего
     не публикует обратно в workspace. Без квалифицированного command-профиля
@@ -609,7 +624,12 @@ class RootlessCommandExecutor:
         return True
 
     def execute_command(
-        self, binding: WorkspaceBinding, argv: list[str], *, timeout: float
+        self,
+        binding: WorkspaceBinding,
+        argv: list[str],
+        *,
+        timeout: float,
+        criterion_sha256: str | None = None,
     ) -> WorkspacePythonOutcome:
         if list(argv) != list(CANONICAL_CHECK_COMMAND):
             raise WorkspaceUnavailable("isolated command is not allowlisted")
@@ -626,13 +646,33 @@ class RootlessCommandExecutor:
                 "none",
             )
 
+        def validate(snapshot: WorkspaceSnapshot) -> None:
+            # Хэш сверяется на том же snapshot, который пойдёт в контейнер:
+            # Makefile из snapshot — это ровно те байты, которые make
+            # прочитает по -f. Любое расхождение с доверенным критерием
+            # (включая удаление файла) — verifier_criterion_changed.
+            criterion = next((file for file in snapshot.files if file.path == "Makefile"), None)
+            if criterion is None:
+                raise WorkspaceCriterionChanged(
+                    "canonical check definition unavailable in staged snapshot"
+                )
+            if criterion_sha256 is not None:
+                actual = hashlib.sha256(criterion.content).hexdigest()
+                if actual != criterion_sha256:
+                    raise WorkspaceCriterionChanged(
+                        "staged Makefile differs from the trusted criterion"
+                    )
+
         def admit(snapshot: WorkspaceSnapshot, bounded: BoundedStage) -> PreparedContainer:
-            if not any(file.path == "Makefile" for file in snapshot.files):
-                raise WorkspaceUnavailable("canonical check definition unavailable")
             return self.profile.create_command_container(bounded, list(argv))
 
         return self._runner()._execute_isolated(
-            binding, timeout=timeout, capture=None, admit=admit, publish=False
+            binding,
+            timeout=timeout,
+            capture=None,
+            admit=admit,
+            publish=False,
+            validate=validate,
         )
 
     def _runner(self) -> _IsolatedRunner:

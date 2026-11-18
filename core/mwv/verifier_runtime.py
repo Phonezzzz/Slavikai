@@ -36,7 +36,12 @@ class CommandExecutorProtocol(Protocol):
     def is_available(self) -> bool: ...
 
     def execute_command(
-        self, binding: WorkspaceBinding, argv: list[str], *, timeout: float
+        self,
+        binding: WorkspaceBinding,
+        argv: list[str],
+        *,
+        timeout: float,
+        criterion_sha256: str | None = None,
     ) -> WorkspacePythonOutcome: ...
 
 
@@ -49,7 +54,7 @@ def _default_runner() -> VerifierRunnerProtocol:
 
 
 _DEFAULT_TIMEOUT_SECONDS = 60 * 30
-CANONICAL_CHECK_COMMAND: tuple[str, ...] = ("make", "check")
+CANONICAL_CHECK_COMMAND: tuple[str, ...] = ("make", "-f", "Makefile", "check")
 
 DEFAULT_FALLBACK_COMMANDS: tuple[tuple[str, ...], ...] = (CANONICAL_CHECK_COMMAND,)
 SCRIPT_NOT_FOUND_PREFIX = "Verifier script not found:"
@@ -253,6 +258,9 @@ class VerifierRuntime:
     # run() возвращает sandbox_verification_unavailable, как раньше.
     executor: CommandExecutorProtocol | None = None
     binding: WorkspaceBinding | None = None
+    # Хэш доверенного критерия (Makefile), зафиксированный до loop.
+    # None — критерий не задан; executor его не сверяет.
+    criterion_sha256: str | None = None
 
     def verify_desktop_observations(
         self,
@@ -384,7 +392,10 @@ class VerifierRuntime:
             )
         try:
             outcome = self.executor.execute_command(
-                self.binding, resolved_command, timeout=float(timeout)
+                self.binding,
+                resolved_command,
+                timeout=float(timeout),
+                criterion_sha256=self.criterion_sha256,
             )
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             reason = (
@@ -466,6 +477,12 @@ def _map_command_outcome(
             verifier_profile="unavailable",
         )
     reason = outcome.reason_code or "workspace_unavailable"
+    if outcome.reason_code == "verifier_criterion_changed":
+        fail_type = "criterion_changed"
+    elif outcome.state == "unknown":
+        fail_type = "execution_unknown"
+    else:
+        fail_type = "execution_conflict"
     return VerificationResult(
         status=VerificationStatus.ERROR,
         command=command,
@@ -474,7 +491,7 @@ def _map_command_outcome(
         stderr=stderr,
         duration_seconds=duration,
         error=reason,
-        fail_type="execution_unknown" if outcome.state == "unknown" else "execution_conflict",
+        fail_type=fail_type,
         excerpt=excerpt,
         verifier_profile="canonical",
     )

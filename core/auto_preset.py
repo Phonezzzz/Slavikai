@@ -538,6 +538,8 @@ class AutoPresetRunner:
                 loop_result=loop_result,
                 cancellation_token=cancellation_token,
                 criterion_sha256=frame.verifier_criterion_sha256,
+                principal_id=frame.principal_id,
+                session_id=frame.session_id,
             )
             state["verifier"] = (
                 _verification_state(verification) if verification is not None else None
@@ -787,23 +789,33 @@ class AutoPresetRunner:
         loop_result: AgentToolLoopResult,
         cancellation_token: asyncio.Event | None = None,
         criterion_sha256: str | None = None,
+        principal_id: str | None = None,
+        session_id: str | None = None,
     ) -> VerificationResult | None:
         """Honest verification after a clean loop.
 
         Returns ``None`` when there is nothing real to verify — a
-        non-empty response-only run, or a run in a workspace without a
-        canonical check definition. No ``PASSED`` is ever claimed from the
+        non-empty response-only run, or a run whose trusted criterion was
+        never fixed before the loop. No ``PASSED`` is ever claimed from the
         bare fact that tool calls succeeded or the model answered. An
         empty response-only run is rejected with
         ``auto_no_observable_result`` instead of completing: the user
-        got neither an answer nor an executed action. A workspace with a
-        Makefile runs the real canonical verifier through the qualified
-        command executor; a repository workspace without a Makefile fails
-        honestly with ``canonical_repo_verifier_unavailable``. A Makefile
-        workspace whose backend is unavailable fails closed with
-        ``sandbox_execution_unavailable`` (ERROR, never ``None``), and a
-        Makefile changed after the pre-loop criterion hash fails with
-        ``verifier_criterion_changed``.
+        got neither an answer nor an executed action.
+
+        The criterion decision is stored with the criterion itself: once
+        ``criterion_sha256`` was fixed before the loop, verification is
+        mandatory until the end of the run. A Makefile deleted afterwards
+        (or changed, or replaced on the staged snapshot) fails with
+        ``verifier_criterion_changed`` — never ``None``. Without a
+        pre-loop criterion there is no mandatory verification: a Makefile
+        planted by the agent mid-run is never executed. The only
+        exception is a repository workspace without a Makefile, which
+        fails honestly with ``canonical_repo_verifier_unavailable``.
+        A Makefile workspace whose backend is unavailable fails closed
+        with ``sandbox_execution_unavailable`` (ERROR, never ``None``).
+        The verifier runs the explicit ``make -f Makefile check`` on the
+        staged snapshot; the executor re-checks the criterion hash on
+        those exact bytes before any process starts.
         """
         if not loop_result.tool_calls:
             if not (loop_result.text or "").strip():
@@ -821,8 +833,11 @@ class AutoPresetRunner:
                     verifier_profile="response_only",
                 )
             return None
-        if not has_canonical_check_definition(run_root):
-            if is_repo_workspace(run_root):
+        if criterion_sha256 is None:
+            # Доверенный критерий до loop не зафиксирован: обязательной
+            # проверки нет, и Makefile, появившийся во время loop
+            # (его мог подложить агент), никогда не исполняется.
+            if is_repo_workspace(run_root) and not has_canonical_check_definition(run_root):
                 reason = "canonical_repo_verifier_unavailable"
                 return VerificationResult(
                     status=VerificationStatus.ERROR,
@@ -837,11 +852,9 @@ class AutoPresetRunner:
                     verifier_profile="repository",
                 )
             return None
-        executor, binding = self._verifier_command_executor(run_root)
-        if executor is None or binding is None or not executor.is_available():
-            return _unavailable_verification()
-        current = _criterion_sha256(run_root)
-        if criterion_sha256 is None or current != criterion_sha256:
+        if not has_canonical_check_definition(run_root):
+            # Критерий был зафиксирован до loop, а Makefile к концу run
+            # исчез: обязательная проверка потеряна — ERROR, никогда None.
             reason = "verifier_criterion_changed"
             return VerificationResult(
                 status=VerificationStatus.ERROR,
@@ -855,7 +868,32 @@ class AutoPresetRunner:
                 excerpt=reason,
                 verifier_profile="canonical",
             )
-        verifier = VerifierRuntime(project_root=run_root, executor=executor, binding=binding)
+        executor, binding = self._verifier_command_executor(
+            run_root, principal_id=principal_id, session_id=session_id
+        )
+        if executor is None or binding is None or not executor.is_available():
+            return _unavailable_verification()
+        current = _criterion_sha256(run_root)
+        if current != criterion_sha256:
+            reason = "verifier_criterion_changed"
+            return VerificationResult(
+                status=VerificationStatus.ERROR,
+                command=[],
+                exit_code=None,
+                stdout="",
+                stderr=reason,
+                duration_seconds=0.0,
+                error=reason,
+                fail_type="criterion_changed",
+                excerpt=reason,
+                verifier_profile="canonical",
+            )
+        verifier = VerifierRuntime(
+            project_root=run_root,
+            executor=executor,
+            binding=binding,
+            criterion_sha256=criterion_sha256,
+        )
         context = RunContext(
             session_id=self.parent.session_id or "local",
             trace_id=str(uuid.uuid4()),
@@ -878,14 +916,23 @@ class AutoPresetRunner:
         return verifier.run(verifier_task, context)
 
     def _verifier_command_executor(
-        self, run_root: Path
+        self,
+        run_root: Path,
+        *,
+        principal_id: str | None = None,
+        session_id: str | None = None,
     ) -> tuple[RootlessCommandExecutor | None, WorkspaceBinding | None]:
         """Command executor + binding для штатного verifier, или (None, None).
 
-        Parent держит ``_workspace_executor``/``_workspace_access`` как
-        приватные атрибуты; stub-родители в тестах их не имеют — getattr.
-        Binding обязан указывать ровно на run_root, иначе verifier не
-        запускается (условие 1 владельца).
+        Источник явного разрешения на запуск verifier для этого run —
+        вызов auto run владельцем (``handle_auto_command`` после routing
+        decision gate); запись о нём — ``_RunFrame`` этого run (run_id,
+        principal, session). Здесь разрешение проверяется, а не
+        предполагается: binding обязан принадлежать principal/session
+        этого run, указывать ровно на run_root и нести environment
+        revision квалифицированного executor. Parent держит
+        ``_workspace_executor``/``_workspace_access`` как приватные
+        атрибуты; stub-родители в тестах их не имеют — getattr.
         """
         python_executor = getattr(self.parent, "_workspace_executor", None)
         if not isinstance(python_executor, RootlessPythonExecutor):
@@ -903,7 +950,21 @@ class AutoPresetRunner:
         executor = RootlessCommandExecutor.from_python_executor(python_executor)
         if executor is None:
             return None, None
-        return executor, access.bind()
+        binding = access.bind()
+        if principal_id is not None and binding.principal_id != principal_id:
+            return None, None
+        if session_id is not None and binding.session_id != session_id:
+            return None, None
+        try:
+            environment_revision = executor.environment_revision
+        except (OSError, ValueError):
+            return None, None
+        if (
+            binding.environment_revision is None
+            or binding.environment_revision != environment_revision
+        ):
+            return None, None
+        return executor, binding
 
     def _set_status(
         self,

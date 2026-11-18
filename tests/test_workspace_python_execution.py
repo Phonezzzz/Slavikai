@@ -503,3 +503,53 @@ def test_executor_file_budget_fences_staged_publication(
         assert outcome.cleanup_warning is cleanup_fault
         assert (outcome.retained_stage is not None) is cleanup_fault
         assert (owner.root / "script.py").read_text() == "# after"
+
+
+def test_directory_named_like_script_is_refused_before_stage_allocation(tmp_path, monkeypatch):
+    """P2: валидация скрипта — до pool.prepare().
+
+    Каталог ``directory.py`` проходит прежние проверки RunCodeTool
+    (суффикс + exists), но не является файлом: отказ обязан случиться
+    до выделения stage, иначе слот остаётся занятым и блокирует
+    следующие запуски principal.
+    """
+    from dataclasses import replace
+
+    from core.rootless_staging import RootlessStagePool, StagingLimits
+
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    owner = ManagedWorkspace.create(parent, principal_id="alice")
+    (owner.root / "directory.py").mkdir()
+    binding = replace(
+        owner.bind(principal_id="alice", session_id="chat-a"),
+        environment_revision="env",
+    )
+    profile = RootlessPodmanProfile(tmp_path, os.geteuid(), os.getegid(), "revision", (), ())
+    pool = RootlessStagePool(profile, StagingLimits(4096, 32, 1))
+    monkeypatch.setattr(RootlessStagePool, "execution_revision", property(lambda self: "env"))
+    prepared = []
+    monkeypatch.setattr(
+        RootlessStagePool,
+        "prepare",
+        lambda self, workspace, snapshot: prepared.append(snapshot)
+        or (_ for _ in ()).throw(AssertionError("prepare must not run for an invalid script")),
+    )
+    monkeypatch.setattr(RootlessStagePool, "check_stage", lambda *args: None)
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("engine must not be contacted")
+        ),
+    )
+    executor = RootlessPythonExecutor(
+        profile, owner, WorkspaceLimits(1024, 4096, 20, 8), 1024, pool
+    )
+    outcome = executor.execute_python(binding, "directory.py", timeout=3)
+    assert outcome.state == "unavailable"
+    assert outcome.reason_code == "workspace_unavailable"
+    assert outcome.execution_started is False
+    assert outcome.publication == "none"
+    assert outcome.retained_stage is None
+    assert prepared == []
+    assert not pool._allocations

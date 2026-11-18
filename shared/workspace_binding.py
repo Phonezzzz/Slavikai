@@ -14,6 +14,12 @@ class WorkspaceConflict(WorkspaceUnavailable):
     reason_code: ClassVar[str] = "workspace_conflict"
 
 
+class WorkspaceCriterionChanged(WorkspaceConflict):
+    """Staged содержимое не совпадает с доверенным критерием проверки."""
+
+    reason_code: ClassVar[str] = "verifier_criterion_changed"
+
+
 class WorkspaceFileBudgetExceeded(WorkspaceUnavailable):
     """File-effect budget denied the staged output before publication."""
 

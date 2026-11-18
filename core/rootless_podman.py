@@ -29,7 +29,7 @@ QUALIFIED_COMMAND_AMD64_DIGEST = (
     "sha256:4209fae09a3e20afd863e528bfddc235da5fd5977983e1996cd54cc9a72e6267"
 )
 QUALIFIED_COMMAND_PROFILE_VERSION = "i1-ubuntu-podman-5.7-command-bounded-v1"
-CANONICAL_CHECK_COMMAND: tuple[str, ...] = ("make", "check")
+CANONICAL_CHECK_COMMAND: tuple[str, ...] = ("make", "-f", "Makefile", "check")
 
 
 def _field(value: object, *path: str) -> object:
@@ -440,8 +440,11 @@ class RootlessPodmanProfile:
     def create_command_container(
         self, bounded: BoundedStage, argv: list[str]
     ) -> PreparedCommandContainer:
-        """Контейнер штатного process verifier. Allowlist — ровно ["make", "check"].
+        """Контейнер штатного process verifier. Allowlist — ровно
+        ["make", "-f", "Makefile", "check"].
 
+        Явный `-f Makefile` фиксирует проверяемый файл: без него make
+        выбрал бы GNUmakefile/makefile вместо доверенного Makefile.
         Отказ — до любого обращения к engine при любом другом argv и до
         создания контейнера при неквалифицированном command-профиле.
         Confinement — тот же, что у Python-пути.
