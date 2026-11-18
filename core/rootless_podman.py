@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tomllib
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,6 +20,16 @@ QUALIFIED_PYTHON_IMAGE = "37ccb536022bb36c4570856b55ebfa85bf07827e3c2fa3eba37f0d
 QUALIFIED_PYTHON_DIGEST = "sha256:623674a14ef93d052bb9b0de4dbf5f28eb578a35263838941cc8aa43213c1487"
 QUALIFIED_AMD64_DIGEST = "sha256:e697c81897302a4c4333bade000d98038fbb21eb064f8ee1fd42d02ebcd9d337"
 QUALIFIED_PROFILE_VERSION = "i1-ubuntu-podman-5.7-python-bounded-v3"
+
+# Штатный process verifier: отдельный pinned образ с make. Python profile
+# не трогается; command revision квалифицируется независимо (см. qualify).
+QUALIFIED_COMMAND_IMAGE = "28d30c15b9e9c3b1d557441aad9592226e852f7716451d6c8df5b4f0c3ce3d1b"
+QUALIFIED_COMMAND_DIGEST = "sha256:3c3ba8ad4c85eb63b7568f806434f14e33370056985da7fdf2673621cb1d7e93"
+QUALIFIED_COMMAND_AMD64_DIGEST = (
+    "sha256:4209fae09a3e20afd863e528bfddc235da5fd5977983e1996cd54cc9a72e6267"
+)
+QUALIFIED_COMMAND_PROFILE_VERSION = "i1-ubuntu-podman-5.7-command-bounded-v1"
+CANONICAL_CHECK_COMMAND: tuple[str, ...] = ("make", "check")
 
 
 def _field(value: object, *path: str) -> object:
@@ -71,6 +81,24 @@ class PreparedPythonContainer:
 
 
 @dataclass(frozen=True)
+class PreparedCommandContainer:
+    """Контейнер штатного process verifier: только ["make", "check"]."""
+
+    container_id: str
+    name: str
+    bounded: BoundedStage
+    command: tuple[str, ...]
+    profile_revision: str
+
+    @property
+    def stage(self) -> WorkspaceStage:
+        return self.bounded.stage
+
+
+PreparedContainer = PreparedPythonContainer | PreparedCommandContainer
+
+
+@dataclass(frozen=True)
 class RootlessPodmanProfile:
     """Конкретный проверенный local profile; ни socket, ни generic allow flag.
 
@@ -85,6 +113,9 @@ class RootlessPodmanProfile:
     revision: str
     _directories: tuple[tuple[Path, tuple[int, ...]], ...]
     _files: tuple[tuple[Path, tuple[int, ...]], ...]
+    # Ревизия command-профиля; None — образ verifier не квалифицирован,
+    # Python-путь при этом остаётся квалифицированным.
+    command_revision: str | None = None
 
     @classmethod
     def qualify(cls, state_root: Path) -> RootlessPodmanProfile:
@@ -200,6 +231,55 @@ class RootlessPodmanProfile:
                 raise WorkspaceUnavailable("unexpected image entrypoint")
             if _field(image, "Config", "Volumes") not in (None, {}):
                 raise WorkspaceUnavailable("unexpected image volumes")
+            # Command-образ квалифицируется независимо: его отсутствие или
+            # несоответствие не ломает Python-профиль, только verifier-путь.
+            command_revision: str | None = None
+            try:
+                command_images = profile.json_control(["image", "inspect", QUALIFIED_COMMAND_IMAGE])
+                if isinstance(command_images, list) and len(command_images) == 1:
+                    command_image = command_images[0]
+                    for key, value in {
+                        "Id": QUALIFIED_COMMAND_IMAGE,
+                        "Os": "linux",
+                        "Architecture": "amd64",
+                    }.items():
+                        if _field(command_image, key) != value:
+                            raise WorkspaceUnavailable(
+                                "command image differs from qualified profile"
+                            )
+                    if _field(command_image, "Digest") not in (
+                        QUALIFIED_COMMAND_DIGEST,
+                        QUALIFIED_COMMAND_AMD64_DIGEST,
+                    ):
+                        raise WorkspaceUnavailable(
+                            "command image manifest differs from qualified profile"
+                        )
+                    command_digests = _field(command_image, "RepoDigests")
+                    if not isinstance(command_digests, list) or not all(
+                        f"docker.io/library/python@{digest}" in command_digests
+                        for digest in (
+                            QUALIFIED_COMMAND_DIGEST,
+                            QUALIFIED_COMMAND_AMD64_DIGEST,
+                        )
+                    ):
+                        raise WorkspaceUnavailable("command image repository binding unavailable")
+                    if _field(command_image, "Config", "Entrypoint") not in (None, []):
+                        raise WorkspaceUnavailable("unexpected command image entrypoint")
+                    if _field(command_image, "Config", "Volumes") not in (None, {}):
+                        raise WorkspaceUnavailable("unexpected command image volumes")
+                    command_revision = hashlib.sha256(
+                        repr(
+                            (
+                                QUALIFIED_COMMAND_PROFILE_VERSION,
+                                QUALIFIED_COMMAND_IMAGE,
+                                directories,
+                                files,
+                            )
+                        ).encode()
+                    ).hexdigest()
+            except WorkspaceUnavailable:
+                command_revision = None
+            profile = replace(profile, command_revision=command_revision)
             profile.check_current()
             return profile
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -357,10 +437,110 @@ class RootlessPodmanProfile:
             self.control(["rm", "--force", "--time=1", "--ignore", container_id])
             raise
 
+    def create_command_container(
+        self, bounded: BoundedStage, argv: list[str]
+    ) -> PreparedCommandContainer:
+        """Контейнер штатного process verifier. Allowlist — ровно ["make", "check"].
+
+        Отказ — до любого обращения к engine при любом другом argv и до
+        создания контейнера при неквалифицированном command-профиле.
+        Confinement — тот же, что у Python-пути.
+        """
+        if list(argv) != list(CANONICAL_CHECK_COMMAND):
+            raise WorkspaceUnavailable("isolated command is not allowlisted")
+        if self.command_revision is None:
+            raise WorkspaceUnavailable("command execution profile is not qualified")
+        if not isinstance(bounded, BoundedStage) or bounded.pool.profile is not self:
+            raise WorkspaceUnavailable("bounded workspace environment required")
+        bounded.pool.check_stage(bounded)
+        stage = bounded.stage
+        if stage.binding.environment_revision != bounded.pool.execution_revision:
+            raise WorkspaceUnavailable("workspace environment binding changed")
+        if any(character in str(stage.root) for character in (",", ":", "\n", "\r", "\x00")):
+            raise WorkspaceUnavailable("invalid isolated workspace path")
+        stage_signature = _signature(stage.root, directory=True)
+        if stage_signature[:2] != stage.identity:
+            raise WorkspaceUnavailable("workspace stage identity changed")
+        name = f"slavikai-workspace-{uuid.uuid4().hex}"
+        command = list(CANONICAL_CHECK_COMMAND)
+        result = self.control(
+            [
+                "create",
+                "--name",
+                name,
+                "--label",
+                f"slavikai.workspace.operation={name}",
+                "--pull=never",
+                "--log-driver=none",
+                "--network=none",
+                "--pid=private",
+                "--ipc=private",
+                "--uts=private",
+                "--userns=keep-id",
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges",
+                "--read-only",
+                "--tmpfs",
+                "/tmp:rw,nosuid,nodev,noexec,size=32m",
+                "--pids-limit=64",
+                "--memory=256m",
+                "--workdir=/workspace",
+                "--env=HOME=/tmp/home",
+                "--http-proxy=false",
+                "--image-volume=ignore",
+                "--mount",
+                f"type=bind,src={bounded.engine_root},dst=/workspace,rw,nosuid,nodev",
+                QUALIFIED_COMMAND_IMAGE,
+                *command,
+            ]
+        )
+        if result.returncode != 0:
+            raise WorkspaceUnavailable("isolated container creation failed; execution not started")
+        container_id = result.stdout.strip().decode("ascii")
+        if len(container_id) != 64 or any(
+            character not in "0123456789abcdef" for character in container_id
+        ):
+            raise WorkspaceUnavailable("container identity unavailable; execution not started")
+        prepared = PreparedCommandContainer(
+            container_id, name, bounded, tuple(command), self.command_revision
+        )
+        try:
+            self.verify_created_command(prepared)
+            if result.stderr:
+                raise WorkspaceUnavailable("unexpected isolated container creation diagnostic")
+            return prepared
+        except (OSError, ValueError, subprocess.SubprocessError):
+            # Только ID, полученный от собственного успешного create; чужие jobs не затрагиваются.
+            self.control(["rm", "--force", "--time=1", "--ignore", container_id])
+            raise
+
     def verify_created(self, prepared: PreparedPythonContainer) -> None:
+        self._verify_created(
+            prepared,
+            profile_revision=self.revision,
+            image=QUALIFIED_PYTHON_IMAGE,
+            command=["python", "--", prepared.script],
+        )
+
+    def verify_created_command(self, prepared: PreparedCommandContainer) -> None:
+        self._verify_created(
+            prepared,
+            profile_revision=self.command_revision,
+            image=QUALIFIED_COMMAND_IMAGE,
+            command=list(CANONICAL_CHECK_COMMAND),
+        )
+
+    def _verify_created(
+        self,
+        prepared: PreparedContainer,
+        *,
+        profile_revision: str | None,
+        image: str,
+        command: list[str],
+    ) -> None:
         prepared.bounded.pool.check_stage(prepared.bounded)
         if (
-            prepared.profile_revision != self.revision
+            prepared.profile_revision != profile_revision
             or prepared.stage.binding.environment_revision
             != prepared.bounded.pool.execution_revision
         ):
@@ -375,14 +555,14 @@ class RootlessPodmanProfile:
         expected: dict[tuple[str, ...], object] = {
             ("Id",): prepared.container_id,
             ("Name",): prepared.name,
-            ("Image",): QUALIFIED_PYTHON_IMAGE,
+            ("Image",): image,
             ("OCIRuntime",): "runc",
             ("State", "Status"): "created",
             ("State", "Running"): False,
             ("State", "Pid"): 0,
             ("Config", "WorkingDir"): "/workspace",
             ("Config", "User"): f"{self.uid}:{self.gid}",
-            ("Config", "Cmd"): ["python", "--", prepared.script],
+            ("Config", "Cmd"): command,
             ("Config", "Tty"): False,
             ("Config", "OpenStdin"): False,
             ("Config", "AttachStdin"): False,
@@ -456,8 +636,8 @@ class RootlessPodmanProfile:
                 )
         self.check_current()
 
-    def _owned_record(self, prepared: PreparedPythonContainer) -> object:
-        if prepared.profile_revision != self.revision:
+    def _owned_record(self, prepared: PreparedContainer) -> object:
+        if prepared.profile_revision not in (self.revision, self.command_revision):
             raise WorkspaceUnavailable("container environment binding changed")
         records = self.json_control(["inspect", prepared.container_id])
         if not isinstance(records, list) or len(records) != 1:
@@ -472,9 +652,7 @@ class RootlessPodmanProfile:
                 raise WorkspaceUnavailable("container ownership mismatch")
         return record
 
-    def finished_exit(
-        self, prepared: PreparedPythonContainer, *, cli_returncode: int
-    ) -> int | None:
+    def finished_exit(self, prepared: PreparedContainer, *, cli_returncode: int) -> int | None:
         if cli_returncode < 0:
             return None
         record = self._owned_record(prepared)
@@ -508,7 +686,7 @@ class RootlessPodmanProfile:
             return None
         return code
 
-    def remove_owned(self, prepared: PreparedPythonContainer) -> bool:
+    def remove_owned(self, prepared: PreparedContainer) -> bool:
         self._owned_record(prepared)
         result = self.control(["rm", "--force", "--time=1", "--ignore", prepared.container_id])
         return result.returncode == 0 and not result.stderr

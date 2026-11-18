@@ -6,13 +6,19 @@ import os
 import selectors
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
-from core.managed_workspace import ManagedWorkspace, WorkspaceLimits
-from core.rootless_podman import RootlessPodmanProfile
-from core.rootless_staging import RootlessStagePool
+from core.managed_workspace import ManagedWorkspace, WorkspaceLimits, WorkspaceSnapshot
+from core.rootless_podman import (
+    CANONICAL_CHECK_COMMAND,
+    PreparedContainer,
+    PreparedPythonContainer,
+    RootlessPodmanProfile,
+)
+from core.rootless_staging import BoundedStage, RootlessStagePool
 from shared.tool_capture import (
     RawProcessCapture,
     ToolCaptureContext,
@@ -208,18 +214,19 @@ def _collect(
 
 
 @dataclass(frozen=True)
-class RootlessPythonExecutor:
-    """Byte primitive ниже ComputerBackend/Gateway, без собственного tool loop."""
+class _IsolatedRunner:
+    """Один механизм изолированного запуска для Python- и command-путей.
+
+    Различаются только admission (что допускается в staged snapshot),
+    verify созданного контейнера и settlement: Python публикует результат
+    обратно в workspace, command (verifier) — только наблюдает.
+    """
 
     profile: RootlessPodmanProfile
     workspace: ManagedWorkspace
     limits: WorkspaceLimits
     max_output_bytes: int
     staging_pool: RootlessStagePool | None = None
-
-    def __post_init__(self) -> None:
-        if type(self.max_output_bytes) is not int or self.max_output_bytes <= 0:
-            raise ValueError("output byte limit must be a positive integer")
 
     @property
     def environment_revision(self) -> str:
@@ -228,53 +235,22 @@ class RootlessPythonExecutor:
             raise WorkspaceUnavailable("bounded staging environment unavailable")
         return pool.execution_revision
 
-    def execute_python(
+    def _execute_isolated(
         self,
         binding: WorkspaceBinding,
-        script: str,
-        *,
-        timeout: float,
-        capture: ToolCaptureContext | None = None,
-        max_files_touched: int | None = None,
-        already_touched: frozenset[str] = frozenset(),
-    ) -> WorkspacePythonOutcome:
-        if capture is not None and (
-            not isinstance(capture, ToolCaptureContext)
-            or capture.binding.run.scope.principal_id != binding.principal_id
-            or capture.binding.run.scope.session_id != binding.session_id
-        ):
-            raise ToolCaptureFault("workspace_capture_scope_mismatch")
-        attempt = _CaptureAttempt(capture, script) if capture is not None else None
-        outcome = self._execute_python(
-            binding,
-            script,
-            timeout=timeout,
-            capture=attempt,
-            max_files_touched=max_files_touched,
-            already_touched=already_touched,
-        )
-        return attempt.finish(outcome) if attempt is not None else outcome
-
-    def _execute_python(
-        self,
-        binding: WorkspaceBinding,
-        script: str,
         *,
         timeout: float,
         capture: _CaptureAttempt | None,
-        max_files_touched: int | None,
-        already_touched: frozenset[str],
+        admit: Callable[[WorkspaceSnapshot, BoundedStage], PreparedContainer],
+        publish: bool,
+        max_files_touched: int | None = None,
+        already_touched: frozenset[str] = frozenset(),
     ) -> WorkspacePythonOutcome:
         if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("process timeout must be finite and positive")
         stage = None
         try:
             snapshot = self.workspace.capture(binding, limits=self.limits)
-            relative = Path(script)
-            if relative.is_absolute() or ".." in relative.parts or relative.suffix != ".py":
-                raise WorkspaceUnavailable("invalid workspace Python script")
-            if not any(file.path == relative.as_posix() for file in snapshot.files):
-                raise WorkspaceUnavailable("workspace Python script unavailable")
             pool = self.staging_pool
             if pool is None or pool.profile is not self.profile:
                 raise WorkspaceUnavailable("bounded staging environment unavailable")
@@ -282,7 +258,7 @@ class RootlessPythonExecutor:
                 raise WorkspaceConflict("workspace staging environment binding changed")
             bounded = pool.prepare(self.workspace, snapshot)
             stage = bounded.stage
-            prepared = self.profile.create_python_container(bounded, relative.as_posix())
+            prepared = admit(snapshot, bounded)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             return WorkspacePythonOutcome(
                 "conflict" if isinstance(exc, WorkspaceConflict) else "unavailable",
@@ -305,7 +281,10 @@ class RootlessPythonExecutor:
         try:
             if self.workspace.capture(binding, limits=self.limits) != snapshot:
                 raise WorkspaceConflict("workspace changed before process admission")
-            self.profile.verify_created(prepared)
+            if isinstance(prepared, PreparedPythonContainer):
+                self.profile.verify_created(prepared)
+            else:
+                self.profile.verify_created_command(prepared)
             stage.begin_process()
             pool.check_stage(bounded)
             self.profile.check_current()
@@ -379,6 +358,33 @@ class RootlessPythonExecutor:
             )
 
         stage.mark_settled()
+        if not publish:
+            # Verifier только наблюдает: staged snapshot освобождается без
+            # записи чего-либо обратно в workspace.
+            try:
+                pool.check_stage(bounded)
+                pool.release_unpublished(bounded)
+            except (OSError, WorkspaceUnavailable):
+                return WorkspacePythonOutcome(
+                    "finished",
+                    attached.stdout,
+                    attached.stderr,
+                    child_exit,
+                    True,
+                    None,
+                    "none",
+                    stage.root,
+                    cleanup_warning=True,
+                )
+            return WorkspacePythonOutcome(
+                "finished",
+                attached.stdout,
+                attached.stderr,
+                child_exit,
+                True,
+                None,
+                "none",
+            )
         try:
             pool.check_stage(bounded)
             publication = self.workspace.publish_bounded(
@@ -454,4 +460,186 @@ class RootlessPythonExecutor:
             "published",
             changed_paths=publication.changed_paths,
             snapshot_sha256=publication.snapshot_sha256,
+        )
+
+
+@dataclass(frozen=True)
+class RootlessPythonExecutor:
+    """Byte primitive ниже ComputerBackend/Gateway, без собственного tool loop."""
+
+    profile: RootlessPodmanProfile
+    workspace: ManagedWorkspace
+    limits: WorkspaceLimits
+    max_output_bytes: int
+    staging_pool: RootlessStagePool | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.max_output_bytes) is not int or self.max_output_bytes <= 0:
+            raise ValueError("output byte limit must be a positive integer")
+
+    @property
+    def environment_revision(self) -> str:
+        pool = self.staging_pool
+        if pool is None or pool.profile is not self.profile:
+            raise WorkspaceUnavailable("bounded staging environment unavailable")
+        return pool.execution_revision
+
+    def execute_python(
+        self,
+        binding: WorkspaceBinding,
+        script: str,
+        *,
+        timeout: float,
+        capture: ToolCaptureContext | None = None,
+        max_files_touched: int | None = None,
+        already_touched: frozenset[str] = frozenset(),
+    ) -> WorkspacePythonOutcome:
+        if capture is not None and (
+            not isinstance(capture, ToolCaptureContext)
+            or capture.binding.run.scope.principal_id != binding.principal_id
+            or capture.binding.run.scope.session_id != binding.session_id
+        ):
+            raise ToolCaptureFault("workspace_capture_scope_mismatch")
+        attempt = _CaptureAttempt(capture, script) if capture is not None else None
+        outcome = self._execute_python(
+            binding,
+            script,
+            timeout=timeout,
+            capture=attempt,
+            max_files_touched=max_files_touched,
+            already_touched=already_touched,
+        )
+        return attempt.finish(outcome) if attempt is not None else outcome
+
+    def _execute_python(
+        self,
+        binding: WorkspaceBinding,
+        script: str,
+        *,
+        timeout: float,
+        capture: _CaptureAttempt | None,
+        max_files_touched: int | None,
+        already_touched: frozenset[str],
+    ) -> WorkspacePythonOutcome:
+        def admit(snapshot: WorkspaceSnapshot, bounded: BoundedStage) -> PreparedContainer:
+            relative = Path(script)
+            if relative.is_absolute() or ".." in relative.parts or relative.suffix != ".py":
+                raise WorkspaceUnavailable("invalid workspace Python script")
+            if not any(file.path == relative.as_posix() for file in snapshot.files):
+                raise WorkspaceUnavailable("workspace Python script unavailable")
+            return self.profile.create_python_container(bounded, relative.as_posix())
+
+        return self._runner()._execute_isolated(
+            binding,
+            timeout=timeout,
+            capture=capture,
+            admit=admit,
+            publish=True,
+            max_files_touched=max_files_touched,
+            already_touched=already_touched,
+        )
+
+    def _runner(self) -> _IsolatedRunner:
+        return _IsolatedRunner(
+            profile=self.profile,
+            workspace=self.workspace,
+            limits=self.limits,
+            max_output_bytes=self.max_output_bytes,
+            staging_pool=self.staging_pool,
+        )
+
+
+@dataclass(frozen=True)
+class RootlessCommandExecutor:
+    """No-publish executor штатного process verifier: только ["make", "check"].
+
+    Исполняет canonical check на staged snapshot managed workspace; ничего
+    не публикует обратно в workspace. Без квалифицированного command-профиля
+    недоступен (is_available False; execute_command — WorkspaceUnavailable).
+    """
+
+    profile: RootlessPodmanProfile
+    workspace: ManagedWorkspace
+    limits: WorkspaceLimits
+    max_output_bytes: int
+    staging_pool: RootlessStagePool | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.max_output_bytes) is not int or self.max_output_bytes <= 0:
+            raise ValueError("output byte limit must be a positive integer")
+
+    @property
+    def environment_revision(self) -> str:
+        pool = self.staging_pool
+        if pool is None or pool.profile is not self.profile:
+            raise WorkspaceUnavailable("bounded staging environment unavailable")
+        return pool.execution_revision
+
+    @classmethod
+    def from_python_executor(
+        cls, executor: RootlessPythonExecutor | None
+    ) -> RootlessCommandExecutor | None:
+        """Вывести command executor из существующего Python executor.
+
+        None — когда Python executor отсутствует или staging pool не задан:
+        command-путь тогда недоступен, Python-путь это не затрагивает.
+        """
+        if executor is None or executor.staging_pool is None:
+            return None
+        return cls(
+            profile=executor.profile,
+            workspace=executor.workspace,
+            limits=executor.limits,
+            max_output_bytes=executor.max_output_bytes,
+            staging_pool=executor.staging_pool,
+        )
+
+    def is_available(self) -> bool:
+        """Живая проверка command-пути без запуска процессов."""
+        if self.profile.command_revision is None:
+            return False
+        pool = self.staging_pool
+        if pool is None or pool.profile is not self.profile:
+            return False
+        try:
+            self.profile.check_current()
+            pool.check_current()
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return False
+        return True
+
+    def execute_command(
+        self, binding: WorkspaceBinding, argv: list[str], *, timeout: float
+    ) -> WorkspacePythonOutcome:
+        if list(argv) != list(CANONICAL_CHECK_COMMAND):
+            raise WorkspaceUnavailable("isolated command is not allowlisted")
+        if not self.is_available():
+            # Fail-closed до capture/staging/engine: недоступный backend
+            # никогда не запускает процесс.
+            return WorkspacePythonOutcome(
+                "unavailable",
+                b"",
+                b"",
+                None,
+                False,
+                "sandbox_execution_unavailable",
+                "none",
+            )
+
+        def admit(snapshot: WorkspaceSnapshot, bounded: BoundedStage) -> PreparedContainer:
+            if not any(file.path == "Makefile" for file in snapshot.files):
+                raise WorkspaceUnavailable("canonical check definition unavailable")
+            return self.profile.create_command_container(bounded, list(argv))
+
+        return self._runner()._execute_isolated(
+            binding, timeout=timeout, capture=None, admit=admit, publish=False
+        )
+
+    def _runner(self) -> _IsolatedRunner:
+        return _IsolatedRunner(
+            profile=self.profile,
+            workspace=self.workspace,
+            limits=self.limits,
+            max_output_bytes=self.max_output_bytes,
+            staging_pool=self.staging_pool,
         )

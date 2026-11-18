@@ -11,7 +11,7 @@
 
 - native `shell`, `workspace_run`, `workspace_terminal_run`;
 - manual PTY create/reuse, input и resize;
-- process verifier: explicit packet command, default/fallback runner и Git repo probe;
+- process verifier: explicit packet command, default/fallback runner и Git repo probe — кроме узкого исключения штатного verifier ниже;
 - manual workspace Git status/diff/stage/unstage/commit и GitHub clone/import;
 - command/check/tests/diff/process patch в `ContainerComputerBackend`, включая direct runner.
 
@@ -137,5 +137,51 @@ Slot освобождается после подтверждённого cleanu
 run/attempt intent и bounded raw stdout/stderr observation в existing TaskRunStore
 до lossy ToolResult view; точный scope — TASK_RUN_STORAGE_CONTRACT.md. Остальные
 native callers не получают hidden capture. Полный canonical capture, recovery и
-terminal acceptance остаются target. Required process verifier остаётся ERROR/unavailable;
+terminal acceptance остаются target. Required process verifier остаётся ERROR/unavailable
+без квалифицированного command backend (см. узкое исключение ниже);
 этот backend не завершает R2/R1 и не включает production activation.
+
+## Узкое исключение: штатный process verifier (make check)
+
+Второе явное исключение — только штатный `VerifierRuntime` с canonical check
+`["make", "check"]` в managed workspace. Все остальные process paths из списка
+выше остаются закрыты; shell tools модели не публикуются (это E04-T04),
+полная семантика UNVERIFIED/BLOCKED — E05-T03.
+
+- Отдельный pinned image `python:3.12.16-bookworm` с make 4.3
+  (Id `28d30c15b9e9c3b1d557441aad9592226e852f7716451d6c8df5b4f0c3ce3d1b`,
+  digest `sha256:3c3ba8ad4c85eb63b7568f806434f14e33370056985da7fdf2673621cb1d7e93`),
+  отдельный профиль `i1-ubuntu-podman-5.7-command-bounded-v1`. Python-профиль
+  (`…-python-bounded-v3`) не трогается; command-ревизия квалифицируется
+  независимо — её отсутствие не ломает Python-путь.
+- Allowlist ровно `["make", "check"]`: любой другой argv отклоняется до
+  любого обращения к engine. Confinement — тот же, что у Python-пути
+  (network none, private namespaces, cap-drop ALL, no-new-privileges,
+  readonly rootfs, 256 МиБ / 64 PID, ровно один bind mount staged копии,
+  ровно те же 7 env-записей), реальный exit code — через `finished_exit`.
+- Verifier запускается на staged snapshot и только наблюдает: stage
+  освобождается через `release_unpublished`, артефакты проверки никогда
+  не пишутся обратно в workspace.
+- Условие 1 (явное разрешение на run): запуск `make check` привязан к
+  доверенному `WorkspaceBinding` — principal, session, environment revision
+  и квалифицированный профиль/staging pool обязаны совпадать с run; само
+  наличие Makefile разрешения не даёт. Без binding или без доступного
+  backend `VerifierRuntime.run()` возвращает ERROR
+  `sandbox_execution_unavailable`, процесс не запускается.
+- Условие 2 (критерий задаёт доверенная сторона): содержимое `Makefile`
+  (цель `check`) задаётся до запуска агента; его sha256 фиксируется
+  доверенным кодом раннера до начала loop и хранится вне agent-writable
+  workspace. При проверке хэш staged snapshot обязан совпасть с
+  предзапусковым; несовпадение даёт ERROR `verifier_criterion_changed`,
+  никогда PASSED.
+- Маппинг исходов: finished+0 → PASSED; finished+≠0 → FAILED
+  (`check_failed`); unavailable → ERROR зеркалом
+  `sandbox_verification_unavailable`; unknown/conflict → ERROR, никогда
+  фейковый PASSED. `_verify_after_loop`: canonical verifier есть, но backend
+  недоступен → ERROR, а не `None` (fail-closed в FAILED_VERIFIER вместо
+  COMPLETED).
+- Scope: проверка E2E-fixture Makefile в managed workspace. Полный
+  `make check` самого репозитория внутри sandbox — вне scope (репозиторий
+  нельзя заснять в managed workspace: symlink/размеры; в образе нет
+  node/venv). Зелёный fixture E2E нельзя читать как «verifier теперь
+  работает для настоящих репозиториев».

@@ -926,15 +926,16 @@
       "scope": "runtime",
       "status": "implemented",
       "owner": "runtime",
-      "version": 2,
+      "version": 3,
       "source": "docs/architecture/SANDBOX_PROCESS_FENCE.md",
       "verified_by": [
         "tests/test_sandbox_execution_fence.py",
         "tests/test_verifier_runtime.py",
         "tests/test_container_computer_backend.py",
-        "tests/ui_api/test_terminal_runtime.py"
+        "tests/ui_api/test_terminal_runtime.py",
+        "tests/test_verifier_command_execution.py"
       ],
-      "summary": "Default Sandbox tools, process verifier, manual terminal/Git/import and unqualified container commands refuse before host spawn/input. Explicit qualified rootless native workspace_run is the sole exception described in the same contract; it cannot fall back to Host. Required process verification stays unavailable/error; process-free checks and explicit Desktop authority retain their boundaries."
+      "summary": "Default Sandbox tools, process verifier, manual terminal/Git/import and unqualified container commands refuse before host spawn/input. Explicit qualified rootless native workspace_run and the narrow staff process verifier (make check only, staged snapshot, no-publish) are the sole exceptions described in the same contract; neither can fall back to Host. Required process verification stays unavailable/error without a qualified command backend; process-free checks and explicit Desktop authority retain their boundaries."
     },
     {
       "id": "runtime.sandbox.managed_python_execution",
@@ -953,6 +954,18 @@
         "tests/test_sandbox_execution_fence.py"
       ],
       "summary": "Explicit pinned rootless Podman profile admits only native workspace_run through scoped Gateway and ComputerBackend. Principal-owned managed workspaces coordinate six writers, once approval binds immutable workspace/environment revision, finite explicit kernel tmpfs byte/inode slots bound active and retained private nofollow stages (one per principal), container logs are disabled, unknown mount ownership denies reuse, and bounded transfer plus atomic publication requires original content/revision after container settlement. Unknown/conflict stops subsequent tool/model calls without publication/replay. Raw bytes and actual exit exist internally; durable capture, run-intent fencing/recovery, other process consumers and production activation remain outside this partial slice. Unit tests do not independently prove OS isolation; real synthetic qualification evidence is recorded separately."
+    },
+    {
+      "id": "runtime.sandbox.managed_verifier_execution",
+      "scope": "runtime",
+      "status": "partial",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/architecture/SANDBOX_PROCESS_FENCE.md",
+      "verified_by": [
+        "tests/test_verifier_command_execution.py"
+      ],
+      "summary": "Narrow staff process verifier only: a separate pinned rootless Podman image with make (python:3.12.16-bookworm) admits exactly [\"make\", \"check\"] on a staged snapshot of a managed workspace, with the same confinement as the qualified Python path and no publication back into the workspace. Execution requires a trusted WorkspaceBinding matching the run (principal/session/environment revision) and a qualified command profile; a Makefile alone grants nothing. The Makefile criterion hash is captured by trusted runner code before the loop and must match at verification time, otherwise ERROR verifier_criterion_changed. Outcome mapping is finished+0 to PASSED, finished+nonzero to FAILED, unavailable/unknown/conflict to ERROR, never a faked PASSED; an unavailable backend fails closed to FAILED_VERIFIER. Scope is E2E-fixture Makefiles only; full repository make check inside the sandbox, model shell tools and UNVERIFIED/BLOCKED semantics remain outside this slice. Unit tests do not independently prove OS isolation; real synthetic qualification evidence is recorded separately."
     },
     {
       "id": "runtime.lifecycle.workspace_run_capture",

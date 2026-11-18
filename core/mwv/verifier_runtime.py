@@ -3,15 +3,41 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import subprocess
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from core.mwv.models import RunContext, TaskPacket, VerificationResult, VerificationStatus
-from core.mwv.verifier import VerifierRunner, sandbox_verification_unavailable
+from core.mwv.verifier import (
+    MAX_OUTPUT_CHARS,
+    TRUNCATION_SUFFIX,
+    VerifierRunner,
+    sandbox_verification_unavailable,
+)
 from shared.models import JSONValue, ToolResult
+from shared.sandbox_execution import SANDBOX_EXECUTION_MESSAGE, SandboxExecutionReason
+from shared.workspace_binding import WorkspaceUnavailable
+
+if TYPE_CHECKING:
+    from core.workspace_python_execution import WorkspacePythonOutcome
+    from shared.workspace_binding import WorkspaceBinding
+
+
+class CommandExecutorProtocol(Protocol):
+    """Квалифицированный исполнитель canonical check на staged snapshot.
+
+    Реализация — RootlessCommandExecutor; протокол держит VerifierRuntime
+    независимым от rootless-механизма и тестируемым с fake executor.
+    """
+
+    def is_available(self) -> bool: ...
+
+    def execute_command(
+        self, binding: WorkspaceBinding, argv: list[str], *, timeout: float
+    ) -> WorkspacePythonOutcome: ...
 
 
 class VerifierRunnerProtocol(Protocol):
@@ -63,6 +89,15 @@ def has_canonical_repo_verifier(project_root: Path) -> bool:
     return (project_root / "Makefile").is_file() and (
         shutil.which(CANONICAL_CHECK_COMMAND[0]) is not None
     )
+
+
+def has_canonical_check_definition(project_root: Path) -> bool:
+    """Makefile в workspace — критерий проверки для штатного verifier-пути.
+
+    В отличие от has_canonical_repo_verifier, host make не проверяется:
+    исполнение идёт только внутри квалифицированного контейнера.
+    """
+    return (project_root / "Makefile").is_file()
 
 
 def _desktop_change_is_verified(
@@ -214,6 +249,10 @@ class VerifierRuntime:
     runner: VerifierRunnerProtocol = field(default_factory=_default_runner)
     fallback_commands: tuple[tuple[str, ...], ...] = DEFAULT_FALLBACK_COMMANDS
     project_root: Path = field(default_factory=_default_project_root)
+    # Штатный исполнитель canonical check. None — поведение без исполнителя:
+    # run() возвращает sandbox_verification_unavailable, как раньше.
+    executor: CommandExecutorProtocol | None = None
+    binding: WorkspaceBinding | None = None
 
     def verify_desktop_observations(
         self,
@@ -269,8 +308,8 @@ class VerifierRuntime:
         try:
             workspace_root = _resolve_workspace_root(context.workspace_root)
             command = _resolve_packet_command(task.verifier)
-            _resolve_timeout(task.verifier)
-            _resolve_cwd(task.verifier, workspace_root=workspace_root)
+            timeout = _resolve_timeout(task.verifier)
+            cwd = _resolve_cwd(task.verifier, workspace_root=workspace_root)
         except ValueError as exc:
             return VerificationResult(
                 status=VerificationStatus.ERROR,
@@ -301,7 +340,144 @@ class VerifierRuntime:
                 fail_type="cancelled",
                 verifier_profile="unavailable",
             )
-        return sandbox_verification_unavailable(command or [])
+        if self.executor is None:
+            return sandbox_verification_unavailable(command or [])
+        resolved_command = command if command is not None else list(CANONICAL_CHECK_COMMAND)
+        if resolved_command != list(CANONICAL_CHECK_COMMAND):
+            return VerificationResult(
+                status=VerificationStatus.ERROR,
+                command=resolved_command,
+                exit_code=None,
+                stdout="",
+                stderr="",
+                duration_seconds=time.monotonic() - start,
+                error="invalid_verifier_config: verifier.command must be the canonical check.",
+                fail_type="invalid_config",
+                excerpt="verifier.command must be the canonical check",
+                verifier_profile="explicit",
+            )
+        if cwd != workspace_root:
+            return VerificationResult(
+                status=VerificationStatus.ERROR,
+                command=resolved_command,
+                exit_code=None,
+                stdout="",
+                stderr="",
+                duration_seconds=time.monotonic() - start,
+                error="invalid_verifier_config: verifier.cwd must be the workspace root.",
+                fail_type="invalid_config",
+                excerpt="verifier.cwd must be the workspace root",
+                verifier_profile="explicit",
+            )
+        if self.binding is None:
+            return VerificationResult(
+                status=VerificationStatus.ERROR,
+                command=resolved_command,
+                exit_code=None,
+                stdout="",
+                stderr="",
+                duration_seconds=time.monotonic() - start,
+                error="verifier_binding_required",
+                fail_type="invalid_config",
+                excerpt="verifier_binding_required",
+                verifier_profile="unavailable",
+            )
+        try:
+            outcome = self.executor.execute_command(
+                self.binding, resolved_command, timeout=float(timeout)
+            )
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            reason = (
+                exc.reason_code
+                if isinstance(exc, WorkspaceUnavailable)
+                else "workspace_unavailable"
+            )
+            return VerificationResult(
+                status=VerificationStatus.ERROR,
+                command=resolved_command,
+                exit_code=None,
+                stdout="",
+                stderr="",
+                duration_seconds=time.monotonic() - start,
+                error=reason,
+                fail_type="execution_unavailable",
+                excerpt=reason,
+                verifier_profile="unavailable",
+            )
+        return _map_command_outcome(outcome, command=resolved_command, started=start)
+
+
+def _truncate_command_text(data: bytes) -> str:
+    text = data.decode("utf-8", errors="replace")
+    if len(text) > MAX_OUTPUT_CHARS:
+        return text[:MAX_OUTPUT_CHARS] + TRUNCATION_SUFFIX
+    return text
+
+
+def _map_command_outcome(
+    outcome: WorkspacePythonOutcome, *, command: list[str], started: float
+) -> VerificationResult:
+    """Исход изолированного make check → VerificationResult. Без фейкового PASSED.
+
+    finished+0 → PASSED; finished+≠0 → FAILED; unavailable → ERROR зеркалом
+    sandbox_verification_unavailable; unknown/conflict → ERROR, никогда FAILED.
+    """
+    duration = time.monotonic() - started
+    stdout = _truncate_command_text(outcome.stdout)
+    stderr = _truncate_command_text(outcome.stderr)
+    excerpt = (stdout + stderr)[-500:]
+    if outcome.state == "finished" and outcome.exit_code == 0:
+        return VerificationResult(
+            status=VerificationStatus.PASSED,
+            command=command,
+            exit_code=0,
+            stdout=stdout,
+            stderr=stderr,
+            duration_seconds=duration,
+            error=None,
+            fail_type=None,
+            excerpt=excerpt,
+            verifier_profile="canonical",
+        )
+    if outcome.state == "finished":
+        return VerificationResult(
+            status=VerificationStatus.FAILED,
+            command=command,
+            exit_code=outcome.exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            duration_seconds=duration,
+            error="canonical check failed",
+            fail_type="check_failed",
+            excerpt=excerpt,
+            verifier_profile="canonical",
+        )
+    if outcome.state == "unavailable":
+        return VerificationResult(
+            status=VerificationStatus.ERROR,
+            command=command,
+            exit_code=None,
+            stdout="",
+            stderr=SANDBOX_EXECUTION_MESSAGE,
+            duration_seconds=duration,
+            error=SandboxExecutionReason.UNAVAILABLE.value,
+            fail_type="execution_unavailable",
+            excerpt=SANDBOX_EXECUTION_MESSAGE,
+            verifier_profile="unavailable",
+        )
+    reason = outcome.reason_code or "workspace_unavailable"
+    return VerificationResult(
+        status=VerificationStatus.ERROR,
+        command=command,
+        exit_code=None,
+        stdout=stdout,
+        stderr=stderr,
+        duration_seconds=duration,
+        error=reason,
+        fail_type="execution_unknown" if outcome.state == "unknown" else "execution_conflict",
+        excerpt=excerpt,
+        verifier_profile="canonical",
+    )
 
 
 def _resolve_packet_command(verifier: object) -> list[str] | None:

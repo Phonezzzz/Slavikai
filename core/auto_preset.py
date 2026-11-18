@@ -40,6 +40,7 @@ What changed relative to the old ``AutoOrchestrator``:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import time
 import uuid
@@ -49,6 +50,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from core.approval_policy import ApprovalRequired
+from core.managed_workspace import WorkspaceAccess
 from core.mwv.models import (
     RunContext,
     StopReasonCode,
@@ -59,7 +61,7 @@ from core.mwv.models import (
 from core.mwv.verifier_runtime import (
     VerifierRuntime,
     canonical_check_command,
-    has_canonical_repo_verifier,
+    has_canonical_check_definition,
     is_repo_workspace,
 )
 from core.mwv.verifier_summary import extract_verifier_excerpt
@@ -77,6 +79,10 @@ from core.tool_loop import (
     ToolLoopContinuation,
     ToolLoopExecutionError,
 )
+from core.workspace_python_execution import (
+    RootlessCommandExecutor,
+    RootlessPythonExecutor,
+)
 from llm.brain_base import Brain
 from shared.auto_models import (
     AutoRunStatus,
@@ -85,6 +91,7 @@ from shared.auto_models import (
 )
 from shared.models import JSONValue, LLMMessage
 from shared.tool_capture import CaptureBinding, ToolCaptureFault
+from shared.workspace_binding import WorkspaceBinding
 from tools.workspace_tools import WORKSPACE_ROOT, get_workspace_root
 
 if TYPE_CHECKING:
@@ -161,6 +168,9 @@ class _RunFrame:
     runtime_root: str | None
     file_effects: AutoFileEffects
     capture_binding: CaptureBinding | None = None
+    # Хэш Makefile, зафиксированный доверенным кодом до начала loop (условие 2
+    # владельца): критерий проверки задаёт доверенная сторона, а не агент.
+    verifier_criterion_sha256: str | None = None
 
 
 @dataclass
@@ -171,6 +181,35 @@ class _PausedRun:
 
 class AutoContinuationUnavailable(ValueError):
     pass
+
+
+def _criterion_sha256(run_root: Path) -> str | None:
+    """Хэш доверенного критерия проверки (Makefile) до запуска агента.
+
+    None — Makefile отсутствует или нечитаем: критерий не задан, verifier
+    такой run не проверяет.
+    """
+    try:
+        return hashlib.sha256((run_root / "Makefile").read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _unavailable_verification() -> VerificationResult:
+    """Fail-closed: backend недоступен → ERROR, никогда PASSED и никогда None."""
+    reason = "sandbox_execution_unavailable"
+    return VerificationResult(
+        status=VerificationStatus.ERROR,
+        command=[],
+        exit_code=None,
+        stdout="",
+        stderr=reason,
+        duration_seconds=0.0,
+        error=reason,
+        fail_type="execution_unavailable",
+        excerpt=reason,
+        verifier_profile="unavailable",
+    )
 
 
 class AutoPresetRunner:
@@ -219,6 +258,10 @@ class AutoPresetRunner:
             run_root = runtime_root
         else:
             run_root = self.workspace_root
+        # Критерий проверки фиксируется доверенным кодом до запуска агента
+        # (условие 2 владельца); resume его не перезахватывает — frame
+        # персистится в _PausedRun.
+        criterion_sha256 = _criterion_sha256(run_root)
         state: dict[str, JSONValue] = {
             "run_id": run_id_value,
             "status": AutoRunStatus.RUNNING.value,
@@ -238,6 +281,7 @@ class AutoPresetRunner:
             "execution_metrics": {"files_touched": None},
             "budgets": budgets.to_dict(),
             "verifier": None,
+            "verifier_criterion_sha256": criterion_sha256,
             "approval": None,
             "error": None,
             "error_code": None,
@@ -264,6 +308,7 @@ class AutoPresetRunner:
             self.parent.runtime_workspace_root,
             AutoFileEffects(budgets.max_files_touched),
             capture_binding,
+            verifier_criterion_sha256=criterion_sha256,
         )
         return self._execute_frame(frame, cancellation_token=cancellation_token)
 
@@ -492,6 +537,7 @@ class AutoPresetRunner:
                 budgets=budgets,
                 loop_result=loop_result,
                 cancellation_token=cancellation_token,
+                criterion_sha256=frame.verifier_criterion_sha256,
             )
             state["verifier"] = (
                 _verification_state(verification) if verification is not None else None
@@ -740,19 +786,24 @@ class AutoPresetRunner:
         budgets: AutoBudgets,
         loop_result: AgentToolLoopResult,
         cancellation_token: asyncio.Event | None = None,
+        criterion_sha256: str | None = None,
     ) -> VerificationResult | None:
         """Honest verification after a clean loop.
 
         Returns ``None`` when there is nothing real to verify — a
         non-empty response-only run, or a run in a workspace without a
-        canonical repo verifier. No ``PASSED`` is ever claimed from the
+        canonical check definition. No ``PASSED`` is ever claimed from the
         bare fact that tool calls succeeded or the model answered. An
         empty response-only run is rejected with
         ``auto_no_observable_result`` instead of completing: the user
-        got neither an answer nor an executed action. A repository
-        workspace runs the real canonical verifier; a repository
-        workspace without one fails honestly with
-        ``canonical_repo_verifier_unavailable``.
+        got neither an answer nor an executed action. A workspace with a
+        Makefile runs the real canonical verifier through the qualified
+        command executor; a repository workspace without a Makefile fails
+        honestly with ``canonical_repo_verifier_unavailable``. A Makefile
+        workspace whose backend is unavailable fails closed with
+        ``sandbox_execution_unavailable`` (ERROR, never ``None``), and a
+        Makefile changed after the pre-loop criterion hash fails with
+        ``verifier_criterion_changed``.
         """
         if not loop_result.tool_calls:
             if not (loop_result.text or "").strip():
@@ -770,7 +821,7 @@ class AutoPresetRunner:
                     verifier_profile="response_only",
                 )
             return None
-        if not has_canonical_repo_verifier(run_root):
+        if not has_canonical_check_definition(run_root):
             if is_repo_workspace(run_root):
                 reason = "canonical_repo_verifier_unavailable"
                 return VerificationResult(
@@ -786,7 +837,25 @@ class AutoPresetRunner:
                     verifier_profile="repository",
                 )
             return None
-        verifier = VerifierRuntime(project_root=run_root)
+        executor, binding = self._verifier_command_executor(run_root)
+        if executor is None or binding is None or not executor.is_available():
+            return _unavailable_verification()
+        current = _criterion_sha256(run_root)
+        if criterion_sha256 is None or current != criterion_sha256:
+            reason = "verifier_criterion_changed"
+            return VerificationResult(
+                status=VerificationStatus.ERROR,
+                command=[],
+                exit_code=None,
+                stdout="",
+                stderr=reason,
+                duration_seconds=0.0,
+                error=reason,
+                fail_type="criterion_changed",
+                excerpt=reason,
+                verifier_profile="canonical",
+            )
+        verifier = VerifierRuntime(project_root=run_root, executor=executor, binding=binding)
         context = RunContext(
             session_id=self.parent.session_id or "local",
             trace_id=str(uuid.uuid4()),
@@ -807,6 +876,34 @@ class AutoPresetRunner:
         if cancellation_token is not None:
             return verifier.run(verifier_task, context, cancelled=cancellation_token.is_set)
         return verifier.run(verifier_task, context)
+
+    def _verifier_command_executor(
+        self, run_root: Path
+    ) -> tuple[RootlessCommandExecutor | None, WorkspaceBinding | None]:
+        """Command executor + binding для штатного verifier, или (None, None).
+
+        Parent держит ``_workspace_executor``/``_workspace_access`` как
+        приватные атрибуты; stub-родители в тестах их не имеют — getattr.
+        Binding обязан указывать ровно на run_root, иначе verifier не
+        запускается (условие 1 владельца).
+        """
+        python_executor = getattr(self.parent, "_workspace_executor", None)
+        if not isinstance(python_executor, RootlessPythonExecutor):
+            return None, None
+        access = getattr(self.parent, "_workspace_access", None)
+        if not isinstance(access, WorkspaceAccess):
+            return None, None
+        try:
+            workspace_root = access.workspace.root.resolve()
+            run_root_resolved = run_root.resolve()
+        except OSError:
+            return None, None
+        if workspace_root != run_root_resolved:
+            return None, None
+        executor = RootlessCommandExecutor.from_python_executor(python_executor)
+        if executor is None:
+            return None, None
+        return executor, access.bind()
 
     def _set_status(
         self,
