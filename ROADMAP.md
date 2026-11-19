@@ -419,7 +419,7 @@ Final outcome
 |---|---:|---|
 | E00 — baseline/docs | 3 | E00-T01 DONE; E00-T02 DONE; E00-T03 DONE |
 | E01 — canonical execution | 9 | E01 T01–T09 DONE (PR #163, main 0f894c6) |
-| E02 — persistent browser | 8 | T01 IN_REVIEW (PR #166) |
+| E02 — persistent browser | 8 | T01 DONE (PR #166); T02 IN_REVIEW (PR #167) |
 | E03 — Host Bridge / Desktop Commander | 11 | READY после E02 |
 | E04 — workspace/executor | 6 | T03 slice DONE (PR #164, main 7affb3f); остальное NEEDS_REFINEMENT |
 | E05 — verification/recovery | 7 | NEEDS_REFINEMENT |
@@ -1006,6 +1006,14 @@ This ticket's acceptance (instrumentation test for model-originated state-changi
 **Negative.** Основной Chrome profile владельца нельзя выбрать.
 
 **Forbidden.** Копирование password DB из Chrome владельца.
+
+**Что сделано.** Новый persistent context внутри `BrowserService`/`DesktopBrowserTool` (коммит `b3b7b7e`): `core/browser_service.py` — `DEFAULT_BROWSER_PROFILE_ROOT` (`~/.local/state/slavikai/browser-profiles`, тот же XDG state home, что у `CHATGPT_PLAN_STORAGE` в `shared/sandbox.py`), `resolve_browser_profile_dir(profile, *, root)` (`<root>/<owner_id>/<profile_id>`, компоненты — один safe path component, без сепараторов/`..`), `validate_browser_profile_dir` (resolved path обязан лежать строго под dedicated root); `tools/desktop_browser_tool.py` — `PlaywrightBrowserBackend` принимает опциональный `user_data_dir` (+ `profile_root` для валидации) и стартует `launch_persistent_context` вместо `launch` + `new_context`, `close()` пропускает повторный `browser.close()` (persistent context владеет браузером); без `user_data_dir` — прежнее disposable поведение; default factory `DesktopBrowserTool` profile-aware и резолвит каталог сам, injected zero-arg `backend_factory` продолжает работать; production wiring в `core/agent.py` не менялся. Claim `runtime.browser.session_service` version 1 → 2 (partial: lease E02-T03 и login handoff E02-T04 остаются).
+
+**Мини-аудит (до изменений).** `PlaywrightBrowserBackend._ensure_started` делал `chromium.launch` + `new_context(accept_downloads=True)` — disposable, `launch_persistent_context` в репо не было; factory сервиса в E02-T01 игнорировала profile; прецедент durable state — `~/.local/state/slavikai/chatgpt-plan`; real-browser тестов в репо не было, bundled Chromium не установлен (только stray `browser@*` marker-файлы) — поставлен venv Playwright (`chromium-1234` + headless shell, deployment note для opt-in E2E); smoke-тест показал, что cookie нельзя ставить на `about:blank`, поэтому E2E использует локальный HTTP origin (`127.0.0.1`, `ThreadingHTTPServer`).
+
+**Tests.** Новый `tests/test_browser_persistence.py` (8 тестов: resolver/validator, backend отклоняет non-dedicated dir, persistent wiring на recording fake Playwright, disposable launch без изменений, `start`-запрос с `user_data_dir` на Chrome-профиль владельца игнорируется, opt-in real-browser E2E). E2E (`SLAVIK_RUN_BROWSER_PERSISTENCE_E2E=1`): login на локальном тестовом сайте → stop браузера → restart на том же profile → `cookie=yes storage=yes` (1.44s). Sensitivity: первый прогон E2E упал как задумано — session cookie без `max-age` рестарт не переживает по дизайну, поэтому login cookie несёт `max-age=3600`. `make check` зелёный (2504 passed, 4 skipped, coverage 83.24%); `ruff check`/`ruff format`/`mypy` чистые.
+
+**Намеренно не в тикете.** Lease (E02-T03); login handoff (E02-T04); secret boundary (E02-T07) не трогается: каталог профиля хранит только browser state, credentials не читаются и не копируются.
 
 #### E02-T03 — Browser profile lease
 
