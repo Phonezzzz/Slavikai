@@ -21,24 +21,43 @@ path components (plain ids stay readable, production principals such as
 ``email:owner@example.com`` become ``email%3Aowner%40example.com``), so no
 caller can point the browser at an arbitrary directory, the owner's main
 Chrome profile can never be selected and no password database is ever
-copied — see :func:`validate_browser_profile_dir`.
+copied — see :func:`validate_browser_profile_dir`. Below the root every
+path component must be a real directory, never a symlink: an alias (one
+profile or owner directory symlinked to another) would let two identities
+drive one ``user_data_dir`` under two different leases, so it is refused.
+
+Lease (E02-T03): lease files live in their own root,
+``<profile-root>.leases`` next to the profile root
+(``~/.local/state/slavikai/browser-profiles.leases`` by default), as
+``<lease-root>/<owner_id>/<profile_id>.lease``. Profile directories and
+lease files never share a namespace, so no profile id can collide with a
+lease file, and existing profile paths are unchanged.
 """
 
 from __future__ import annotations
 
+import os
+import stat
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote
 
-from core.browser_lease import BrowserProfileLease, acquire_profile_lease
+from core.browser_lease import (
+    BrowserProfileLease,
+    BrowserProfileLeaseError,
+    acquire_profile_lease,
+)
 from shared.models import ToolRequest, ToolResult
 
 DEFAULT_PROFILE_ID = "default"
 DEFAULT_OWNER_ID = "local"
 
 DEFAULT_BROWSER_PROFILE_ROOT = Path.home() / ".local" / "state" / "slavikai" / "browser-profiles"
+
+_LEASE_ROOT_SUFFIX = ".leases"
+_LEASE_FILE_SUFFIX = ".lease"
 
 
 class BrowserAutomationBackend(Protocol):
@@ -94,27 +113,69 @@ def resolve_browser_profile_dir(profile: BrowserProfile, *, root: Path | None = 
 def validate_browser_profile_dir(path: Path, *, root: Path | None = None) -> Path:
     """Require a browser profile directory to live under the dedicated root.
 
-    Returns the resolved path. Anything outside the root — the owner's main
+    Returns the canonical path. Anything outside the root — the owner's main
     Chrome profile, the root itself, a ``..`` traversal escaping it — is
-    refused with ``ValueError`` before any browser is launched.
+    refused with ``ValueError`` before any browser is launched, and so is
+    an alias: a symlink anywhere below the root (see
+    :func:`_canonical_under_root`).
     """
     base = Path(root) if root is not None else DEFAULT_BROWSER_PROFILE_ROOT
-    resolved = Path(path).expanduser().resolve()
-    base_resolved = base.expanduser().resolve()
-    if resolved == base_resolved or base_resolved not in resolved.parents:
-        raise ValueError(
-            "browser profile directory must live under the dedicated browser profile root"
-        )
-    return resolved
+    return _canonical_under_root(
+        path,
+        base,
+        what="browser profile directory",
+        error=ValueError,
+    )
 
 
-def _require_under_root(path: Path, root: Path) -> Path:
-    """Resolve ``path`` and require it to live strictly under ``root``."""
-    resolved = Path(path).expanduser().resolve()
-    base_resolved = Path(root).expanduser().resolve()
-    if resolved == base_resolved or base_resolved not in resolved.parents:
-        raise ValueError("browser profile path must live under the dedicated browser profile root")
-    return resolved
+def _canonical_under_root(
+    path: Path,
+    root: Path,
+    *,
+    what: str,
+    error: type[Exception],
+) -> Path:
+    """Canonical ``path`` strictly under ``root``, without following aliases.
+
+    The root itself may sit behind a symlink (it is resolved once); below
+    it the path is checked lexically (``..`` collapsed, never resolved) and
+    every existing component is ``lstat``-ed: a symlink is refused with
+    ``error`` instead of being followed, so two identities can never reach
+    one directory through two different paths.
+    """
+    base_lexical = Path(os.path.normpath(os.path.abspath(Path(root).expanduser())))
+    base_resolved = base_lexical.resolve()
+    lexical = Path(os.path.normpath(os.path.abspath(Path(path).expanduser())))
+    relative: Path | None = None
+    for base in (base_lexical, base_resolved):
+        if lexical != base and base in lexical.parents:
+            relative = lexical.relative_to(base)
+            break
+    if relative is None:
+        raise error(f"{what} must live under its dedicated root")
+    current = base_resolved
+    for part in relative.parts:
+        current = current / part
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            break
+        except OSError as exc:
+            raise error(f"cannot inspect {what} path {current}: {exc}") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise error(f"{what} must not be a symlink alias: {current}")
+    return base_resolved / relative
+
+
+def browser_profile_lease_root(root: Path | None = None) -> Path:
+    """Dedicated lease root for a profile root: ``<profile-root>.leases``.
+
+    A sibling of the profile root, never inside it, so lease files and
+    profile directories can never collide.
+    """
+    base = Path(root) if root is not None else DEFAULT_BROWSER_PROFILE_ROOT
+    lexical = Path(os.path.normpath(os.path.abspath(base.expanduser())))
+    return lexical.with_name(lexical.name + _LEASE_ROOT_SUFFIX)
 
 
 def resolve_browser_profile_lease_path(
@@ -122,18 +183,28 @@ def resolve_browser_profile_lease_path(
 ) -> Path:
     """Dedicated lease file for one browser profile.
 
-    ``<root>/<owner_id>/.lease-<profile_id>`` — a sibling of the profile
-    directory, never inside it: Chromium owns ``user_data_dir`` contents
-    and must never see our lock file. The component is encoded exactly
-    like the profile directory, so the lease path is derived from identity
-    only and can never escape the dedicated root.
+    ``<lease-root>/<owner_id>/<profile_id>.lease`` in the lease root of
+    ``root`` (:func:`browser_profile_lease_root`), never inside the profile
+    root: Chromium owns ``user_data_dir`` contents and must never see our
+    lock file, and no profile id can collide with a lease file. Components
+    are encoded exactly like the profile directory, so the lease path is
+    derived from identity only; parent components are checked for symlink
+    aliases, and the last component is left to the lease open
+    (``O_NOFOLLOW``).
     """
-    base = Path(root) if root is not None else DEFAULT_BROWSER_PROFILE_ROOT
-    profile_dir = resolve_browser_profile_dir(profile, root=base)
-    lease_path = profile_dir.parent / (
-        ".lease-" + _profile_component(profile.profile_id, "profile_id")
+    lease_root = browser_profile_lease_root(root)
+    candidate = (
+        lease_root
+        / _profile_component(profile.owner_id, "owner_id")
+        / (_profile_component(profile.profile_id, "profile_id") + _LEASE_FILE_SUFFIX)
     )
-    return _require_under_root(lease_path, base)
+    parent = _canonical_under_root(
+        candidate.parent,
+        lease_root,
+        what="browser profile lease directory",
+        error=BrowserProfileLeaseError,
+    )
+    return parent / candidate.name
 
 
 def acquire_browser_profile_lease(

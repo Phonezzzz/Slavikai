@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import select
+import stat
 import subprocess
 import sys
 import threading
@@ -38,6 +39,7 @@ from core.browser_service import (
     BrowserProfile,
     BrowserService,
     acquire_browser_profile_lease,
+    browser_profile_lease_root,
     resolve_browser_profile_dir,
     resolve_browser_profile_lease_path,
 )
@@ -185,15 +187,19 @@ def _lease_provider(root: Path) -> Callable[[BrowserProfile], BrowserProfileLeas
 
 
 def test_lease_path_is_derived_from_identity(tmp_path: Path) -> None:
+    lease_root = browser_profile_lease_root(tmp_path).resolve()
+    assert lease_root == tmp_path.resolve().with_name(tmp_path.name + ".leases")
+    assert lease_root not in tmp_path.resolve().parents
+    assert tmp_path.resolve() not in lease_root.parents
     assert (
         resolve_browser_profile_lease_path(_profile("work", "alice"), root=tmp_path)
-        == (tmp_path / "alice" / ".lease-work").resolve()
+        == lease_root / "alice" / "work.lease"
     )
     encoded = resolve_browser_profile_lease_path(
         BrowserProfile(profile_id="default", owner_id="email:owner@example.com"),
         root=tmp_path,
     )
-    assert encoded == (tmp_path / "email%3Aowner%40example.com" / ".lease-default").resolve()
+    assert encoded == lease_root / "email%3Aowner%40example.com" / "default.lease"
     other = resolve_browser_profile_lease_path(
         BrowserProfile(profile_id="default", owner_id="email:other@example.com"),
         root=tmp_path,
@@ -259,6 +265,165 @@ def test_lease_path_symlink_is_refused(tmp_path: Path) -> None:
     lease_path.symlink_to(target)
     with pytest.raises(BrowserProfileLeaseError):
         acquire_browser_profile_lease(profile, root=tmp_path)
+
+
+def test_lease_symlink_to_private_file_is_refused_and_target_untouched(
+    tmp_path: Path,
+) -> None:
+    # Codex round 1: a symlink to a private (0600) regular file must be
+    # refused by O_NOFOLLOW itself, not by the permission check, and the
+    # target must never be truncated or rewritten.
+    root = tmp_path / "profiles"
+    profile = _profile()
+    lease_path = resolve_browser_profile_lease_path(profile, root=root)
+    lease_path.parent.mkdir(parents=True, exist_ok=True)
+    other = resolve_browser_profile_lease_path(_profile("other"), root=root)
+    other.write_text("precious")
+    other.chmod(0o600)
+    lease_path.symlink_to(other)
+    with pytest.raises(BrowserProfileLeaseError):
+        acquire_browser_profile_lease(profile, root=root)
+    assert other.read_text() == "precious"
+    assert lease_path.is_symlink()
+
+
+def test_lease_files_never_collide_with_profile_directories(tmp_path: Path) -> None:
+    # Codex round 1: profile ids that look like lease names coexist with
+    # the profiles whose lease they used to shadow.
+    root = tmp_path / "profiles"
+    names = ["default", ".lease-default", "default.lease", "default.lease.lease"]
+    for _round in range(2):
+        leases = [acquire_browser_profile_lease(_profile(name), root=root) for name in names]
+        try:
+            for name, lease in zip(names, leases, strict=True):
+                assert lease.profile_dir.is_dir(), name
+                assert lease.lease_path.is_file(), name
+                assert browser_profile_lease_root(root).resolve() in lease.lease_path.parents
+                assert root.resolve() not in lease.lease_path.parents
+            assert len({lease.lease_path for lease in leases}) == len(names)
+            assert len({lease.profile_dir for lease in leases}) == len(names)
+        finally:
+            for lease in leases:
+                lease.release()
+    assert sorted(p.name for p in (root / "local").iterdir()) == sorted(names)
+
+
+def test_profile_alias_symlink_is_refused(tmp_path: Path) -> None:
+    root = tmp_path / "profiles"
+    work = resolve_browser_profile_dir(_profile("work"), root=root)
+    work.mkdir(parents=True)
+    (work.parent / "alias").symlink_to(work, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink alias"):
+        resolve_browser_profile_dir(_profile("alias"), root=root)
+    with pytest.raises(ValueError, match="symlink alias"):
+        acquire_browser_profile_lease(_profile("alias"), root=root)
+    held = acquire_browser_profile_lease(_profile("work"), root=root)
+    held.release()
+
+
+def test_owner_alias_symlink_is_refused(tmp_path: Path) -> None:
+    root = tmp_path / "profiles"
+    alice = resolve_browser_profile_dir(_profile("default", "alice"), root=root)
+    alice.mkdir(parents=True)
+    (root / "bob").symlink_to(alice.parent, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink alias"):
+        resolve_browser_profile_dir(_profile("default", "bob"), root=root)
+    with pytest.raises(ValueError, match="symlink alias"):
+        acquire_browser_profile_lease(_profile("default", "bob"), root=root)
+
+
+def test_lease_directory_alias_symlink_is_refused(tmp_path: Path) -> None:
+    root = tmp_path / "profiles"
+    alice_lease = resolve_browser_profile_lease_path(_profile("default", "alice"), root=root)
+    alice_lease.parent.mkdir(parents=True)
+    (browser_profile_lease_root(root) / "bob").symlink_to(
+        alice_lease.parent, target_is_directory=True
+    )
+    with pytest.raises(BrowserProfileLeaseError, match="symlink alias"):
+        acquire_browser_profile_lease(_profile("default", "bob"), root=root)
+
+
+def test_tool_refuses_profile_alias(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    recording = _RecordingPlaywright()
+    monkeypatch.setattr(desktop_browser_tool, "sync_playwright", lambda: recording)
+    root = tmp_path / "profiles"
+    work = resolve_browser_profile_dir(_profile("work"), root=root)
+    work.mkdir(parents=True)
+    (work.parent / "alias").symlink_to(work, target_is_directory=True)
+    tool = DesktopBrowserTool(_security(tmp_path), profile=_profile("alias"), profile_root=root)
+    refused = tool.handle(_request("start"))
+    assert not refused.ok
+    assert refused.error is not None and "symlink alias" in refused.error
+    assert not recording.chromium.persistent_calls
+
+
+def test_lease_fifo_is_refused_without_blocking(tmp_path: Path) -> None:
+    # Codex round 1: a FIFO without a writer must not hang the open — the
+    # lease is opened once with O_NONBLOCK and refused by fstat. Runs in a
+    # subprocess so a regression fails on the timeout instead of hanging
+    # the test session.
+    root = tmp_path / "profiles"
+    profile = _profile()
+    lease_path = resolve_browser_profile_lease_path(profile, root=root)
+    lease_path.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(lease_path, 0o600)
+    code = (
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, os.environ['SLAVIK_REPO_ROOT'])\n"
+        "from core.browser_lease import BrowserProfileLeaseError\n"
+        "from core.browser_service import BrowserProfile, acquire_browser_profile_lease\n"
+        "root = Path(os.environ['SLAVIK_ROOT'])\n"
+        "try:\n"
+        "    acquire_browser_profile_lease(BrowserProfile(), root=root)\n"
+        "except BrowserProfileLeaseError as exc:\n"
+        "    print('REFUSED', exc, flush=True)\n"
+        "    sys.exit(0)\n"
+        "print('ACQUIRED', flush=True)\n"
+        "sys.exit(1)\n"
+    )
+    env = {**os.environ, "SLAVIK_REPO_ROOT": str(REPO_ROOT), "SLAVIK_ROOT": str(root)}
+    done = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=20
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert done.stdout.startswith("REFUSED")
+    assert "unqualified" in done.stdout
+    assert stat.S_ISFIFO(os.lstat(lease_path).st_mode)
+
+
+def test_new_profile_directory_is_private_under_umask_022(tmp_path: Path) -> None:
+    # Codex round 1: Playwright creates a new user_data_dir with 0700; the
+    # lease now creates it first, so it must keep that boundary.
+    root = tmp_path / "profiles"
+    previous = os.umask(0o022)
+    try:
+        lease = acquire_browser_profile_lease(_profile(), root=root)
+    finally:
+        os.umask(previous)
+    try:
+        assert stat.S_IMODE(os.lstat(lease.profile_dir).st_mode) == 0o700
+        assert stat.S_IMODE(os.lstat(lease.profile_dir.parent).st_mode) == 0o700
+        assert stat.S_IMODE(os.lstat(lease.lease_path.parent).st_mode) == 0o700
+        assert stat.S_IMODE(os.lstat(lease.lease_path).st_mode) == 0o600
+    finally:
+        lease.release()
+
+
+def test_existing_open_profile_directory_is_made_private(tmp_path: Path) -> None:
+    # Existing directory with group/other bits (e.g. created by an earlier
+    # build) is ours by construction: tightened to 0700, never adopted open.
+    root = tmp_path / "profiles"
+    profile_dir = resolve_browser_profile_dir(_profile(), root=root)
+    profile_dir.mkdir(parents=True)
+    profile_dir.chmod(0o755)
+    (profile_dir / "Cookies").write_text("state")
+    lease = acquire_browser_profile_lease(_profile(), root=root)
+    try:
+        assert stat.S_IMODE(os.lstat(profile_dir).st_mode) == 0o700
+        assert (profile_dir / "Cookies").read_text() == "state"
+    finally:
+        lease.release()
 
 
 def test_profile_dir_that_is_a_file_is_refused(tmp_path: Path) -> None:

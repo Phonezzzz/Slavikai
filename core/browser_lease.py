@@ -3,21 +3,33 @@
 One lease per profile (E02-T03): two runs — two ``BrowserService``
 instances in one process, or two processes — must never drive one
 Chromium ``user_data_dir`` at the same time. The lease is a kernel-held
-``flock`` on a dedicated lease file next to the profile directory, the
-same mechanism ``ManagedWorkspacePool`` already uses for workspace
-namespaces (``core/managed_workspace.py``): strict ``fstat`` qualification
-of the lease file, ``LOCK_EX | LOCK_NB``, a live holder reported as
+``flock`` on a dedicated lease file, the same mechanism
+``ManagedWorkspacePool`` already uses for workspace namespaces
+(``core/managed_workspace.py``): strict ``fstat`` qualification of the
+lease file, ``LOCK_EX | LOCK_NB``, a live holder reported as
 ``profile_busy``.
+
+Lease files live in their own root, never next to or inside profile
+directories (see ``core/browser_service.py``), so no profile id can ever
+collide with a lease file.
+
+The lease file is opened exactly once, with ``O_NOFOLLOW | O_NONBLOCK``
+relative to its parent directory (itself opened with
+``O_DIRECTORY | O_NOFOLLOW``): a symlink is refused instead of followed, a
+FIFO or other special file is refused by ``fstat`` instead of blocking the
+open, and the holder record is read and written through the same fd the
+``flock`` is taken on — holder diagnostics and the lock always refer to
+one inode.
 
 The lease file persists on disk, but the lock itself does not survive a
 dead holder: the kernel releases ``flock`` when the holder process dies,
 however it dies, so a crashed holder never blocks the profile forever.
 A later run re-acquires the flock only after health validation of the
-profile directory (it exists, is a directory, is writable); the previous
-holder pid is reported back as ``recovered_from_pid`` so recovery is
-observable instead of silent. The lease file is never unlinked while
-held — unlinking a locked file lets two processes hold "the" lock on
-different inodes.
+profile directory (a real directory, owned by this user, private,
+writable); the previous holder pid is reported back as
+``recovered_from_pid`` so recovery is observable instead of silent. The
+lease file is never unlinked while held — unlinking a locked file lets two
+processes hold "the" lock on different inodes.
 
 Nothing here touches browser internals: Chromium's own ``SingletonLock``
 is Chromium's job to validate and clean on startup.
@@ -35,6 +47,7 @@ from pathlib import Path
 from types import TracebackType
 
 _LEASE_RECORD_LIMIT = 4096
+_PRIVATE_DIR_MODE = 0o700
 
 
 class BrowserProfileBusyError(RuntimeError):
@@ -99,8 +112,8 @@ def acquire_profile_lease(
 ) -> BrowserProfileLease:
     """Take the active-writer lease for one profile directory.
 
-    ``lease_path`` is the dedicated lease file (a sibling of the profile
-    directory, never inside it); ``profile_dir`` is health-validated after
+    ``lease_path`` is the dedicated lease file (in the lease root, never
+    inside a profile directory); ``profile_dir`` is health-validated after
     the lock is taken. Raises :class:`BrowserProfileBusyError` when
     another live run holds the profile, and
     :class:`BrowserProfileLeaseError` when the lease file is unqualified
@@ -113,25 +126,10 @@ def acquire_profile_lease(
         raise ValueError("lease holder must not be blank")
     lease_path = Path(lease_path)
     profile_dir = Path(profile_dir)
-    previous_pid = _read_holder_pid(lease_path)
-    try:
-        lease_path.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise BrowserProfileLeaseError(
-            f"cannot create browser profile lease directory {lease_path.parent}: {exc}"
-        ) from exc
-    try:
-        fd = os.open(
-            lease_path,
-            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
-            0o600,
-        )
-    except OSError as exc:
-        raise BrowserProfileLeaseError(
-            f"cannot open browser profile lease {lease_path}: {exc}"
-        ) from exc
+    fd = _open_lease_file(lease_path)
     try:
         _qualify_lease_file(fd, lease_path)
+        previous_pid = _read_holder_pid(fd)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
@@ -170,6 +168,43 @@ def acquire_profile_lease(
     )
 
 
+def _open_lease_file(lease_path: Path) -> int:
+    """Open the lease file once, never following a symlink or blocking.
+
+    The parent directory is created privately when missing and opened with
+    ``O_DIRECTORY | O_NOFOLLOW``; the lease file is then opened relative to
+    it with ``O_NOFOLLOW | O_NONBLOCK``, so the last component is checked
+    by the kernel instead of being resolved first, and a FIFO opens
+    without waiting for a writer (``fstat`` refuses it afterwards).
+    """
+    parent = lease_path.parent
+    try:
+        _make_private_dirs(parent)
+    except OSError as exc:
+        raise BrowserProfileLeaseError(
+            f"cannot create browser profile lease directory {parent}: {exc}"
+        ) from exc
+    try:
+        dir_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        raise BrowserProfileLeaseError(
+            f"browser profile lease directory is unqualified: {parent}: {exc}"
+        ) from exc
+    try:
+        return os.open(
+            lease_path.name,
+            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            0o600,
+            dir_fd=dir_fd,
+        )
+    except OSError as exc:
+        raise BrowserProfileLeaseError(
+            f"cannot open browser profile lease {lease_path}: {exc}"
+        ) from exc
+    finally:
+        os.close(dir_fd)
+
+
 def _qualify_lease_file(fd: int, lease_path: Path) -> None:
     """Refuse a lease file that is not a private regular file of this user."""
     info = os.fstat(fd)
@@ -182,23 +217,74 @@ def _qualify_lease_file(fd: int, lease_path: Path) -> None:
         raise BrowserProfileLeaseError(f"browser profile lease is unqualified: {lease_path}")
 
 
-def _validate_profile_dir(profile_dir: Path) -> None:
-    """Health validation before a profile is reused after a previous holder.
+def _make_private_dirs(path: Path) -> None:
+    """Create ``path`` and missing parents with ``0700``, regardless of umask.
 
-    The directory must exist (it is created when missing), be a real
-    directory, and be writable. Anything else is an explicit refusal:
-    a broken profile is never silently adopted.
+    ``Path.mkdir(parents=True, mode=...)`` applies ``mode`` to the last
+    component only and the umask to all of them, so every newly created
+    component is created and then explicitly set to ``0700``. Existing
+    components are left as they are.
     """
-    if profile_dir.exists() and not profile_dir.is_dir():
+    missing: list[Path] = []
+    current = path
+    while not os.path.lexists(current):
+        missing.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    for component in reversed(missing):
+        try:
+            os.mkdir(component, _PRIVATE_DIR_MODE)
+        except FileExistsError:
+            continue
+        os.chmod(component, _PRIVATE_DIR_MODE, follow_symlinks=False)
+
+
+def _validate_profile_dir(profile_dir: Path) -> None:
+    """Health validation before a profile is used, including after a crash.
+
+    The directory is created privately (``0700``, the mode Playwright
+    itself uses for a new ``user_data_dir``) when missing. An existing one
+    must be a real directory — not a symlink, not a file — owned by this
+    user and writable; anything else is an explicit refusal, a broken
+    profile is never silently adopted. An existing directory of this user
+    with group/other permission bits is tightened to ``0700``: it lives in
+    the dedicated profile root and is derived from profile identity, so it
+    is ours by construction, and its browser state must stay private.
+    """
+    try:
+        info = os.lstat(profile_dir)
+    except FileNotFoundError:
+        try:
+            _make_private_dirs(profile_dir)
+            info = os.lstat(profile_dir)
+        except OSError as exc:
+            raise BrowserProfileLeaseError(
+                f"cannot create browser profile directory {profile_dir}: {exc}"
+            ) from exc
+    except OSError as exc:
+        raise BrowserProfileLeaseError(
+            f"cannot inspect browser profile directory {profile_dir}: {exc}"
+        ) from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise BrowserProfileLeaseError(
+            f"browser profile directory must not be a symlink: {profile_dir}"
+        )
+    if not stat.S_ISDIR(info.st_mode):
         raise BrowserProfileLeaseError(
             f"browser profile directory is not a directory: {profile_dir}"
         )
-    try:
-        profile_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
+    if info.st_uid != os.geteuid():
         raise BrowserProfileLeaseError(
-            f"cannot create browser profile directory {profile_dir}: {exc}"
-        ) from exc
+            f"browser profile directory is not owned by this user: {profile_dir}"
+        )
+    if stat.S_IMODE(info.st_mode) != _PRIVATE_DIR_MODE:
+        try:
+            os.chmod(profile_dir, _PRIVATE_DIR_MODE, follow_symlinks=False)
+        except OSError as exc:
+            raise BrowserProfileLeaseError(
+                f"cannot make browser profile directory private {profile_dir}: {exc}"
+            ) from exc
     if not os.access(profile_dir, os.W_OK):
         raise BrowserProfileLeaseError(f"browser profile directory is not writable: {profile_dir}")
 
@@ -218,18 +304,16 @@ def _write_holder_record(fd: int, record: dict[str, object]) -> None:
         view = view[written:]
 
 
-def _read_holder_pid(lease_path: Path) -> int | None:
-    """Best-effort pid of the previous holder, or ``None`` if unknown."""
+def _read_holder_pid(fd: int) -> int | None:
+    """Best-effort pid of the recorded holder, read through the lease fd.
+
+    Reads the already qualified lease file — the same inode the ``flock``
+    is taken on — and never opens the path again.
+    """
     try:
-        fd = os.open(lease_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        raw = os.pread(fd, _LEASE_RECORD_LIMIT, 0)
     except OSError:
         return None
-    try:
-        raw = os.read(fd, _LEASE_RECORD_LIMIT)
-    except OSError:
-        return None
-    finally:
-        os.close(fd)
     try:
         record = json.loads(raw.decode())
     except (ValueError, UnicodeDecodeError):
