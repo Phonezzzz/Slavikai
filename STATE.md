@@ -117,12 +117,19 @@
 - Локальные гейты: `make check` зелёный (2497 passed, coverage 83.16%); новый `tests/test_browser_service.py` (11 тестов).
 - **Статус:** DONE. PR #166 MERGED 2026-11-19 (main d8f0498; CI зелёный, Codex review без findings).
 
-## E02-T02: ветка pr-e02-t02-persistent-profile — PR #167 (IN_REVIEW)
+## E02-T02: ветка pr-e02-t02-persistent-profile — PR #167 (MERGED, main a4932bc)
 
 - Ветка `pr-e02-t02-persistent-profile` от `origin/main` (`d8f0498`, PR #166 MERGED).
 - Содержимое: dedicated persistent Chromium profile — `resolve_browser_profile_dir` / `validate_browser_profile_dir` в `core/browser_service.py` (`~/.local/state/slavikai/browser-profiles/<owner>/<profile>`), `launch_persistent_context` в `PlaywrightBrowserBackend` (disposable путь без `user_data_dir` сохранён), profile-aware default factory в `DesktopBrowserTool`; claim `runtime.browser.session_service` version 1 → 2. ROADMAP.md record (implementation + мини-аудит) + STATE.md sync.
-- Локальные гейты: `make check` зелёный (2504 passed, 4 skipped, coverage 83.24%); новый `tests/test_browser_persistence.py` (8 тестов, в т.ч. opt-in real-browser E2E: login → restart → `cookie=yes storage=yes`, 1.44s).
-- **Статус:** IN_REVIEW. PR #167 открыт; merge — после GitHub CI и чистого Codex review, ручной fast-forward push по соглашению.
+- Локальные гейты: `make check` зелёный (2506 passed, 4 skipped, coverage 83.24%); новый `tests/test_browser_persistence.py` (10 тестов, в т.ч. opt-in real-browser E2E: login → restart → `cookie=yes storage=yes`, 1.44s).
+- **Статус:** DONE. PR #167 MERGED 2026-11-19 (main a4932bc; CI зелёный, Codex review без findings — 1×P1 про production principal исправлен quote-кодированием, коммит a4932bc).
+
+## E02-T03: ветка pr-e02-t03-profile-lease — PR #180 (IN_REVIEW)
+
+- Ветка `pr-e02-t03-profile-lease` от `origin/main` (`a4932bc`, PR #167 MERGED).
+- Содержимое: один active writer lease на profile — новый `core/browser_lease.py` (`flock` на `<root>/<owner>/.lease-<profile>`, `fstat`-квалификация как в `ManagedWorkspacePool`, `profile_busy` с pid держателя, `recovered_from_pid` после health validation каталога), `lease_provider` в `BrowserService` (lease на время сессии, release после `backend.close()`), lease provider в default persistent factory `DesktopBrowserTool` (injected factory — без lease); claim `runtime.browser.session_service` version 2 → 3. ROADMAP.md record (implementation + мини-аудит + дизайн-решение про рестарт) + STATE.md sync.
+- Локальные гейты: `make check` зелёный (2519 passed, 5 skipped, coverage 83.27%); новый `tests/test_browser_profile_lease.py` (14 тестов, в т.ч. opt-in real-browser E2E: login → второй run `profile_busy` → close → второй run видит залогиненный state; negative — SIGKILL держателя → recoverable после health validation).
+- **Статус:** IN_REVIEW. PR #180 открыт; merge — после GitHub CI и чистого Codex review, ручной fast-forward push по соглашению.
 
 ## Текущая очередь
 
@@ -139,7 +146,8 @@
 - **E01-T08 — DONE** (удалён legacy classifier/MWV production routing: `core/agent_mwv.py`, `core/mwv/routing.py`, `core/mwv/manager.py` и MWV-путь чата удалены; default `runtime_mode` — `ask`; root-gate больше не срабатывает). Evidence: запись в ROADMAP.md (E01-T08 implementation + mini-audit; отступления от брифа — `set_runtime_state` не нормализует режимы, root-gate не срабатывает), новый `tests/test_legacy_mwv_routing_removed.py` (9 тестов) + переведённые тесты, `make check` зелёный (2435 passed, coverage 83.19%); ветка `pr-e01-t08-remove-legacy-mwv-routing`, PR #162.
 - **E01-T09 — DONE** (regression E2E canonical loop: первый немоканный acceptance test — scripted brain, настоящие read/write tools, ToolRegistry + ToolGateway + AgentToolLoop, observation, postcondition; ветви: fail tool → FAILED_WORKER, missing verifier → UNVERIFIED, confirmed postcondition → DONE; preset run со штатным canonical verifier → DONE на `canonical_outcome`). Evidence: запись в ROADMAP.md (E01-T09 implementation; находка — `workspace_read` обязан регистрироваться с `capability="read"`, иначе file-effects accounting preset'а отклоняет write; BLOCKED как терминал не покрыт — нетерминальная фаза, approval-пауза в `tests/test_auto_preset.py`; P1 round 5 закрыт — E2E на штатном пути без подмены), новый `tests/test_canonical_loop_e2e.py` (7 тестов), `make check` зелёный (2486 passed, coverage 83.11%); ветка `pr-e01-t09-e2e-canonical-loop`; PR #163 MERGED (main 0f894c6), см. ROADMAP.md.
 - **E02-T01 — DONE** (BrowserProfile + BrowserService minimal API: lifecycle сессии отделён от DesktopBrowserTool; generic actions идут через service). Evidence: запись в ROADMAP.md (E02-T01 implementation + мини-аудит), новый `tests/test_browser_service.py` (11 тестов), `make check` зелёный (2497 passed, coverage 83.16%); ветка `pr-e02-t01-browser-service`; PR #166 MERGED (main d8f0498).
-- **E02-T02 — IN_REVIEW** (dedicated persistent Chromium profile: `user_data_dir` на профиль, `launch_persistent_context`, login переживает restart; основной Chrome-профиль владельца выбрать нельзя). Evidence: запись в ROADMAP.md (E02-T02 implementation + мини-аудит), новый `tests/test_browser_persistence.py` (8 тестов), `make check` зелёный (2504 passed, 4 skipped, coverage 83.24%); ветка `pr-e02-t02-persistent-profile`; PR #167.
+- **E02-T02 — DONE** (dedicated persistent Chromium profile: `user_data_dir` на профиль, `launch_persistent_context`, login переживает restart; основной Chrome-профиль владельца выбрать нельзя). Evidence: запись в ROADMAP.md (E02-T02 implementation + мини-аудит), новый `tests/test_browser_persistence.py` (10 тестов), `make check` зелёный (2506 passed, 4 skipped, coverage 83.24%); ветка `pr-e02-t02-persistent-profile`; PR #167 MERGED (main a4932bc).
+- **E02-T03 — IN_REVIEW** (один active writer lease на profile: `flock` на lease-файле рядом с каталогом профиля, второй run → `profile_busy`, crash holder → recoverable после health validation). Evidence: запись в ROADMAP.md (E02-T03 implementation + мини-аудит + дизайн-решение), новый `tests/test_browser_profile_lease.py` (14 тестов), `make check` зелёный (2519 passed, 5 skipped, coverage 83.27%); ветка `pr-e02-t03-profile-lease`; PR #180.
 
 ## Readiness: 63 последовательных тикета
 
@@ -147,7 +155,7 @@
 |---|---|---:|---|
 | E00 | T01–T03 | 3 | E00-T01 done; E00-T02 done; E00-T03 done |
 | E01 | T01–T09 | 9 | E01 T01–T09 DONE |
-| E02 | T01–T08 | 8 | T01 DONE (PR #166); T02 IN_REVIEW (PR #167) |
+| E02 | T01–T08 | 8 | T01 DONE (PR #166); T02 DONE (PR #167); T03 IN_REVIEW (PR #180) |
 | E03 | T01–T11 | 11 | READY после E02 |
 | E04 | T01–T06 | 6 | T03 slice DONE (PR #164); остальное NEEDS_REFINEMENT |
 | E05 | T01–T07 | 7 | NEEDS_REFINEMENT |
@@ -167,4 +175,4 @@
 
 ## Resume
 
-**Next active:** E02-T02 — IN_REVIEW (PR #167). **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.
+**Next active:** E02-T03 — IN_REVIEW (PR #180). **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.
