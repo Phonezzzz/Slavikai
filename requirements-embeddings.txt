@@ -10,7 +10,6 @@ anyio==4.14.2
     # via httpx
 certifi==2026.2.25
     # via
-    #   -c requirements.txt
     #   httpcore
     #   httpx
 cuda-bindings==13.3.1
@@ -42,27 +41,18 @@ huggingface-hub==1.16.1
     #   transformers
 idna==3.11
     # via
-    #   -c requirements.txt
     #   anyio
     #   httpx
 jinja2==3.1.6
-    # via
-    #   -c requirements.txt
-    #   torch
+    # via torch
 joblib==1.5.3
     # via scikit-learn
 markdown-it-py==4.0.0
-    # via
-    #   -c requirements.txt
-    #   rich
+    # via rich
 markupsafe==3.0.3
-    # via
-    #   -c requirements.txt
-    #   jinja2
+    # via jinja2
 mdurl==0.1.2
-    # via
-    #   -c requirements.txt
-    #   markdown-it-py
+    # via markdown-it-py
 mpmath==1.3.0
     # via sympy
 narwhals==2.24.0
@@ -71,7 +61,6 @@ networkx==3.6.1
     # via torch
 numpy==2.4.2
     # via
-    #   -c requirements.txt
     #   scikit-learn
     #   scipy
     #   sentence-transformers
@@ -117,26 +106,20 @@ nvidia-nvshmem-cu13==3.4.5
     # via torch
 nvidia-nvtx==13.0.85
     # via cuda-toolkit
-packaging==26.0
+packaging==26.3
     # via
-    #   -c requirements.txt
     #   huggingface-hub
     #   transformers
 pygments==2.19.2
-    # via
-    #   -c requirements.txt
-    #   rich
+    # via rich
 pyyaml==6.0.3
     # via
-    #   -c requirements.txt
     #   huggingface-hub
     #   transformers
 regex==2026.7.19
     # via transformers
 rich==14.3.3
-    # via
-    #   -c requirements.txt
-    #   typer
+    # via typer
 safetensors==0.8.0
     # via transformers
 scikit-learn==1.9.0
@@ -172,7 +155,6 @@ typer==0.27.1
     #   transformers
 typing-extensions==4.15.0
     # via
-    #   -c requirements.txt
     #   anyio
     #   huggingface-hub
     #   sentence-transformers
