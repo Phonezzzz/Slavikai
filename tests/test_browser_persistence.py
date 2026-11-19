@@ -151,12 +151,35 @@ def test_profile_dir_is_derived_from_identity(tmp_path: Path) -> None:
     )
 
 
-def test_profile_dir_rejects_unsafe_components(tmp_path: Path) -> None:
+def test_profile_dir_encodes_production_principal(tmp_path: Path) -> None:
+    resolved = resolve_browser_profile_dir(
+        BrowserProfile(profile_id="default", owner_id="email:owner@example.com"),
+        root=tmp_path,
+    )
+    assert resolved == (tmp_path / "email%3Aowner%40example.com" / "default").resolve()
+    other = resolve_browser_profile_dir(
+        BrowserProfile(profile_id="default", owner_id="email:other@example.com"),
+        root=tmp_path,
+    )
+    assert other != resolved
+    assert (
+        resolve_browser_profile_dir(_profile("work", "alice"), root=tmp_path)
+        == (tmp_path / "alice" / "work").resolve()
+    )
+
+
+def test_profile_dir_encodes_separators_but_rejects_dot_components(
+    tmp_path: Path,
+) -> None:
+    assert (
+        resolve_browser_profile_dir(
+            BrowserProfile(profile_id="a/b", owner_id="local"), root=tmp_path
+        )
+        == (tmp_path / "local" / "a%2Fb").resolve()
+    )
     for profile in (
         BrowserProfile(profile_id="..", owner_id="local"),
         BrowserProfile(profile_id=".", owner_id="local"),
-        BrowserProfile(profile_id="a/b", owner_id="local"),
-        BrowserProfile(profile_id="work", owner_id="a\\b"),
     ):
         with pytest.raises(ValueError):
             resolve_browser_profile_dir(profile, root=tmp_path)
@@ -236,6 +259,28 @@ def test_backend_without_profile_dir_keeps_disposable_launch(
     assert recording.chromium.context.closed
     assert recording.chromium.context.browser.closed
     assert recording.stopped
+
+
+def test_tool_starts_persistent_context_for_production_principal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recording = _RecordingPlaywright()
+    monkeypatch.setattr(desktop_browser_tool, "sync_playwright", lambda: recording)
+    root = tmp_path / "profiles"
+    profile = BrowserProfile(profile_id="default", owner_id="email:owner@example.com")
+    tool = DesktopBrowserTool(_security(tmp_path), profile=profile, profile_root=root)
+
+    started = tool.handle(ToolRequest("desktop_browser", {"operation": "start"}))
+
+    assert started.ok
+    assert recording.chromium.persistent_calls == [
+        {
+            "user_data_dir": str(resolve_browser_profile_dir(profile, root=root)),
+            "headless": True,
+            "accept_downloads": True,
+        }
+    ]
+    tool.close()
 
 
 def test_request_cannot_select_owner_chrome_profile(

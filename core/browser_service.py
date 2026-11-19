@@ -15,18 +15,21 @@ Persistence (E02-T02): every profile owns one dedicated directory under
 ``DEFAULT_BROWSER_PROFILE_ROOT`` (``~/.local/state/slavikai/browser-profiles``,
 the same XDG state home the repo already uses for durable agent state —
 ``shared/sandbox.py``: ``CHATGPT_PLAN_STORAGE``). The directory is derived
-from profile identity only; no caller can point the browser at an arbitrary
-directory, so the owner's main Chrome profile can never be selected and no
-password database is ever copied — see :func:`validate_browser_profile_dir`.
+from profile identity only; identity values are encoded into single safe
+path components (plain ids stay readable, production principals such as
+``email:owner@example.com`` become ``email%3Aowner%40example.com``), so no
+caller can point the browser at an arbitrary directory, the owner's main
+Chrome profile can never be selected and no password database is ever
+copied — see :func:`validate_browser_profile_dir`.
 """
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import quote
 
 from shared.models import ToolRequest, ToolResult
 
@@ -34,8 +37,6 @@ DEFAULT_PROFILE_ID = "default"
 DEFAULT_OWNER_ID = "local"
 
 DEFAULT_BROWSER_PROFILE_ROOT = Path.home() / ".local" / "state" / "slavikai" / "browser-profiles"
-
-_PROFILE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 class BrowserAutomationBackend(Protocol):
@@ -75,7 +76,9 @@ def resolve_browser_profile_dir(profile: BrowserProfile, *, root: Path | None = 
     profile identity only and validated to stay under the dedicated root,
     so the browser can never be pointed at the owner's main Chrome profile
     (``~/.config/google-chrome`` and friends live outside the root) and no
-    foreign profile — passwords included — is ever read or copied.
+    foreign profile — passwords included — is ever read or copied. Identity
+    values are encoded, not rejected, so production principals such as
+    ``email:owner@example.com`` work: see :func:`_profile_component`.
     """
     base = Path(root) if root is not None else DEFAULT_BROWSER_PROFILE_ROOT
     return validate_browser_profile_dir(
@@ -104,9 +107,20 @@ def validate_browser_profile_dir(path: Path, *, root: Path | None = None) -> Pat
 
 
 def _profile_component(value: str, field: str) -> str:
-    if not _PROFILE_COMPONENT.fullmatch(value):
-        raise ValueError(f"{field} must be a single safe path component")
-    return value
+    """Encode one identity value as a single safe path component.
+
+    ``urllib.parse.quote`` with ``safe="._-"`` is deterministic and
+    injective: plain ids such as ``local`` stay readable, while production
+    principals such as ``email:owner@example.com`` become
+    ``email%3Aowner%40example.com`` instead of being rejected — and two
+    different principals can never share one directory. ``.`` and ``..``
+    are refused outright: quoting leaves them unchanged and they would
+    escape the profile directory.
+    """
+    encoded = quote(value, safe="._-")
+    if not encoded or encoded in {".", ".."}:
+        raise ValueError(f"{field} must not be empty, '.' or '..'")
+    return encoded
 
 
 class BrowserService:
