@@ -5,6 +5,7 @@ import mimetypes
 import os
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from urllib.parse import urlparse
 
 from playwright.sync_api import (
@@ -23,6 +24,8 @@ from core.browser_service import (
     BrowserAutomationBackend,
     BrowserProfile,
     BrowserService,
+    resolve_browser_profile_dir,
+    validate_browser_profile_dir,
 )
 from core.desktop_security import DesktopPathSecurity
 from shared.models import JSONValue, ToolRequest, ToolResult
@@ -41,7 +44,10 @@ class DesktopBrowserTool:
     use, teardown on close) lives in :class:`BrowserService`; this tool
     holds no backend itself. ``service``/``profile`` are injectable so one
     service can be shared; by default the tool builds its own service with
-    the owner's default profile.
+    the owner's default profile. The default backend is persistent (E02-T02):
+    one dedicated ``user_data_dir`` per profile, resolved from profile
+    identity only — a request can never select an arbitrary directory, and
+    the owner's main Chrome profile is never used.
     """
 
     def __init__(
@@ -52,6 +58,7 @@ class DesktopBrowserTool:
         cancelled: Callable[[], bool] | None = None,
         service: BrowserService | None = None,
         profile: BrowserProfile | None = None,
+        profile_root: Path | None = None,
     ) -> None:
         self._security = security
         self._cancelled = cancelled or (lambda: False)
@@ -59,13 +66,32 @@ class DesktopBrowserTool:
         if service is not None:
             self._service = service
         else:
-            factory = backend_factory or (
-                lambda: PlaywrightBrowserBackend(
-                    security,
-                    cancelled=self._cancelled,
-                )
+            self._service = BrowserService(
+                self._make_backend_factory(backend_factory, profile_root)
             )
-            self._service = BrowserService(lambda _profile: factory())
+
+    def _make_backend_factory(
+        self,
+        backend_factory: Callable[[], BrowserAutomationBackend] | None,
+        profile_root: Path | None,
+    ) -> Callable[[BrowserProfile], BrowserAutomationBackend]:
+        if backend_factory is not None:
+            supplied = backend_factory
+
+            def _from_supplied(_profile: BrowserProfile) -> BrowserAutomationBackend:
+                return supplied()
+
+            return _from_supplied
+
+        def _persistent(profile: BrowserProfile) -> BrowserAutomationBackend:
+            return PlaywrightBrowserBackend(
+                self._security,
+                cancelled=self._cancelled,
+                user_data_dir=resolve_browser_profile_dir(profile, root=profile_root),
+                profile_root=profile_root,
+            )
+
+        return _persistent
 
     def handle(self, request: ToolRequest) -> ToolResult:
         if self._cancelled():
@@ -80,14 +106,35 @@ class DesktopBrowserTool:
 
 
 class PlaywrightBrowserBackend:
+    """Playwright backend with a dedicated persistent profile per session.
+
+    With ``user_data_dir`` the backend starts a persistent context
+    (``launch_persistent_context``): cookies, local storage and logins live
+    in that directory and survive a browser restart. Without it the backend
+    keeps the old disposable behaviour (``launch`` + ``new_context``).
+    The directory is validated at construction to live under the dedicated
+    browser profile root, so the owner's main Chrome profile can never be
+    selected and no foreign profile data is ever read or copied.
+    """
+
     def __init__(
         self,
         security: DesktopPathSecurity,
         *,
         cancelled: Callable[[], bool],
+        user_data_dir: Path | None = None,
+        profile_root: Path | None = None,
     ) -> None:
         self._security = security
         self._cancelled = cancelled
+        self._user_data_dir = (
+            validate_browser_profile_dir(user_data_dir, root=profile_root)
+            if user_data_dir is not None
+            else None
+        )
+        # A persistent context owns its browser: closing the context already
+        # closes the browser, so the browser must not be closed twice.
+        self._owns_browser = user_data_dir is None
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
@@ -297,7 +344,7 @@ class PlaywrightBrowserBackend:
                 context.close()
         finally:
             try:
-                if browser is not None:
+                if self._owns_browser and browser is not None:
                     browser.close()
             finally:
                 if playwright is not None:
@@ -310,9 +357,20 @@ class PlaywrightBrowserBackend:
         headless = headless_raw if isinstance(headless_raw, bool) else True
         playwright = sync_playwright().start()
         try:
-            browser = playwright.chromium.launch(headless=headless)
-            context = browser.new_context(accept_downloads=True)
-            context.set_default_timeout(15_000)
+            if self._user_data_dir is not None:
+                context = playwright.chromium.launch_persistent_context(
+                    str(self._user_data_dir),
+                    headless=headless,
+                    accept_downloads=True,
+                )
+                context.set_default_timeout(15_000)
+                browser = context.browser
+                if browser is None:
+                    raise RuntimeError("persistent browser context has no browser")
+            else:
+                browser = playwright.chromium.launch(headless=headless)
+                context = browser.new_context(accept_downloads=True)
+                context.set_default_timeout(15_000)
         except Exception:
             playwright.stop()
             raise

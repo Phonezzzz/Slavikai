@@ -10,18 +10,32 @@ actions themselves stay in ``PlaywrightBrowserBackend`` untouched
 A profile is identity plus ownership only. Persistence (dedicated
 ``user_data_dir`` / persistent context), leases and login handoff are later
 E02 tickets and deliberately have no surface here.
+
+Persistence (E02-T02): every profile owns one dedicated directory under
+``DEFAULT_BROWSER_PROFILE_ROOT`` (``~/.local/state/slavikai/browser-profiles``,
+the same XDG state home the repo already uses for durable agent state —
+``shared/sandbox.py``: ``CHATGPT_PLAN_STORAGE``). The directory is derived
+from profile identity only; no caller can point the browser at an arbitrary
+directory, so the owner's main Chrome profile can never be selected and no
+password database is ever copied — see :func:`validate_browser_profile_dir`.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from shared.models import ToolRequest, ToolResult
 
 DEFAULT_PROFILE_ID = "default"
 DEFAULT_OWNER_ID = "local"
+
+DEFAULT_BROWSER_PROFILE_ROOT = Path.home() / ".local" / "state" / "slavikai" / "browser-profiles"
+
+_PROFILE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 class BrowserAutomationBackend(Protocol):
@@ -52,6 +66,47 @@ class BrowserProfile:
     @classmethod
     def default(cls, owner_id: str = DEFAULT_OWNER_ID) -> BrowserProfile:
         return cls(profile_id=DEFAULT_PROFILE_ID, owner_id=owner_id)
+
+
+def resolve_browser_profile_dir(profile: BrowserProfile, *, root: Path | None = None) -> Path:
+    """Dedicated on-disk directory for one browser profile.
+
+    ``<root>/<owner_id>/<profile_id>``. The directory is derived from
+    profile identity only and validated to stay under the dedicated root,
+    so the browser can never be pointed at the owner's main Chrome profile
+    (``~/.config/google-chrome`` and friends live outside the root) and no
+    foreign profile — passwords included — is ever read or copied.
+    """
+    base = Path(root) if root is not None else DEFAULT_BROWSER_PROFILE_ROOT
+    return validate_browser_profile_dir(
+        base
+        / _profile_component(profile.owner_id, "owner_id")
+        / _profile_component(profile.profile_id, "profile_id"),
+        root=base,
+    )
+
+
+def validate_browser_profile_dir(path: Path, *, root: Path | None = None) -> Path:
+    """Require a browser profile directory to live under the dedicated root.
+
+    Returns the resolved path. Anything outside the root — the owner's main
+    Chrome profile, the root itself, a ``..`` traversal escaping it — is
+    refused with ``ValueError`` before any browser is launched.
+    """
+    base = Path(root) if root is not None else DEFAULT_BROWSER_PROFILE_ROOT
+    resolved = Path(path).expanduser().resolve()
+    base_resolved = base.expanduser().resolve()
+    if resolved == base_resolved or base_resolved not in resolved.parents:
+        raise ValueError(
+            "browser profile directory must live under the dedicated browser profile root"
+        )
+    return resolved
+
+
+def _profile_component(value: str, field: str) -> str:
+    if not _PROFILE_COMPONENT.fullmatch(value):
+        raise ValueError(f"{field} must be a single safe path component")
+    return value
 
 
 class BrowserService:
