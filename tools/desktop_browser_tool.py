@@ -20,10 +20,12 @@ from playwright.sync_api import (
     Error as PlaywrightError,
 )
 
+from core.browser_lease import BrowserProfileLease
 from core.browser_service import (
     BrowserAutomationBackend,
     BrowserProfile,
     BrowserService,
+    acquire_browser_profile_lease,
     resolve_browser_profile_dir,
     validate_browser_profile_dir,
 )
@@ -47,7 +49,10 @@ class DesktopBrowserTool:
     the owner's default profile. The default backend is persistent (E02-T02):
     one dedicated ``user_data_dir`` per profile, resolved from profile
     identity only — a request can never select an arbitrary directory, and
-    the owner's main Chrome profile is never used.
+    the owner's main Chrome profile is never used. The default persistent
+    backend also takes the profile's active-writer lease (E02-T03): a
+    second run on the same profile fails with ``profile_busy`` instead of
+    starting a second Chromium on one ``user_data_dir``.
     """
 
     def __init__(
@@ -66,8 +71,16 @@ class DesktopBrowserTool:
         if service is not None:
             self._service = service
         else:
+            lease_provider: Callable[[BrowserProfile], BrowserProfileLease] | None = None
+            if backend_factory is None:
+
+                def _lease_for(profile: BrowserProfile) -> BrowserProfileLease:
+                    return acquire_browser_profile_lease(profile, root=profile_root)
+
+                lease_provider = _lease_for
             self._service = BrowserService(
-                self._make_backend_factory(backend_factory, profile_root)
+                self._make_backend_factory(backend_factory, profile_root),
+                lease_provider=lease_provider,
             )
 
     def _make_backend_factory(
