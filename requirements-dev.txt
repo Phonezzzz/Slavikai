@@ -7,9 +7,7 @@
 ast-serialize==0.6.0
     # via mypy
 attrs==25.4.0
-    # via
-    #   -c requirements.txt
-    #   referencing
+    # via referencing
 coverage==7.15.3
     # via pytest-cov
 iniconfig==2.3.0
@@ -21,9 +19,7 @@ mypy==2.3.0
 mypy-extensions==1.1.0
     # via mypy
 packaging==26.0
-    # via
-    #   -c requirements.txt
-    #   pytest
+    # via pytest
 pathspec==1.1.1
     # via mypy
 pluggy==1.6.0
@@ -31,9 +27,7 @@ pluggy==1.6.0
     #   pytest
     #   pytest-cov
 pygments==2.19.2
-    # via
-    #   -c requirements.txt
-    #   pytest
+    # via pytest
 pytest==9.1.1
     # via
     #   -r requirements-dev.in
@@ -41,13 +35,9 @@ pytest==9.1.1
 pytest-cov==7.1.0
     # via -r requirements-dev.in
 referencing==0.37.0
-    # via
-    #   -c requirements.txt
-    #   types-jsonschema
+    # via types-jsonschema
 rpds-py==0.30.0
-    # via
-    #   -c requirements.txt
-    #   referencing
+    # via referencing
 ruff==0.14.11
     # via -r requirements-dev.in
 types-jsonschema==4.26.0.20260518
@@ -58,14 +48,11 @@ types-psutil==7.2.2.20260518
     # via -r requirements-dev.in
 types-pyyaml==6.0.12.20260724
     # via -r requirements-dev.in
-types-requests==2.33.0.20260712
+types-requests==2.33.0.20261030
     # via -r requirements-dev.in
 typing-extensions==4.15.0
     # via
-    #   -c requirements.txt
     #   mypy
     #   referencing
 urllib3==2.6.3
-    # via
-    #   -c requirements.txt
-    #   types-requests
+    # via types-requests
