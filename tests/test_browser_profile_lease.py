@@ -207,6 +207,43 @@ def test_lease_path_is_derived_from_identity(tmp_path: Path) -> None:
     assert other != encoded
 
 
+def _aliased_root(tmp_path: Path) -> tuple[Path, Path]:
+    real = tmp_path / "profiles"
+    real.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+    return real, alias
+
+
+def test_root_alias_shares_profile_dir_and_lease_path(tmp_path: Path) -> None:
+    real, alias = _aliased_root(tmp_path)
+    profile = _profile()
+    assert resolve_browser_profile_dir(profile, root=alias) == resolve_browser_profile_dir(
+        profile, root=real
+    )
+    assert browser_profile_lease_root(alias) == browser_profile_lease_root(real)
+    assert resolve_browser_profile_lease_path(
+        profile, root=alias
+    ) == resolve_browser_profile_lease_path(profile, root=real)
+    assert browser_profile_lease_root(alias) == real.resolve().with_name("profiles.leases")
+
+
+def test_service_through_root_alias_gets_profile_busy(tmp_path: Path) -> None:
+    real, alias = _aliased_root(tmp_path)
+    profile = _profile()
+    first = BrowserService(lambda _p: _FakeBackend(), lease_provider=_lease_provider(real))
+    second = BrowserService(lambda _p: _FakeBackend(), lease_provider=_lease_provider(alias))
+    assert first.handle(profile, _request()).ok
+    with pytest.raises(BrowserProfileBusyError) as excinfo:
+        second.handle(profile, _request())
+    assert "profile_busy" in str(excinfo.value)
+    assert not second.is_active(profile)
+    first.close(profile)
+    assert second.handle(profile, _request()).ok
+    assert second.is_active(profile)
+    second.close(profile)
+
+
 def test_lease_acquire_release_roundtrip(tmp_path: Path) -> None:
     profile = _profile()
     lease = acquire_browser_profile_lease(profile, root=tmp_path)

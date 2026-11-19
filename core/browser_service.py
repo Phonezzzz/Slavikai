@@ -143,8 +143,8 @@ def _canonical_under_root(
     ``error`` instead of being followed, so two identities can never reach
     one directory through two different paths.
     """
-    base_lexical = Path(os.path.normpath(os.path.abspath(Path(root).expanduser())))
-    base_resolved = base_lexical.resolve()
+    base_lexical = _lexical_root(root)
+    base_resolved = _canonical_root(root)
     lexical = Path(os.path.normpath(os.path.abspath(Path(path).expanduser())))
     relative: Path | None = None
     for base in (base_lexical, base_resolved):
@@ -167,15 +167,33 @@ def _canonical_under_root(
     return base_resolved / relative
 
 
+def _lexical_root(root: Path) -> Path:
+    """Absolute, ``..``-collapsed spelling of ``root`` (not resolved)."""
+    return Path(os.path.normpath(os.path.abspath(Path(root).expanduser())))
+
+
+def _canonical_root(root: Path) -> Path:
+    """The one canonical path of a dedicated root.
+
+    Both the profile directory (:func:`_canonical_under_root`) and the
+    sibling lease root (:func:`browser_profile_lease_root`) are derived from
+    this single value, so two spellings of one root (``/x/profiles`` and a
+    symlink ``/x/alias`` pointing at it) always meet the same lease file.
+    """
+    return _lexical_root(root).resolve()
+
+
 def browser_profile_lease_root(root: Path | None = None) -> Path:
     """Dedicated lease root for a profile root: ``<profile-root>.leases``.
 
-    A sibling of the profile root, never inside it, so lease files and
-    profile directories can never collide.
+    A sibling of the *canonical* profile root, never inside it, so lease
+    files and profile directories can never collide, and an alias of the
+    profile root (a symlink to it) resolves to the same lease root as the
+    root itself: one actual ``user_data_dir`` always has exactly one lease.
     """
     base = Path(root) if root is not None else DEFAULT_BROWSER_PROFILE_ROOT
-    lexical = Path(os.path.normpath(os.path.abspath(base.expanduser())))
-    return lexical.with_name(lexical.name + _LEASE_ROOT_SUFFIX)
+    canonical = _canonical_root(base)
+    return canonical.with_name(canonical.name + _LEASE_ROOT_SUFFIX)
 
 
 def resolve_browser_profile_lease_path(
