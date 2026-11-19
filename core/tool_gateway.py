@@ -155,6 +155,10 @@ class ToolGateway:
             or subject != approval.request_json
         ):
             raise ValueError("approval_subject_mismatch")
+        if approval.user_auth_attempt_id is not None:
+            # E02-T04 rework: подтверждение продолжает активную попытку входа
+            # с тем же attempt_id (семантика возврата управления сохраняется).
+            request = replace(request, user_auth_resume=approval.user_auth_attempt_id)
         if request.name in _WORKSPACE_OPERATIONS:
             try:
                 if self._workspace_binding(request) != approval.workspace_binding:
@@ -256,6 +260,7 @@ class ToolGateway:
                         sort_keys=True,
                         allow_nan=False,
                     ),
+                    user_auth_attempt_id=request.user_auth_resume,
                 )
                 raise ApprovalRequired(approval_request)
             if decision.status == "block":

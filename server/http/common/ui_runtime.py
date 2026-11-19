@@ -210,6 +210,11 @@ def _serialize_user_auth_request(
         if user_auth_request.expires_at_epoch is not None
         else None
     )
+    cancel_at = (
+        datetime.fromtimestamp(user_auth_request.cancel_at_epoch, UTC).isoformat()
+        if user_auth_request.cancel_at_epoch is not None
+        else None
+    )
     return {
         "tool": user_auth_request.tool,
         "page_id": user_auth_request.page_id,
@@ -217,6 +222,7 @@ def _serialize_user_auth_request(
         "title": user_auth_request.title,
         "attempt_id": user_auth_request.attempt_id,
         "attempt_expires_at": expires_at,
+        "cancel_at": cancel_at,
         "timeout_seconds": user_auth_request.timeout_seconds,
     }
 

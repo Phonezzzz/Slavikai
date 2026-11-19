@@ -18,7 +18,11 @@ import pytest
 
 from core.agent import Agent
 from core.browser_service import BrowserProfile
-from core.desktop_policy import DesktopPolicyStore
+from core.desktop_policy import (
+    DesktopApprovalRule,
+    DesktopApprovalScope,
+    DesktopPolicyStore,
+)
 from core.desktop_security import DesktopPathSecurity
 from llm.brain_base import Brain
 from llm.types import LLMResult, ToolCall
@@ -94,6 +98,21 @@ async def _start_login(client, session_id: str) -> dict:
     )
     assert response.status == 200
     return await response.json()
+
+
+def _login_handoff_rule(effect: str, principal_id: str) -> DesktopApprovalRule:
+    return DesktopApprovalRule.create(
+        effect=effect,
+        source="persistent",
+        scope=DesktopApprovalScope(
+            tool="desktop_browser",
+            action="login_handoff",
+            target_pattern=LOGIN_URL,
+            risk_class="user_handoff",
+        ),
+        subject_principal_id=principal_id,
+        description="Added during user-auth pause (rework regression)",
+    )
 
 
 async def _respond(client, session_id: str, decision_id: str, choice: str, headers=None):
@@ -245,6 +264,119 @@ def test_login_handoff_reject_closes_window_and_releases(tmp_path, monkeypatch) 
             assert playwright.chromium.contexts[0].closed
             assert agent.desktop_runtime.run_coordinator.try_acquire()
             agent.desktop_runtime.run_coordinator.release()
+        finally:
+            agent.desktop_runtime.cancel_pending()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_deny_rule_added_during_pause_blocks_done(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    playwright = _fake_chromium(monkeypatch)
+    agent = LoginAgent(tmp_path)
+
+    async def run() -> None:
+        client = await _create_client(agent)
+        try:
+            session_id = (await (await client.get("/ui/api/status")).json())["session_id"]
+            decision = (await _start_login(client, session_id))["decision"]
+            principal_id = await client.server.app["ui_hub"].get_session_principal_id(session_id)
+            assert isinstance(principal_id, str)
+            # Владелец добавил persistent deny, пока run ждёт ручного входа.
+            agent.desktop_policy_store.add_rule(_login_handoff_rule("deny", principal_id))
+            playwright.chromium.contexts[0].pages[0].type_credentials()
+
+            done = await _respond(client, session_id, decision["id"], "confirm")
+            assert done.status == 200
+            done_payload = await done.json()
+            assert done_payload["resume"]["ok"] is True
+            # «Готово» не обошло новый deny: run остановлен политикой,
+            # observation модели не ушёл (второй вызов мозга не состоялся).
+            assert "tool_policy_denied" in done_payload["resume"]["data"]["output"]
+            assert len(agent.brain.seen) == 1
+            assert "Welcome back" not in repr(agent.brain.seen)
+            assert PASSWORD not in repr(agent.brain.seen) and OTP not in repr(agent.brain.seen)
+        finally:
+            agent.desktop_runtime.cancel_pending()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ask_rule_added_during_pause_approves_same_attempt(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    playwright = _fake_chromium(monkeypatch)
+    agent = LoginAgent(tmp_path)
+
+    async def run() -> None:
+        client = await _create_client(agent)
+        try:
+            session_id = (await (await client.get("/ui/api/status")).json())["session_id"]
+            decision = (await _start_login(client, session_id))["decision"]
+            principal_id = await client.server.app["ui_hub"].get_session_principal_id(session_id)
+            assert isinstance(principal_id, str)
+            # Явное ask для login_handoff появилось во время паузы.
+            agent.desktop_policy_store.add_rule(_login_handoff_rule("ask", principal_id))
+            playwright.chromium.contexts[0].pages[0].type_credentials()
+
+            done = await _respond(client, session_id, decision["id"], "confirm")
+            assert done.status == 200
+            approval_decision = (await done.json())["decision"]
+            assert approval_decision["decision_type"] == "tool_approval"
+            assert approval_decision["status"] == "pending"
+
+            approved = await _respond(client, session_id, approval_decision["id"], "approve_once")
+            assert approved.status == 200
+            approved_payload = await approved.json()
+            assert "login-page-rechecked" in approved_payload["resume"]["data"]["output"]
+            # Подтверждение завершило ту же попытку: свежий observation дошёл
+            # до модели, второго окна не открывалось.
+            tool_messages = [m for m in agent.brain.seen[-1] if m.role == "tool"]
+            assert len(tool_messages) == 1
+            assert "Welcome back" in tool_messages[0].content
+            assert '"login_verified": false' in tool_messages[0].content
+            assert "already waiting" not in tool_messages[0].content
+            assert [call["headless"] for call in playwright.chromium.persistent_calls] == [False]
+            assert PASSWORD not in repr(agent.brain.seen) and OTP not in repr(agent.brain.seen)
+        finally:
+            agent.desktop_runtime.cancel_pending()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_run_cancelled_after_retry_window_reflected_in_api(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _fake_chromium(monkeypatch)
+    agent = LoginAgent(tmp_path)
+    agent.desktop_runtime.user_auth_timeout_seconds = 0.2
+    agent.desktop_runtime.approval_timeout_seconds = 0.2
+
+    async def run() -> None:
+        client = await _create_client(agent)
+        try:
+            session_id = (await (await client.get("/ui/api/status")).json())["session_id"]
+            decision = (await _start_login(client, session_id))["decision"]
+            # Срок полной отмены run (попытка + окно retry) отдаётся в decision.
+            assert isinstance(decision["expires_at"], str)
+            pending = agent._pending_chat_approval
+            assert pending is not None
+            continuation = pending.continuation
+            deadline = time.monotonic() + 5
+            while (
+                agent.desktop_runtime.has_continuation(continuation) and time.monotonic() < deadline
+            ):
+                await asyncio.sleep(0.02)
+            # Второй дедлайн: run отменён runtime'ом.
+            assert not agent.desktop_runtime.has_continuation(continuation)
+
+            late = await _respond(client, session_id, decision["id"], "confirm")
+            assert late.status == 410
+            assert (await late.json())["error"]["code"] == "decision_expired"
+
+            session = await (await client.get(f"/ui/api/sessions/{session_id}")).json()
+            assert session["session"]["decision"]["status"] == "expired"
         finally:
             agent.desktop_runtime.cancel_pending()
             await client.close()

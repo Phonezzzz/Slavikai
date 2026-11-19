@@ -55,6 +55,9 @@ class UserAuthRequest:
     # Выставляет DesktopRuntime при паузе: срок попытки (wall clock, epoch)
     # для статуса в UI/API и длительность таймаута.
     expires_at_epoch: float | None = None
+    # Срок полной отмены run (epoch): истечение попытки + окно явного retry.
+    # По нему UI/API отражают отмену run после второго дедлайна.
+    cancel_at_epoch: float | None = None
     timeout_seconds: float | None = None
     control_returned: bool = False
 

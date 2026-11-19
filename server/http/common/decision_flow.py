@@ -318,10 +318,12 @@ def build_ui_user_auth_decision(
     """E02-T04: решение «Войди в окне Chromium на ПК → Готово».
 
     Decision блокирующий, принадлежит session run (владелец проверяется
-    ``_ensure_session_owned``) и продолжается один раз. ``expires_at`` не
-    ставится: истечение попытки не закрывает decision — run остаётся в
-    ``NEEDS_USER_AUTH`` и ждёт явного retry; срок попытки отдаётся в
-    ``proposed_action.attempt_expires_at`` для статуса на телефоне.
+    ``_ensure_session_owned``) и продолжается один раз. Истечение попытки не
+    закрывает decision — run остаётся в ``NEEDS_USER_AUTH`` и ждёт явного
+    retry; срок попытки отдаётся в ``proposed_action.attempt_expires_at`` для
+    статуса на телефоне. ``expires_at`` decision — срок полной отмены run
+    (попытка + окно retry, ``cancel_at``): после него decision переходит в
+    ``expired``, отражая отмену run в API и UI.
     """
     now = utc_now_iso()
     context_payload: dict[str, JSONValue] = {
@@ -375,7 +377,11 @@ def build_ui_user_auth_decision(
         "default_option_id": "confirm",
         "context": context_payload,
         "created_at": now,
-        "expires_at": None,
+        "expires_at": (
+            user_auth_request.get("cancel_at")
+            if isinstance(user_auth_request.get("cancel_at"), str)
+            else None
+        ),
         "updated_at": now,
         "resolved_at": None,
     }

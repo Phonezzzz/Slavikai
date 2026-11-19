@@ -380,10 +380,13 @@ class DesktopRuntime:
             return
         deadline = exc.request.window_ready_monotonic + self.user_auth_timeout_seconds
         remaining = deadline - time.monotonic()
+        expires_at_epoch = time.time() + max(0.0, remaining)
         request = replace(
             exc.request,
             timeout_seconds=self.user_auth_timeout_seconds,
-            expires_at_epoch=time.time() + max(0.0, remaining),
+            expires_at_epoch=expires_at_epoch,
+            # Отмена run — после окна явного retry (см. _expire_user_auth_attempt).
+            cancel_at_epoch=expires_at_epoch + self.approval_timeout_seconds,
         )
         exc.request = request
         continuation = replace(continuation, approval=request)

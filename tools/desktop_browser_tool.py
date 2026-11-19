@@ -50,22 +50,53 @@ SENSITIVE_VALUE_MASK = "[redacted]"
 _MASK_SENSITIVE_JS = """(mask) => {
   const tokens = new Set(['current-password', 'new-password', 'one-time-code']);
   let masked = 0;
-  for (const el of document.querySelectorAll('input')) {
-    const auto = (el.getAttribute('autocomplete') || '').toLowerCase().split(/\\s+/);
-    const sensitive = el.type === 'password' || auto.some((token) => tokens.has(token));
-    if (!sensitive || !el.value || el.__slavikaiMasked !== undefined) continue;
-    el.__slavikaiMasked = el.value;
-    el.value = mask;
-    masked += 1;
-  }
+  const visit = (root) => {
+    for (const el of root.querySelectorAll('input')) {
+      const auto = (el.getAttribute('autocomplete') || '').toLowerCase().split(/\\s+/);
+      const sensitive = el.type === 'password' || auto.some((token) => tokens.has(token));
+      if (!sensitive || !el.value || el.__slavikaiMasked !== undefined) continue;
+      el.__slavikaiMasked = el.value;
+      el.value = mask;
+      masked += 1;
+    }
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) visit(el.shadowRoot);
+    }
+  };
+  visit(document);
   return masked;
 }"""
 _RESTORE_SENSITIVE_JS = """() => {
-  for (const el of document.querySelectorAll('input')) {
-    if (el.__slavikaiMasked === undefined) continue;
-    el.value = el.__slavikaiMasked;
-    delete el.__slavikaiMasked;
-  }
+  const visit = (root) => {
+    for (const el of root.querySelectorAll('input')) {
+      if (el.__slavikaiMasked === undefined) continue;
+      el.value = el.__slavikaiMasked;
+      delete el.__slavikaiMasked;
+    }
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) visit(el.shadowRoot);
+    }
+  };
+  visit(document);
+}"""
+# Проверка после маскировки: сколько чувствительных полей всё ещё держат
+# реальное значение (включая открытые shadow roots). Ноль — маскировка
+# подтверждена; иначе snapshot модели не уходит (fail-closed).
+_VERIFY_MASKED_JS = """(mask) => {
+  const tokens = new Set(['current-password', 'new-password', 'one-time-code']);
+  let exposed = 0;
+  const visit = (root) => {
+    for (const el of root.querySelectorAll('input')) {
+      const auto = (el.getAttribute('autocomplete') || '').toLowerCase().split(/\\s+/);
+      const sensitive = el.type === 'password' || auto.some((token) => tokens.has(token));
+      if (sensitive && el.value && el.value !== mask) exposed += 1;
+    }
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) visit(el.shadowRoot);
+    }
+  };
+  visit(document);
+  return exposed;
 }"""
 
 
@@ -185,6 +216,10 @@ class PlaywrightBrowserBackend:
         self._active_page_id: str | None = None
         # E02-T04: активная попытка ручного входа (attempt_id, page_id).
         self._handoff: tuple[str, str] | None = None
+        # E02-T04 rework: ошибка неподтверждённого закрытия Chromium. Пока она
+        # сохранена, close() не превращается в подтверждённое закрытие, а
+        # новый контекст на этом профиле не стартует.
+        self._close_error: Exception | None = None
 
     def handle(self, request: ToolRequest) -> ToolResult:
         operation = _operation(request, default="snapshot")
@@ -374,6 +409,15 @@ class PlaywrightBrowserBackend:
         try:
             for frame in frames:
                 masked += int(frame.evaluate(_MASK_SENSITIVE_JS, SENSITIVE_VALUE_MASK))
+            # Маскировка подтверждается до снимка: если хоть одно чувствительное
+            # поле (включая открытые shadow roots) осталось с реальным
+            # значением, snapshot модели не уходит — явный отказ, не fallback.
+            for frame in frames:
+                exposed = int(frame.evaluate(_VERIFY_MASKED_JS, SENSITIVE_VALUE_MASK))
+                if exposed:
+                    raise RuntimeError(
+                        "sensitive field masking could not be confirmed; snapshot withheld"
+                    )
             snapshot = page.locator("body").aria_snapshot(timeout=_timeout_ms(request), mode="ai")
         finally:
             for frame in frames:
@@ -464,6 +508,10 @@ class PlaywrightBrowserBackend:
         )
 
     def close(self) -> None:
+        if self._close_error is not None:
+            # Закрытие уже падало: повторный cleanup не подтверждает его задним
+            # числом — BrowserService удержит profile lease (fail-closed).
+            raise self._close_error
         context, browser, playwright = self._context, self._browser, self._playwright
         self._pages.clear()
         self._active_page_id = None
@@ -471,18 +519,35 @@ class PlaywrightBrowserBackend:
         self._context = None
         self._browser = None
         self._playwright = None
+        error: Exception | None = None
         try:
             if context is not None:
                 context.close()
-        finally:
-            try:
-                if self._owns_browser and browser is not None:
-                    browser.close()
-            finally:
-                if playwright is not None:
-                    playwright.stop()
+        except Exception as exc:  # noqa: BLE001 - ошибка сохраняется ниже
+            error = exc
+        try:
+            if self._owns_browser and browser is not None:
+                browser.close()
+        except Exception as exc:  # noqa: BLE001 - ошибка сохраняется ниже
+            error = error or exc
+        try:
+            if playwright is not None:
+                playwright.stop()
+        except Exception as exc:  # noqa: BLE001 - ошибка сохраняется ниже
+            error = error or exc
+        if error is not None:
+            # E02-T04 rework: неподтверждённое закрытие (в т.ч. при перезапуске
+            # headless -> headed внутри login_handoff) сохраняется на backend,
+            # чтобы последующий cleanup не отпустил profile lease.
+            self._close_error = error
+            raise error
 
     def _ensure_started(self, request: ToolRequest, *, headless: bool | None = None) -> None:
+        if self._close_error is not None:
+            raise RuntimeError(
+                "browser close was not confirmed; refusing to start another "
+                "Chromium on this profile"
+            )
         if self._browser is not None and self._context is not None:
             return
         if headless is None:

@@ -2241,27 +2241,34 @@ async def handle_ui_approval_continue(
             if (user_auth_pause is not None) != (user_auth_choice is not None):
                 # Пауза на вход продолжается только «Готово»/retry, approval — только approval.
                 return not_started("approval_continuation_unavailable")
-            if mode == "desktop" and user_auth_choice is None:
+            if mode == "desktop":
                 principal_id = _request_principal_id(request)
-                if principal_id is None or desktop_scope is None:
+                if principal_id is None:
                     return not_started("approval_continuation_unavailable")
-                created_rule = DesktopApprovalRule.create(
-                    effect="allow",
-                    scope=desktop_scope,
-                    source="persistent"
-                    if choice == "always_allow"
-                    else "session"
-                    if choice == "approve_session"
-                    else "once",
-                    subject_principal_id=principal_id,
-                    description="Approved from Desktop UI",
-                )
-                if choice == "always_allow":
-                    persistent_store.add_rule(created_rule)
-                elif choice == "approve_once":
-                    agent.add_chat_approval_rule(identity, created_rule)
-                else:
-                    await session_store.add_desktop_rule(scope, created_rule)
+                if user_auth_choice is None:
+                    if desktop_scope is None:
+                        return not_started("approval_continuation_unavailable")
+                    created_rule = DesktopApprovalRule.create(
+                        effect="allow",
+                        scope=desktop_scope,
+                        source="persistent"
+                        if choice == "always_allow"
+                        else "session"
+                        if choice == "approve_session"
+                        else "once",
+                        subject_principal_id=principal_id,
+                        description="Approved from Desktop UI",
+                    )
+                    if choice == "always_allow":
+                        persistent_store.add_rule(created_rule)
+                    elif choice == "approve_once":
+                        agent.add_chat_approval_rule(identity, created_rule)
+                    else:
+                        await session_store.add_desktop_rule(scope, created_rule)
+                # E02-T04 rework: актуальные Desktop rules перечитываются перед
+                # любым продолжением, включая «Готово»/retry ручного входа:
+                # явные ask/deny, добавленные во время паузы, действуют.
+                # Создание approval rule для user-auth по-прежнему пропускается.
                 agent.set_desktop_policy_context(
                     await session_store.get_desktop_rules(scope), principal_id
                 )

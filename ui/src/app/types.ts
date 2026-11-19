@@ -57,7 +57,13 @@ export type ChatMessage = {
   attachments: ChatAttachment[];
 };
 
-export type UiDecisionStatus = 'pending' | 'approved' | 'rejected' | 'executing' | 'resolved';
+export type UiDecisionStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'executing'
+  | 'resolved'
+  | 'expired';
 
 export type UiDecisionOption = {
   id: string;

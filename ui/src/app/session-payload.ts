@@ -515,6 +515,7 @@ export const parseUiDecision = (value: unknown): UiDecision | null => {
     && candidate.status !== 'rejected'
     && candidate.status !== 'executing'
     && candidate.status !== 'resolved'
+    && candidate.status !== 'expired'
   ) {
     return null;
   }
