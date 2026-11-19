@@ -47,6 +47,13 @@ from core.tool_loop import (
     ToolLoopContinuation,
     ToolLoopExecutionError,
 )
+from core.user_auth import (
+    NEEDS_USER_AUTH,
+    USER_AUTH_PROMPT,
+    UserAuthChoice,
+    UserAuthRequest,
+    UserAuthRequired,
+)
 from llm.brain_base import Brain
 from llm.brain_factory import create_brain
 from llm.cancellation import cancellation_requested
@@ -131,6 +138,9 @@ class ChatApprovalUnavailable(ValueError):
     pass
 
 
+_USER_AUTH_REFUSALS = frozenset({"user_auth_attempt_expired", "user_auth_retry_unavailable"})
+
+
 @dataclass(frozen=True)
 class PendingChatApproval:
     identity: str
@@ -213,6 +223,7 @@ class AgentToolsMixin:
     main_api_key: str | None
     last_chat_interaction_id: str | None
     last_approval_request: ApprovalRequest | None
+    last_user_auth_request: UserAuthRequest | None
     last_decision_packet: DecisionPacket | None
     last_plan_summary: str | None
     last_execution_summary: str | None
@@ -332,6 +343,7 @@ class AgentToolsMixin:
                 )
         self._pending_chat_approval = None
         self.last_approval_request = None
+        self.last_user_auth_request = None
         self.last_approval_source_endpoint = None
         self.last_approval_resume_payload = None
 
@@ -397,7 +409,7 @@ class AgentToolsMixin:
 
     def _capture_chat_approval(
         self,
-        exc: ApprovalRequired,
+        exc: ApprovalRequired | UserAuthRequired,
         raw_input: str,
         *,
         policy_application: PolicyApplication | None = None,
@@ -533,12 +545,60 @@ class AgentToolsMixin:
             pending, desktop_once_rules=(*pending.desktop_once_rules, rule)
         )
 
+    def chat_user_auth_request(self, identity: str) -> UserAuthRequest | None:
+        """Пауза ``NEEDS_USER_AUTH`` этого continuation или ``None`` для approval."""
+        self.validate_chat_approval(identity)
+        pending = self._pending_chat_approval
+        assert pending is not None
+        pause = pending.continuation.approval
+        return pause if isinstance(pause, UserAuthRequest) else None
+
+    def chat_user_auth_expired(self, identity: str) -> bool:
+        self.validate_chat_approval(identity)
+        pending = self._pending_chat_approval
+        assert pending is not None
+        return pending.mode == "desktop" and self.desktop_runtime.user_auth_expired(
+            pending.continuation
+        )
+
+    def resume_chat_user_auth(
+        self,
+        identity: str,
+        choice: UserAuthChoice,
+        *,
+        cancellation_token: asyncio.Event | None = None,
+    ) -> AgentResponse:
+        """E02-T04: «Готово» или явный retry для паузы ``NEEDS_USER_AUTH``.
+
+        Состояние попытки проверяется ДО того, как pending снимается:
+        просроченное «Готово» и retry без истечения отклоняются, а run
+        продолжает ждать в ``NEEDS_USER_AUTH``.
+        """
+        request = self.chat_user_auth_request(identity)
+        if request is None:
+            raise ChatApprovalUnavailable("approval_continuation_unavailable")
+        expired = self.chat_user_auth_expired(identity)
+        if choice == "done" and expired:
+            raise ChatApprovalUnavailable("user_auth_attempt_expired")
+        if choice == "retry" and not expired:
+            raise ChatApprovalUnavailable("user_auth_retry_unavailable")
+        return self.resume_chat_approval(
+            identity, cancellation_token=cancellation_token, user_auth=choice
+        )
+
     def resume_chat_approval(
-        self, identity: str, *, cancellation_token: asyncio.Event | None = None
+        self,
+        identity: str,
+        *,
+        cancellation_token: asyncio.Event | None = None,
+        user_auth: UserAuthChoice | None = None,
     ) -> AgentResponse:
         self.validate_chat_approval(identity)
         pending = self._pending_chat_approval
         assert pending is not None
+        if isinstance(pending.continuation.approval, UserAuthRequest) != (user_auth is not None):
+            # Approval-действие не продолжает паузу на вход, и наоборот.
+            raise ChatApprovalUnavailable("approval_continuation_unavailable")
         if cancellation_requested(cancellation_token):
             raise ChatApprovalUnavailable("approval_continuation_not_started")
         if pending.mode == "desktop" and not self.desktop_runtime.has_continuation(
@@ -573,6 +633,7 @@ class AgentToolsMixin:
                     pending.raw_input,
                     pending.continuation,
                     cancellation_token=cancellation_token,
+                    user_auth=user_auth,
                 )
                 runtime_result = outcome
                 return self._finalize_desktop_response(
@@ -600,7 +661,31 @@ class AgentToolsMixin:
             )
             raise ChatApprovalUnavailable(code) from exc
         except DesktopContinuationUnavailable as exc:
+            if str(exc) in _USER_AUTH_REFUSALS:
+                # Пауза в runtime осталась на месте (истекла между проверкой и
+                # resume): run продолжает ждать, восстанавливаем pending.
+                self._pending_chat_approval = pending
+                (
+                    self.last_approval_request,
+                    self.last_approval_source_endpoint,
+                    self.last_approval_resume_payload,
+                ) = approval_snapshot
             raise ChatApprovalUnavailable(str(exc)) from exc
+        except UserAuthRequired as exc:
+            # Явный retry открыл новое окно входа: новая пауза того же run.
+            self._capture_chat_approval(exc, pending.raw_input)
+            next_pending = self._pending_chat_approval
+            if next_pending is not None:
+                self._pending_chat_approval = replace(
+                    next_pending, record_in_history=pending.record_in_history
+                )
+            return AgentResponse(
+                self._handle_user_auth_required(
+                    exc.request,
+                    raw_input=pending.raw_input,
+                    record_in_history=pending.record_in_history,
+                )
+            )
         except ApprovalRequired as exc:
             self._capture_chat_approval(exc, pending.raw_input)
             next_pending = self._pending_chat_approval
@@ -1565,6 +1650,38 @@ class AgentToolsMixin:
             execution_summary=execution_summary or why,
             skill=skill,
         )
+
+    def _handle_user_auth_required(
+        self,
+        request: UserAuthRequest,
+        *,
+        raw_input: str,
+        record_in_history: bool = False,
+    ) -> str:
+        """Ответ run, ожидающего ручного входа (``NEEDS_USER_AUTH``).
+
+        ``last_approval_request`` снимается: это не подтверждение действия.
+        Источник и payload continuation остаются для UI-решения «Готово».
+        """
+        self.last_approval_request = None
+        self.last_user_auth_request = request
+        text = self._format_stop_response(
+            what="Нужен ручной вход: " + USER_AUTH_PROMPT,
+            why=(
+                f"reason={NEEDS_USER_AUTH}; страница: {request.title or request.url}; "
+                "пароль и код вводятся только в окне Chromium"
+            ),
+            next_steps=[
+                "Войди в окне Chromium на ПК и нажми «Готово».",
+                "«Готово» не подтверждает вход: агент заново проверит страницу.",
+            ],
+            stop_reason_code=StopReasonCode.NEEDS_USER_AUTH,
+            route="desktop",
+        )
+        self._log_chat_interaction(raw_input=raw_input, response_text=text)
+        if record_in_history:
+            self._append_short_term([LLMMessage(role="assistant", content=text)])
+        return text
 
     def _handle_approval_required(
         self,

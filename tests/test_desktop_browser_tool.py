@@ -155,6 +155,8 @@ class InteractivePage:
         self.closed = False
         self.front = False
         self.locators: dict[str, InteractiveLocator] = {}
+        # Нет iframe/полей ввода: маскировка password/OTP (E02-T04) ничего не делает.
+        self.frames: list[object] = []
 
     def _locator_for(self, key: str) -> InteractiveLocator:
         return self.locators.setdefault(key, InteractiveLocator())

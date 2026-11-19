@@ -294,6 +294,7 @@ class BrowserService:
         self._backend_factory = backend_factory
         self._lease_provider = lease_provider
         self._sessions: dict[tuple[str, str], _BrowserSession] = {}
+        self._unconfirmed_leases: list[BrowserProfileLease] = []
 
     def handle(self, profile: BrowserProfile, request: ToolRequest) -> ToolResult:
         session = self._sessions.get(self._key(profile))
@@ -306,19 +307,26 @@ class BrowserService:
                 raise
             session = _BrowserSession(backend=backend, lease=lease)
             self._sessions[self._key(profile)] = session
-        result = session.backend.handle(request)
-        if result.ok and _operation(request) == "close":
-            self._sessions.pop(self._key(profile), None)
+        if _operation(request) != "close":
+            return session.backend.handle(request)
+        # Сессия снимается до закрытия: упавший close не оставляет в map
+        # backend, который следующей операцией поднял бы второй Chromium.
+        self._sessions.pop(self._key(profile), None)
+        try:
+            result = session.backend.handle(request)
+        except BaseException:
+            self._strand(session.lease)
+            raise
+        if result.ok:
             self._release_lease(session.lease)
+        else:
+            self._strand(session.lease)
         return result
 
     def close(self, profile: BrowserProfile) -> None:
         session = self._sessions.pop(self._key(profile), None)
         if session is not None:
-            try:
-                session.backend.close()
-            finally:
-                self._release_lease(session.lease)
+            self._close_session(session)
 
     def close_all(self) -> None:
         sessions = list(self._sessions.values())
@@ -326,14 +334,36 @@ class BrowserService:
         first_error: Exception | None = None
         for session in sessions:
             try:
-                session.backend.close()
+                self._close_session(session)
             except Exception as exc:  # noqa: BLE001 - shutdown is best-effort
                 if first_error is None:
                     first_error = exc
-            finally:
-                self._release_lease(session.lease)
         if first_error is not None:
             raise first_error
+
+    def _close_session(self, session: _BrowserSession) -> None:
+        """Закрыть backend и только после подтверждённого закрытия отпустить lease.
+
+        E02-T04 (решение владельца): lease профиля освобождается ТОЛЬКО после
+        того, как Chromium подтверждённо закрыт. Если ``backend.close()``
+        упал, процесс Chromium может быть жив на этом ``user_data_dir``:
+        lease остаётся удержанным до конца процесса (fail-closed — следующий
+        run получит ``profile_busy``, а не второй Chromium на том же профиле).
+        """
+        try:
+            session.backend.close()
+        except BaseException:
+            self._strand(session.lease)
+            raise
+        self._release_lease(session.lease)
+
+    def _strand(self, lease: BrowserProfileLease | None) -> None:
+        if lease is not None:
+            self._unconfirmed_leases.append(lease)
+
+    def unconfirmed_close_count(self) -> int:
+        """Сколько lease удержано из-за неподтверждённого закрытия Chromium."""
+        return len(self._unconfirmed_leases)
 
     def _acquire_lease(self, profile: BrowserProfile) -> BrowserProfileLease | None:
         if self._lease_provider is None:

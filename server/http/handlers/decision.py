@@ -410,6 +410,15 @@ async def _complete_ui_decision(
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
+    elif decision_type == "user_auth":
+        # E02-T04: «Готово» (confirm), явный повтор входа (retry) или отмена.
+        if choice not in {"confirm", "retry", "reject"}:
+            return error_response(
+                status=400,
+                message="Для user_auth доступны confirm|retry|reject.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
     elif decision_type == "computer_commit":
         if choice not in {"approve_once", "reject"}:
             return error_response(
@@ -1485,7 +1494,7 @@ async def _complete_ui_decision(
             }
         )
 
-    if choice == "reject" and decision_type in {"tool_approval", "plan_execute"}:
+    if choice == "reject" and decision_type in {"tool_approval", "plan_execute", "user_auth"}:
         context_raw = current_decision.get("context")
         context = context_raw if isinstance(context_raw, dict) else {}
         source_endpoint_raw = context.get("source_endpoint")
@@ -1649,6 +1658,26 @@ async def _complete_ui_decision(
             }
         )
 
+    async def _resolve_user_auth_decision() -> dict[str, JSONValue]:
+        context_raw = current_decision.get("context")
+        context = context_raw if isinstance(context_raw, dict) else {}
+        resume_payload_raw = context.get("resume_payload")
+        resume_payload = resume_payload_raw if isinstance(resume_payload_raw, dict) else {}
+        if context.get("source_endpoint") != "chat.tool_continue":
+            return {
+                "ok": False,
+                "error": "approval_continuation_unavailable",
+                "resume_started": False,
+            }
+        return await handle_ui_approval_continue(
+            request,
+            session_id=session_id,
+            resume_payload={str(key): value for key, value in resume_payload.items()},
+            choice=choice,
+            request_cancellation=request_cancellation,
+            user_auth_choice="done" if choice == "confirm" else "retry",
+        )
+
     async def _resolve_computer_commit_decision() -> dict[str, JSONValue]:
         if effective_choice == "reject":
             return {
@@ -1717,6 +1746,8 @@ async def _complete_ui_decision(
         resume = await _resolve_plan_execute_decision()
     elif decision_type == "tool_approval":
         resume = await _resolve_tool_decision()
+    elif decision_type == "user_auth":
+        resume = await _resolve_user_auth_decision()
     elif decision_type == "computer_commit":
         resume = await _resolve_computer_commit_decision()
     elif decision_type == "memory_save":
@@ -1758,6 +1789,8 @@ async def _complete_ui_decision(
         "session_end_cancelled",
         "session_end_state_changed",
         "model_access_denied",
+        "user_auth_attempt_expired",
+        "user_auth_retry_unavailable",
     }
     resume_error_code: str | None = None
     if isinstance(resume, dict):
@@ -1797,6 +1830,12 @@ async def _complete_ui_decision(
             "session_end_cancelled": "Подготовка отменена. Сессия остаётся открытой.",
             "session_end_state_changed": "Текущий запрос изменился. Обновите состояние сессии.",
             "model_access_denied": "Нет доступа к выбранной модели.",
+            "user_auth_attempt_expired": (
+                "Попытка входа истекла, окно закрыто. Нажми «Повторить вход»."
+            ),
+            "user_auth_retry_unavailable": (
+                "Окно входа ещё открыто: войди в Chromium на ПК и нажми «Готово»."
+            ),
         }
         details_raw = resume.get("details")
         details = details_raw if isinstance(details_raw, dict) else None
@@ -1862,7 +1901,7 @@ async def _complete_ui_decision(
     normalized_resolved = _normalize_ui_decision(latest_resolved, session_id=session_id)
     if not updated_resolved:
         nested_chat_resume = (
-            decision_type == "tool_approval"
+            decision_type in {"tool_approval", "user_auth"}
             and current_source_endpoint
             in {"chat.send", "workspace.send", "chat.tool_continue", "plan.execute_runner"}
             and resume.get("ok") is True

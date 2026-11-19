@@ -6,6 +6,7 @@ from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
+from core.user_auth import NEEDS_USER_AUTH, UserAuthRequired
 from llm.types import ToolSpec
 from shared.models import JSONValue, ToolCallRecord, ToolRequest, ToolResult
 from shared.tool_capture import ToolCaptureFault
@@ -300,6 +301,16 @@ class ToolRegistry:
             )
             return result
         except ToolCaptureFault:
+            raise
+        except UserAuthRequired:
+            # E02-T04: tool log фиксирует паузу, но не содержимое окна входа.
+            self._log_call(
+                request.name,
+                ok=False,
+                error=NEEDS_USER_AUTH,
+                meta={"paused": NEEDS_USER_AUTH},
+                args=request.args,
+            )
             raise
         except Exception as exc:
             self._logger.exception("tool_call_error", extra={"tool": request.name})

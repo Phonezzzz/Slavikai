@@ -592,6 +592,10 @@ def desktop_actions_from_request(request: ToolRequest) -> list[DesktopAction]:
             if action in {"open", "new_tab", "navigate"}
             else "external_side_effect"
             if action in {"click", "input", "select", "submit", "download", "close_tab"}
+            # E02-T04: передача входа пользователю сама по себе ждёт его явного
+            # действия в окне и кнопки «Готово»; отдельного approval не нужно.
+            else "user_handoff"
+            if action == "login_handoff"
             else "read"
         )
     elif tool == "desktop_gui":

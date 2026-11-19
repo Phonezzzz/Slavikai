@@ -19,6 +19,7 @@ from core.decision.memory_save import build_memory_save_packet
 from core.mwv.models import StopReasonCode
 from core.skills.index import SkillMatchDecision
 from core.tool_loop import AgentToolLoop, AgentToolLoopResult, ToolLoopExecutionError
+from core.user_auth import UserAuthRequest, UserAuthRequired
 from llm.cancellation import GenerationCancelled, cancellation_requested
 from llm.retry import visible_provider_error
 from llm.stream_model import Done, Error, StreamEvent, TextDelta, Usage
@@ -118,7 +119,7 @@ class AgentRoutingMixin:
         def _reset_approval_state(self, *, cancel_runtime: bool = True) -> None: ...
         def _capture_chat_approval(
             self,
-            exc: ApprovalRequired,
+            exc: ApprovalRequired | UserAuthRequired,
             raw_input: str,
             *,
             policy_application: PolicyApplication | None = None,
@@ -164,6 +165,13 @@ class AgentRoutingMixin:
             command_lane: bool = False,
             source_endpoint: str | None = None,
             resume_payload: dict[str, JSONValue] | None = None,
+        ) -> str: ...
+        def _handle_user_auth_required(
+            self,
+            request: UserAuthRequest,
+            *,
+            raw_input: str,
+            record_in_history: bool = False,
         ) -> str: ...
         def _handle_decision_packet(
             self,
@@ -380,6 +388,13 @@ class AgentRoutingMixin:
                     )
                 )
             return self._run_chat_response(messages, last_content, record_in_history)
+        except UserAuthRequired as exc:
+            self._capture_chat_approval(exc, last_content, record_in_history=record_in_history)
+            return AgentResponse(
+                self._handle_user_auth_required(
+                    exc.request, raw_input=last_content, record_in_history=record_in_history
+                )
+            )
         except ApprovalRequired as exc:
             self._capture_chat_approval(exc, last_content, record_in_history=record_in_history)
             return AgentResponse(
@@ -576,6 +591,13 @@ class AgentRoutingMixin:
                 record_in_history,
                 cancellation_token,
             )
+        except UserAuthRequired as exc:
+            self._capture_chat_approval(exc, last_content, record_in_history=record_in_history)
+            response = self._handle_user_auth_required(
+                exc.request, raw_input=last_content, record_in_history=record_in_history
+            )
+            self.last_stream_response_raw = response
+            yield from _text_response_events(response)
         except ApprovalRequired as exc:
             self._capture_chat_approval(exc, last_content, record_in_history=record_in_history)
             response = self._handle_approval_required(
@@ -723,7 +745,7 @@ class AgentRoutingMixin:
             if record_in_history:
                 self._append_short_term([LLMMessage(role="assistant", content=response)])
             return AgentResponse(response, runtime_result=outcome)
-        except ApprovalRequired:
+        except (ApprovalRequired, UserAuthRequired):
             raise
         except Exception as exc:  # noqa: BLE001
             # Presentation не меняет execution/verifier facts и не повторяет tools.

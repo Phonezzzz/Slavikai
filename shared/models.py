@@ -26,6 +26,10 @@ class ToolRequest:
     workspace_file_budget: WorkspaceFileBudget | None = field(
         default=None, repr=False, compare=False
     )
+    # E02-T04: id попытки ручного входа, которую владелец run завершил
+    # кнопкой «Готово». Python-only, как workspace_binding: выставляет только
+    # ToolGateway.call_user_auth_resumed, модель задать его не может.
+    user_auth_resume: str | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass

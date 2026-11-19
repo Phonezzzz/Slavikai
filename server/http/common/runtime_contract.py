@@ -11,6 +11,7 @@ from core.agent_response import AgentResponse
 from core.approval_policy import ApprovalCategory, ApprovalRequest
 from core.desktop_policy import DesktopApprovalRule
 from core.response_preferences import ResponsePreferences
+from core.user_auth import UserAuthChoice, UserAuthRequest
 from llm.capabilities import NativeToolQualification
 from llm.stream_model import StreamEvent
 from llm.types import ModelConfig, is_chatgpt_plan_provider
@@ -118,6 +119,7 @@ class AgentProtocol(Protocol):
     brain: object
     tools_enabled: dict[str, bool]
     last_approval_request: ApprovalRequest | None
+    last_user_auth_request: UserAuthRequest | None
     last_approval_resume_payload: dict[str, JSONValue] | None
     last_chat_interaction_id: str | None
     tracer: TracerProtocol
@@ -179,6 +181,14 @@ class AgentProtocol(Protocol):
 
     def resume_chat_approval(
         self, identity: str, *, cancellation_token: asyncio.Event | None = None
+    ) -> AgentResponse: ...
+    def chat_user_auth_request(self, identity: str) -> UserAuthRequest | None: ...
+    def resume_chat_user_auth(
+        self,
+        identity: str,
+        choice: UserAuthChoice,
+        *,
+        cancellation_token: asyncio.Event | None = None,
     ) -> AgentResponse: ...
 
     def respond_stream(

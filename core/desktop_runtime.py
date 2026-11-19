@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol, TypeVar
 
 from core.approval_policy import ApprovalRequired
@@ -21,6 +22,12 @@ from core.tool_loop import (
     ExecutedToolCall,
     ToolLoopContinuation,
     ToolLoopExecutionError,
+)
+from core.user_auth import (
+    USER_AUTH_TIMEOUT_SECONDS,
+    UserAuthChoice,
+    UserAuthRequest,
+    UserAuthRequired,
 )
 from llm.brain_base import Brain
 from llm.cancellation import cancellation_requested
@@ -134,12 +141,14 @@ class DesktopRuntime:
         max_iterations: int = 12,
         run_coordinator: DesktopRunCoordinator | None = None,
         approval_timeout_seconds: float = 300,
+        user_auth_timeout_seconds: float = USER_AUTH_TIMEOUT_SECONDS,
     ) -> None:
         self.parent = parent
         self.max_iterations = max(2, max_iterations)
         self.verifier = VerifierRuntime()
         self.run_coordinator = run_coordinator or DesktopRunCoordinator()
         self.approval_timeout_seconds = max(0.01, approval_timeout_seconds)
+        self.user_auth_timeout_seconds = max(0.01, user_auth_timeout_seconds)
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="desktop-runtime")
         self._state_lock = threading.RLock()
         self._paused: ToolLoopContinuation | None = None
@@ -147,6 +156,9 @@ class DesktopRuntime:
         self._timer: threading.Timer | None = None
         self._lease_held = False
         self._closed = False
+        # E02-T04: срок активной попытки ручного входа и её истечение.
+        self._user_auth_deadline: float | None = None
+        self._user_auth_expired = False
 
     def run(
         self,
@@ -204,9 +216,15 @@ class DesktopRuntime:
         continuation: ToolLoopContinuation,
         *,
         cancellation_token: asyncio.Event | None = None,
+        user_auth: UserAuthChoice | None = None,
     ) -> DesktopRunOutcome:
         return self._on_owner(
-            lambda: self._resume(goal, continuation, cancellation_token=cancellation_token)
+            lambda: self._resume(
+                goal,
+                continuation,
+                cancellation_token=cancellation_token,
+                user_auth=user_auth,
+            )
         )
 
     def _resume(
@@ -215,18 +233,22 @@ class DesktopRuntime:
         continuation: ToolLoopContinuation,
         *,
         cancellation_token: asyncio.Event | None = None,
+        user_auth: UserAuthChoice | None = None,
     ) -> DesktopRunOutcome:
         with self._state_lock:
             if not self.has_continuation(continuation):
                 raise DesktopContinuationUnavailable("approval_continuation_unavailable")
+            resumed = self._resumable(continuation, user_auth)
             self._paused = None
             self._paused_gateway = None
             self._cancel_timer()
+            self._user_auth_deadline = None
+            self._user_auth_expired = False
             try:
                 return self._run_with_lease(
                     goal,
                     cancellation_token=cancellation_token,
-                    continuation=continuation,
+                    continuation=resumed,
                 )
             finally:
                 if self._paused is None:
@@ -237,6 +259,77 @@ class DesktopRuntime:
             if self._paused is None:
                 return
         self._on_owner(self._cancel_pending)
+
+    def user_auth_expired(self, continuation: ToolLoopContinuation) -> bool:
+        """Истекла ли попытка ручного входа этой паузы (E02-T04)."""
+        with self._state_lock:
+            return self._paused is continuation and self._user_auth_expired
+
+    def _resumable(
+        self, continuation: ToolLoopContinuation, user_auth: UserAuthChoice | None
+    ) -> ToolLoopContinuation:
+        """Проверить, каким действием можно продолжить паузу, и вернуть continuation.
+
+        Approval-пауза продолжается только approval-действием, пауза на ручной
+        вход — только ``done``/``retry``. «Готово» принимается один раз и только
+        до истечения попытки; ``retry`` — только после истечения (окно уже
+        закрыто, lease отпущен после подтверждённого закрытия). Отказ оставляет
+        паузу на месте: run продолжает ждать в ``NEEDS_USER_AUTH``.
+        """
+        pause = continuation.approval
+        if not isinstance(pause, UserAuthRequest):
+            if user_auth is not None:
+                raise DesktopContinuationUnavailable("approval_continuation_unavailable")
+            return continuation
+        if user_auth is None:
+            raise DesktopContinuationUnavailable("approval_continuation_unavailable")
+        if (
+            not self._user_auth_expired
+            and self._user_auth_deadline is not None
+            and time.monotonic() >= self._user_auth_deadline
+        ):
+            # Таймер мог не успеть: истечение применяется до решения.
+            self._expire_user_auth_attempt()
+        if user_auth == "done":
+            if self._user_auth_expired:
+                raise DesktopContinuationUnavailable("user_auth_attempt_expired")
+            return replace(continuation, approval=replace(pause, control_returned=True))
+        if not self._user_auth_expired:
+            raise DesktopContinuationUnavailable("user_auth_retry_unavailable")
+        return replace(continuation, approval=replace(pause, control_returned=False))
+
+    def _expire_user_auth(self, continuation: ToolLoopContinuation) -> None:
+        try:
+            self._on_owner(lambda: self._expire_user_auth_on_owner(continuation))
+        except RuntimeError:
+            if not self._closed:
+                raise
+            return
+
+    def _expire_user_auth_on_owner(self, continuation: ToolLoopContinuation) -> None:
+        with self._state_lock:
+            if self._paused is continuation and not self._user_auth_expired:
+                self._expire_user_auth_attempt()
+
+    def _expire_user_auth_attempt(self) -> None:
+        """Попытка входа истекла: закрыть окно, но не отменять run.
+
+        Run остаётся в паузе ``NEEDS_USER_AUTH`` (continuation и lease хоста
+        удерживаются) с явным ``retry``. Окно этой попытки закрывается через
+        BrowserService: lease профиля отпускается только после подтверждённого
+        закрытия Chromium, при сбое закрытия он остаётся удержанным.
+        """
+        self._user_auth_expired = True
+        self._cancel_timer()
+        self._close_resources()
+        paused = self._paused
+        if paused is not None:
+            # Retry ждёт не дольше обычной паузы: потом run отменяется целиком.
+            self._start_timer(self.approval_timeout_seconds, self._expire, paused)
+        tracer = getattr(self.parent, "tracer", None)
+        log = getattr(tracer, "log", None)
+        if callable(log):
+            log("desktop_user_auth_expired", "Manual login attempt expired; window closed", {})
 
     def close(self) -> None:
         with self._state_lock:
@@ -268,6 +361,37 @@ class DesktopRuntime:
                 self._close_resources()
                 self.parent.desktop_execution_control.clear()
                 self._release_lease()
+
+    def _start_timer(
+        self,
+        delay: float,
+        callback: Callable[[ToolLoopContinuation], None],
+        continuation: ToolLoopContinuation,
+    ) -> None:
+        self._cancel_timer()
+        self._timer = threading.Timer(max(0.0, delay), callback, args=(continuation,))
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _pause_for_user_auth(self, exc: UserAuthRequired) -> None:
+        """Пауза ``NEEDS_USER_AUTH``: срок попытки считается от готовности окна."""
+        continuation = exc.continuation
+        if continuation is None:
+            return
+        deadline = exc.request.window_ready_monotonic + self.user_auth_timeout_seconds
+        remaining = deadline - time.monotonic()
+        request = replace(
+            exc.request,
+            timeout_seconds=self.user_auth_timeout_seconds,
+            expires_at_epoch=time.time() + max(0.0, remaining),
+        )
+        exc.request = request
+        continuation = replace(continuation, approval=request)
+        exc.continuation = continuation
+        self._paused = continuation
+        self._user_auth_deadline = deadline
+        self._user_auth_expired = False
+        self._start_timer(remaining, self._expire_user_auth, continuation)
 
     def _cancel_timer(self) -> None:
         if self._timer is not None:
@@ -358,7 +482,7 @@ class DesktopRuntime:
                 final_gate=_final_gate,
                 continuation=continuation,
             )
-        except ApprovalRequired as exc:
+        except (ApprovalRequired, UserAuthRequired) as exc:
             if exc.continuation is None:
                 self._cleanup_unverified_launches(gateway)
                 raise
@@ -373,13 +497,10 @@ class DesktopRuntime:
             else:
                 self._paused = exc.continuation
                 self._paused_gateway = gateway
-                self._timer = threading.Timer(
-                    self.approval_timeout_seconds,
-                    self._expire,
-                    args=(exc.continuation,),
-                )
-                self._timer.daemon = True
-                self._timer.start()
+                if isinstance(exc, UserAuthRequired):
+                    self._pause_for_user_auth(exc)
+                else:
+                    self._start_timer(self.approval_timeout_seconds, self._expire, exc.continuation)
                 raise
         except ToolLoopExecutionError as exc:
             loop_result = exc.result

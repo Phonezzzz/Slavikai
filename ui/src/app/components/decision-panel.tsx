@@ -15,6 +15,11 @@ type DecisionPanelProps = {
 
 export function DecisionPanel({ decision, busy, error, onRespond }: DecisionPanelProps) {
   const isMemorySave = decision.decision_type === 'memory_save';
+  // E02-T04: run ждёт ручного входа (NEEDS_USER_AUTH); окно Chromium — на мониторе ПК.
+  const isUserAuth = decision.decision_type === 'user_auth';
+  const userAuthExpiresAt = isUserAuth && typeof decision.proposed_action?.attempt_expires_at === 'string'
+    ? decision.proposed_action.attempt_expires_at
+    : null;
   const proposedMemoryText = isMemorySave && typeof decision.proposed_action?.text === 'string'
     ? decision.proposed_action.text
     : '';
@@ -92,9 +97,16 @@ export function DecisionPanel({ decision, busy, error, onRespond }: DecisionPane
       <div className="mx-auto max-w-3xl rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <h3 className="text-sm font-semibold text-zinc-200">Требуется подтверждение</h3>
+            <h3 className="text-sm font-semibold text-zinc-200">
+              {isUserAuth ? 'Нужен ручной вход' : 'Требуется подтверждение'}
+            </h3>
             <p className="mt-1 text-xs text-zinc-400">{decision.summary}</p>
             <p className="mt-1 text-xs text-zinc-400">Причина: {decision.reason}</p>
+            {userAuthExpiresAt ? (
+              <p className="mt-1 text-xs text-zinc-400">
+                Окно открыто до: {new Date(userAuthExpiresAt).toLocaleTimeString()}
+              </p>
+            ) : null}
           </div>
           <button
             type="button"
