@@ -382,3 +382,53 @@ def test_run_cancelled_after_retry_window_reflected_in_api(tmp_path, monkeypatch
             await client.close()
 
     asyncio.run(run())
+
+
+def test_decision_expired_published_without_get_after_second_deadline(
+    tmp_path, monkeypatch
+) -> None:
+    # Открытая вкладка не делает GET: переход в expired должен прийти
+    # событием decision.packet по SSE сразу после второго дедлайна.
+    monkeypatch.chdir(tmp_path)
+    _fake_chromium(monkeypatch)
+    agent = LoginAgent(tmp_path)
+    agent.desktop_runtime.user_auth_timeout_seconds = 0.2
+    agent.desktop_runtime.approval_timeout_seconds = 0.2
+
+    async def run() -> None:
+        client = await _create_client(agent)
+        hub = client.app["ui_hub"]
+        queue = None
+        try:
+            session_id = (await (await client.get("/ui/api/status")).json())["session_id"]
+            decision = (await _start_login(client, session_id))["decision"]
+            queue = await hub.subscribe(session_id)
+
+            expired_decision = None
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and expired_decision is None:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=0.1)
+                except TimeoutError:
+                    continue
+                if event.get("type") != "decision.packet":
+                    continue
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                candidate = payload.get("decision")
+                if isinstance(candidate, dict) and candidate.get("status") == "expired":
+                    expired_decision = candidate
+
+            assert expired_decision is not None, "expired не опубликован без GET"
+            assert expired_decision["id"] == decision["id"]
+            # И в самом hub decision уже expired — без единого GET сессии.
+            current = await hub.get_session_decision(session_id)
+            assert current is not None and current["status"] == "expired"
+        finally:
+            if queue is not None:
+                await hub.unsubscribe(session_id, queue)
+            agent.desktop_runtime.cancel_pending()
+            await client.close()
+
+    asyncio.run(run())

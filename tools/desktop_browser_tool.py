@@ -44,9 +44,14 @@ SENSITIVE_VALUE_MASK = "[redacted]"
 # E02-T04: Playwright aria_snapshot печатает value текстовых полей, включая
 # type=password (проверено на Chromium 2026-11-19). Перед снимком значения
 # чувствительных полей временно подменяются маской и сразу восстанавливаются:
-# снимок модели и tool log никогда не видят пароль или MFA-код. Критерий —
-# только структурные признаки поля (type=password, autocomplete), без
-# угадывания по тексту страницы.
+# снимок модели и tool log никогда не видят пароль или MFA-код. Для обычного
+# snapshot критерий — структурные признаки поля (type=password,
+# autocomplete), без угадывания по тексту страницы. Для observation после
+# ручного входа (``_finish_login_handoff``) этого мало: MFA-форма может
+# держать код в обычном текстовом поле без autocomplete, и структурно такое
+# поле неотличимо от любого другого. Поэтому там маскируются ВСЕ непустые
+# текстовые поля, а если отсутствие секретов подтвердить нельзя — snapshot
+# модели не уходит (fail-closed, см. _VERIFY_ALL_MASKED_JS).
 _MASK_SENSITIVE_JS = """(mask) => {
   const tokens = new Set(['current-password', 'new-password', 'one-time-code']);
   let masked = 0;
@@ -68,7 +73,7 @@ _MASK_SENSITIVE_JS = """(mask) => {
 }"""
 _RESTORE_SENSITIVE_JS = """() => {
   const visit = (root) => {
-    for (const el of root.querySelectorAll('input')) {
+    for (const el of root.querySelectorAll('input, textarea')) {
       if (el.__slavikaiMasked === undefined) continue;
       el.value = el.__slavikaiMasked;
       delete el.__slavikaiMasked;
@@ -90,6 +95,43 @@ _VERIFY_MASKED_JS = """(mask) => {
       const auto = (el.getAttribute('autocomplete') || '').toLowerCase().split(/\\s+/);
       const sensitive = el.type === 'password' || auto.some((token) => tokens.has(token));
       if (sensitive && el.value && el.value !== mask) exposed += 1;
+    }
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) visit(el.shadowRoot);
+    }
+  };
+  visit(document);
+  return exposed;
+}"""
+# Строгая маскировка для observation после ручного входа: ВСЕ непустые
+# текстовые поля (input и textarea, кроме file — ему value не присвоить),
+# включая открытые shadow roots. MFA-код в обычном поле без
+# autocomplete="one-time-code" структурно неотличим от любого текста,
+# поэтому после handoff модели не уходит ни одно введённое значение.
+_MASK_ALL_TEXT_FIELDS_JS = """(mask) => {
+  let masked = 0;
+  const visit = (root) => {
+    for (const el of root.querySelectorAll('input, textarea')) {
+      if (el.type === 'file' || !el.value || el.__slavikaiMasked !== undefined) continue;
+      el.__slavikaiMasked = el.value;
+      el.value = mask;
+      masked += 1;
+    }
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) visit(el.shadowRoot);
+    }
+  };
+  visit(document);
+  return masked;
+}"""
+# Подтверждение строгой маскировки: ни одно текстовое поле не держит
+# реальное значение. Ноль — snapshot безопасен; иначе он не уходит модели.
+_VERIFY_ALL_MASKED_JS = """(mask) => {
+  let exposed = 0;
+  const visit = (root) => {
+    for (const el of root.querySelectorAll('input, textarea')) {
+      if (el.type === 'file') continue;
+      if (el.value && el.value !== mask) exposed += 1;
     }
     for (const el of root.querySelectorAll('*')) {
       if (el.shadowRoot) visit(el.shadowRoot);
@@ -402,18 +444,33 @@ class PlaywrightBrowserBackend:
             "select|submit|wait|tabs|switch_tab|close_tab|download|close|login_handoff"
         )
 
-    def _observation(self, page_id: str, page: Page, request: ToolRequest) -> dict[str, JSONValue]:
-        """Accessibility snapshot страницы без значений password/MFA-полей."""
+    def _observation(
+        self,
+        page_id: str,
+        page: Page,
+        request: ToolRequest,
+        *,
+        mask_all_text_fields: bool = False,
+    ) -> dict[str, JSONValue]:
+        """Accessibility snapshot страницы без значений password/MFA-полей.
+
+        С ``mask_all_text_fields`` (observation после ручного входа)
+        маскируются все непустые текстовые поля: MFA-код может лежать в
+        обычном поле без ``autocomplete``, и подтвердить отсутствие
+        секретов иначе нельзя.
+        """
+        mask_js = _MASK_ALL_TEXT_FIELDS_JS if mask_all_text_fields else _MASK_SENSITIVE_JS
+        verify_js = _VERIFY_ALL_MASKED_JS if mask_all_text_fields else _VERIFY_MASKED_JS
         frames = list(page.frames)
         masked = 0
         try:
             for frame in frames:
-                masked += int(frame.evaluate(_MASK_SENSITIVE_JS, SENSITIVE_VALUE_MASK))
-            # Маскировка подтверждается до снимка: если хоть одно чувствительное
-            # поле (включая открытые shadow roots) осталось с реальным
+                masked += int(frame.evaluate(mask_js, SENSITIVE_VALUE_MASK))
+            # Маскировка подтверждается до снимка: если хоть одно поле
+            # (включая открытые shadow roots) осталось с реальным
             # значением, snapshot модели не уходит — явный отказ, не fallback.
             for frame in frames:
-                exposed = int(frame.evaluate(_VERIFY_MASKED_JS, SENSITIVE_VALUE_MASK))
+                exposed = int(frame.evaluate(verify_js, SENSITIVE_VALUE_MASK))
                 if exposed:
                     raise RuntimeError(
                         "sensitive field masking could not be confirmed; snapshot withheld"
@@ -500,7 +557,9 @@ class PlaywrightBrowserBackend:
         return ToolResult.success(
             {
                 "operation": "login_handoff",
-                **self._observation(page_id, page, request),
+                # Строгая маскировка: пользователь только что вводил секреты
+                # вручную, и MFA-код мог остаться в обычном текстовом поле.
+                **self._observation(page_id, page, request, mask_all_text_fields=True),
                 "user_returned_control": True,
                 # «Готово» — возврат управления, не доказательство входа.
                 "login_verified": False,

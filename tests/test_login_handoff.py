@@ -106,6 +106,19 @@ class _Frame:
                 for field in self._visible_fields(script)
                 if field.sensitive and field.value and field.value != str(arg)
             )
+        if script == desktop_browser_tool._MASK_ALL_TEXT_FIELDS_JS:
+            masked = 0
+            for field in self._visible_fields(script):
+                if field.maskable and field.value and field.stash is None:
+                    field.stash, field.value = field.value, str(arg)
+                    masked += 1
+            return masked
+        if script == desktop_browser_tool._VERIFY_ALL_MASKED_JS:
+            return sum(
+                1
+                for field in self._visible_fields(script)
+                if field.value and field.value != str(arg)
+            )
         if script == desktop_browser_tool._RESTORE_SENSITIVE_JS:
             for field in self._visible_fields(script):
                 if field.stash is not None:
@@ -324,9 +337,13 @@ def test_handoff_resume_returns_fresh_masked_observation_once(
     snapshot = str(result.data["snapshot"])
     assert "Welcome back" in snapshot
     assert PASSWORD not in snapshot and OTP not in snapshot
-    assert snapshot.count(SENSITIVE_VALUE_MASK) == 2
-    assert result.data["masked_sensitive_fields"] == 2
+    # Строгая маскировка после handoff: скрыты все текстовые поля, включая
+    # Email — MFA-код в обычном поле без autocomplete неотличим от текста.
+    assert "owner@example.test" not in snapshot
+    assert snapshot.count(SENSITIVE_VALUE_MASK) == 3
+    assert result.data["masked_sensitive_fields"] == 3
     # Значения в окне пользователя восстановлены после снимка.
+    assert page.fields[0].value == "owner@example.test"
     assert page.fields[1].value == PASSWORD and page.fields[2].value == OTP
 
     again = tool.handle(resumed)
@@ -703,6 +720,67 @@ def test_snapshot_withheld_when_masking_unconfirmed(
     tool.close()
 
 
+PLAIN_MFA = "135790"
+
+
+def test_handoff_resume_masks_plain_text_field_without_autocomplete(
+    tmp_path: Path, playwright: _Playwright
+) -> None:
+    # MFA-форма держит код в обычном текстовом поле без
+    # autocomplete="one-time-code" (fake: sensitive=False) — после
+    # handoff он не должен уйти в snapshot модели.
+    tool = _tool(tmp_path)
+    with pytest.raises(UserAuthRequired) as paused:
+        tool.handle(_handoff())
+    page = playwright.chromium.contexts[0].pages[0]
+    page.fields[0].value = PLAIN_MFA  # обычное поле без структурных признаков
+    page.fields[1].value = PASSWORD
+    attempt = paused.value.request.attempt_id
+
+    result = tool.handle(
+        ToolRequest(
+            "desktop_browser",
+            {"operation": "login_handoff", "url": LOGIN_URL},
+            user_auth_resume=attempt,
+        )
+    )
+
+    assert result.ok
+    assert PLAIN_MFA not in repr(result.data)
+    assert PASSWORD not in repr(result.data)
+    assert result.data["masked_sensitive_fields"] == 2
+    assert page.fields[0].value == PLAIN_MFA  # восстановлено после снимка
+    tool.close()
+
+
+def test_handoff_resume_withheld_when_plain_field_unmaskable(
+    tmp_path: Path, playwright: _Playwright
+) -> None:
+    # Если отсутствие секретов в обычном поле подтвердить нельзя —
+    # snapshot модели не уходит (явный отказ, не fallback).
+    tool = _tool(tmp_path)
+    with pytest.raises(UserAuthRequired) as paused:
+        tool.handle(_handoff())
+    page = playwright.chromium.contexts[0].pages[0]
+    page.fields[0].maskable = False
+    page.fields[0].value = PLAIN_MFA
+    attempt = paused.value.request.attempt_id
+
+    result = tool.handle(
+        ToolRequest(
+            "desktop_browser",
+            {"operation": "login_handoff", "url": LOGIN_URL},
+            user_auth_resume=attempt,
+        )
+    )
+
+    assert not result.ok
+    assert "masking could not be confirmed" in str(result.error)
+    assert "snapshot" not in result.data
+    assert PLAIN_MFA not in repr(result.data)
+    tool.close()
+
+
 def test_failed_close_during_handoff_restart_keeps_lease(
     tmp_path: Path, playwright: _Playwright
 ) -> None:
@@ -991,6 +1069,136 @@ def test_real_chromium_snapshot_redacts_shadow_dom_secrets(tmp_path: Path) -> No
         assert "owner@example.test" in text
         # Light password + shadow password + shadow OTP замаскированы.
         assert snapshot.data["masked_sensitive_fields"] == 3
+    finally:
+        tool.close()
+        server.shutdown()
+
+
+NOTE_SECRET = "note-secret-value"
+SHADOW_PLAIN = "shadow-plain-value"
+
+PLAIN_MFA_FORM_HTML = (
+    """<!doctype html><html><body><h1>Sign in</h1>
+<label>Email <input name="email" autocomplete="username"></label>
+<label>Password <input type="password" name="pw"></label>
+<label>MFA <input name="mfa" inputmode="numeric" maxlength="6"></label>
+<label>Notes <textarea name="notes"></textarea></label>
+<div id="shadow-host"></div>
+<script>
+  document.querySelector('[name=email]').value = 'owner@example.test';
+  document.querySelector('[name=pw]').value = 'PW_VALUE';
+  document.querySelector('[name=mfa]').value = 'MFA_VALUE';
+  document.querySelector('[name=notes]').value = 'NOTE_VALUE';
+  const root = document.getElementById('shadow-host').attachShadow({mode: 'open'});
+  root.innerHTML = '<label>Vault <input name="svault"></label>';
+  root.querySelector('[name=svault]').value = 'SHADOW_VALUE';
+</script>
+</body></html>
+""".replace("PW_VALUE", PASSWORD)
+    .replace("MFA_VALUE", PLAIN_MFA)
+    .replace("NOTE_VALUE", NOTE_SECRET)
+    .replace("SHADOW_VALUE", SHADOW_PLAIN)
+)
+
+
+class _PlainMfaFormHandler(_FormHandler):
+    html = PLAIN_MFA_FORM_HTML
+
+
+def _backend_and_page(tool: DesktopBrowserTool):
+    backend = next(iter(tool._service._sessions.values())).backend
+    page_id = backend._active_page_id
+    assert page_id is not None
+    return backend, page_id, backend._pages[page_id]
+
+
+@pytest.mark.skipif(
+    os.environ.get("SLAVIK_RUN_BROWSER_PERSISTENCE_E2E") != "1",
+    reason="real headless Chromium redaction check is opt-in",
+)
+def test_real_chromium_strict_observation_masks_plain_mfa_field(tmp_path: Path) -> None:
+    # Тот же код, что _finish_login_handoff после «Готово»: MFA-код в
+    # обычном поле без autocomplete, пароль, textarea и обычное поле в
+    # shadow DOM не попадают в snapshot; значения восстановлены.
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _PlainMfaFormHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/login"
+    tool = _tool(tmp_path)
+    try:
+        opened = tool.handle(ToolRequest("desktop_browser", {"operation": "open", "url": url}))
+        assert opened.ok, opened.error
+        backend, page_id, page = _backend_and_page(tool)
+        observation = backend._observation(
+            page_id,
+            page,
+            ToolRequest("desktop_browser", {"operation": "snapshot"}),
+            mask_all_text_fields=True,
+        )
+        text = str(observation["snapshot"])
+        for secret in (PASSWORD, PLAIN_MFA, NOTE_SECRET, SHADOW_PLAIN, "owner@example.test"):
+            assert secret not in text
+        # Email + password + plain MFA + textarea + shadow plain field.
+        assert observation["masked_sensitive_fields"] == 5
+        values = page.evaluate(
+            """() => ({
+              email: document.querySelector('[name=email]').value,
+              pw: document.querySelector('[name=pw]').value,
+              mfa: document.querySelector('[name=mfa]').value,
+              notes: document.querySelector('[name=notes]').value,
+              vault: document.getElementById('shadow-host').shadowRoot
+                .querySelector('[name=svault]').value,
+            })"""
+        )
+        assert values == {
+            "email": "owner@example.test",
+            "pw": PASSWORD,
+            "mfa": PLAIN_MFA,
+            "notes": NOTE_SECRET,
+            "vault": SHADOW_PLAIN,
+        }
+    finally:
+        tool.close()
+        server.shutdown()
+
+
+UNMASKABLE_FORM_HTML = """<!doctype html><html><body><h1>Sign in</h1>
+<label>MFA <input name="mfa" inputmode="numeric" maxlength="6"></label>
+<script>
+  const el = document.querySelector('[name=mfa]');
+  Object.defineProperty(el, 'value', { get() { return '246810'; } });
+</script>
+</body></html>
+"""
+
+
+class _UnmaskableFormHandler(_FormHandler):
+    html = UNMASKABLE_FORM_HTML
+
+
+@pytest.mark.skipif(
+    os.environ.get("SLAVIK_RUN_BROWSER_PERSISTENCE_E2E") != "1",
+    reason="real headless Chromium redaction check is opt-in",
+)
+def test_real_chromium_strict_observation_withheld_when_unmaskable(tmp_path: Path) -> None:
+    # Поле, чьё значение нельзя подменить маской: отсутствие секретов не
+    # подтверждено — observation запрещён (fail-closed).
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _UnmaskableFormHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/login"
+    tool = _tool(tmp_path)
+    try:
+        opened = tool.handle(ToolRequest("desktop_browser", {"operation": "open", "url": url}))
+        assert opened.ok, opened.error
+        backend, page_id, page = _backend_and_page(tool)
+        with pytest.raises(RuntimeError, match="masking could not be confirmed"):
+            backend._observation(
+                page_id,
+                page,
+                ToolRequest("desktop_browser", {"operation": "snapshot"}),
+                mask_all_text_fields=True,
+            )
     finally:
         tool.close()
         server.shutdown()

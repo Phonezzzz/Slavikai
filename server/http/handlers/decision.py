@@ -307,7 +307,18 @@ async def _complete_ui_decision(
         )
     if current_status != "pending":
         status_value = current_status if isinstance(current_status, str) else "unknown"
-        if status_value in {"resolved", "rejected", "expired"}:
+        if status_value == "expired":
+            # Истёкший decision отвечает одинаково, кто бы ни выполнил
+            # переход: ленивый путь выше, hub по сроку expires_at (E02-T04)
+            # или GET сессии.
+            return error_response(
+                status=410,
+                message="Decision packet протух и больше не может быть применён.",
+                error_type="invalid_request_error",
+                code="decision_expired",
+                details={"decision": current_decision},
+            )
+        if status_value in {"resolved", "rejected"}:
             return error_response(
                 status=409,
                 message="Decision уже завершён и не может быть выполнен повторно.",
