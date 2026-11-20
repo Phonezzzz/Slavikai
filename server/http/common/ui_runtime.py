@@ -10,6 +10,7 @@ from aiohttp import web
 
 from core.approval_policy import ALL_CATEGORIES, ApprovalCategory, ApprovalRequest
 from core.mwv.models import TaskPacket
+from core.user_auth import UserAuthRequest
 from server.http.common import decision_flow, plan_edit, streaming, workflow_runtime, workflow_state
 from server.ui_hub import UIHub
 from shared.auto_models import normalize_auto_state
@@ -193,6 +194,53 @@ def _build_ui_approval_decision(
         trace_id=trace_id,
         workflow_context=workflow_context,
         all_categories=ALL_CATEGORIES,
+        normalize_json_value_fn=_normalize_json_value,
+        utc_now_iso=_utc_now_iso,
+    )
+
+
+def _serialize_user_auth_request(
+    user_auth_request: UserAuthRequest | None,
+) -> dict[str, JSONValue] | None:
+    """Статус паузы ``NEEDS_USER_AUTH`` для UI/API — без содержимого окна входа."""
+    if user_auth_request is None:
+        return None
+    expires_at = (
+        datetime.fromtimestamp(user_auth_request.expires_at_epoch, UTC).isoformat()
+        if user_auth_request.expires_at_epoch is not None
+        else None
+    )
+    cancel_at = (
+        datetime.fromtimestamp(user_auth_request.cancel_at_epoch, UTC).isoformat()
+        if user_auth_request.cancel_at_epoch is not None
+        else None
+    )
+    return {
+        "tool": user_auth_request.tool,
+        "page_id": user_auth_request.page_id,
+        "url": user_auth_request.url,
+        "title": user_auth_request.title,
+        "attempt_id": user_auth_request.attempt_id,
+        "attempt_expires_at": expires_at,
+        "cancel_at": cancel_at,
+        "timeout_seconds": user_auth_request.timeout_seconds,
+    }
+
+
+def _build_ui_user_auth_decision(
+    *,
+    user_auth_request: dict[str, JSONValue],
+    session_id: str,
+    resume_payload: dict[str, JSONValue],
+    trace_id: str | None = None,
+    workflow_context: dict[str, JSONValue] | None = None,
+) -> dict[str, JSONValue]:
+    return decision_flow.build_ui_user_auth_decision(
+        user_auth_request=user_auth_request,
+        session_id=session_id,
+        resume_payload=resume_payload,
+        trace_id=trace_id,
+        workflow_context=workflow_context,
         normalize_json_value_fn=_normalize_json_value,
         utc_now_iso=_utc_now_iso,
     )

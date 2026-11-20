@@ -305,6 +305,88 @@ def build_ui_approval_decision(
     }
 
 
+def build_ui_user_auth_decision(
+    *,
+    user_auth_request: dict[str, JSONValue],
+    session_id: str,
+    resume_payload: dict[str, JSONValue],
+    trace_id: str | None,
+    workflow_context: dict[str, JSONValue] | None,
+    normalize_json_value_fn: Callable[[object], JSONValue],
+    utc_now_iso: Callable[[], str],
+) -> dict[str, JSONValue]:
+    """E02-T04: решение «Войди в окне Chromium на ПК → Готово».
+
+    Decision блокирующий, принадлежит session run (владелец проверяется
+    ``_ensure_session_owned``) и продолжается один раз. Истечение попытки не
+    закрывает decision — run остаётся в ``NEEDS_USER_AUTH`` и ждёт явного
+    retry; срок попытки отдаётся в ``proposed_action.attempt_expires_at`` для
+    статуса на телефоне. ``expires_at`` decision — срок полной отмены run
+    (попытка + окно retry, ``cancel_at``): после него decision переходит в
+    ``expired``, отражая отмену run в API и UI.
+    """
+    now = utc_now_iso()
+    context_payload: dict[str, JSONValue] = {
+        "session_id": session_id,
+        "trace_id": trace_id,
+        "source_endpoint": "chat.tool_continue",
+        "resume_payload": resume_payload,
+        "run_phase": "WAITING_USER_INPUT",
+    }
+    if isinstance(workflow_context, dict):
+        for key, value in workflow_context.items():
+            context_payload[str(key)] = normalize_json_value_fn(value)
+    return {
+        "id": f"decision-{uuid.uuid4().hex}",
+        "kind": "decision",
+        "decision_type": "user_auth",
+        "status": "pending",
+        "blocking": True,
+        "reason": "NEEDS_USER_AUTH",
+        "summary": "Войди в окне Chromium на ПК → Готово",
+        "proposed_action": {
+            "reason": "NEEDS_USER_AUTH",
+            "run_phase": "WAITING_USER_INPUT",
+            **{
+                str(key): normalize_json_value_fn(value) for key, value in user_auth_request.items()
+            },
+        },
+        "options": [
+            {
+                "id": "confirm",
+                "title": "Готово",
+                "action": "confirm",
+                "payload": {},
+                "risk": "low",
+            },
+            {
+                "id": "retry",
+                "title": "Повторить вход",
+                "action": "retry",
+                "payload": {},
+                "risk": "low",
+            },
+            {
+                "id": "reject",
+                "title": "Отмена",
+                "action": "reject",
+                "payload": {},
+                "risk": "low",
+            },
+        ],
+        "default_option_id": "confirm",
+        "context": context_payload,
+        "created_at": now,
+        "expires_at": (
+            user_auth_request.get("cancel_at")
+            if isinstance(user_auth_request.get("cancel_at"), str)
+            else None
+        ),
+        "updated_at": now,
+        "resolved_at": None,
+    }
+
+
 def build_plan_execute_decision(
     *,
     session_id: str,

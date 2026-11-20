@@ -8,6 +8,7 @@ import subprocess
 import time
 import zipfile
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
@@ -46,6 +47,7 @@ from server.http_api import (
     _artifact_file_payload,
     _artifact_mime_from_ext,
     _closest_model_suggestion,
+    _decision_with_status,
     _ensure_session_owned,
     _normalize_provider,
     _normalize_ui_decision,
@@ -731,6 +733,22 @@ async def handle_ui_sessions_create(request: web.Request) -> web.Response:
     return response
 
 
+def _decision_deadline_passed(decision: dict[str, JSONValue]) -> bool:
+    """Истёк ли ``expires_at`` decision (зеркало проверки в decision respond)."""
+    expires_at_raw = decision.get("expires_at")
+    if not isinstance(expires_at_raw, str) or not expires_at_raw.strip():
+        return False
+    try:
+        expires_at = datetime.fromisoformat(expires_at_raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    else:
+        expires_at = expires_at.astimezone(UTC)
+    return datetime.now(UTC) >= expires_at
+
+
 async def handle_ui_session_get(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     session_id = request.match_info.get("session_id", "").strip()
@@ -754,6 +772,24 @@ async def handle_ui_session_get(request: web.Request) -> web.Response:
         )
     session["workspace_root"] = str(await _workspace_root_for_session(hub, session_id))
     raw_decision = session.get("decision")
+    if (
+        isinstance(raw_decision, dict)
+        and raw_decision.get("status") == "pending"
+        and _decision_deadline_passed(raw_decision)
+    ):
+        # E02-T04: run отменён по второму дедлайну (попытка + окно retry) —
+        # decision переходит в expired, чтобы отмена была видна в API и UI
+        # без нажатия кнопки.
+        decision_id_raw = raw_decision.get("id")
+        if isinstance(decision_id_raw, str) and decision_id_raw:
+            expired = _decision_with_status(raw_decision, status="expired", resolved=True)
+            _, latest = await hub.transition_session_decision(
+                session_id,
+                expected_id=decision_id_raw,
+                expected_status="pending",
+                next_decision=expired,
+            )
+            raw_decision = latest
     session["decision"] = _normalize_ui_decision(raw_decision, session_id=session_id)
     current_mode = api._normalize_mode_value(session.get("mode"), default="ask")
     active_plan = api._normalize_plan_payload(session.get("active_plan"))

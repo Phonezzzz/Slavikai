@@ -33,6 +33,7 @@ from core.rule_engine import RuleEngine
 from core.skills.candidates import SkillCandidateWriter
 from core.skills.index import SkillIndex, SkillMatch
 from core.tracer import Tracer
+from core.user_auth import UserAuthRequest
 from core.workspace_python_execution import RootlessPythonExecutor
 from llm.brain_base import Brain
 from llm.brain_factory import create_brain
@@ -361,6 +362,7 @@ class Agent(AgentRoutingMixin, AgentToolsMixin, AgentMemoryMixin):
         self.decision_handler = DecisionHandler()
         self._pending_chat_approval: PendingChatApproval | None = None
         self.last_approval_request: ApprovalRequest | None = None
+        self.last_user_auth_request: UserAuthRequest | None = None
         self.last_approval_source_endpoint: str | None = None
         self.last_approval_resume_payload: dict[str, JSONValue] | None = None
         self.last_decision_packet: DecisionPacket | None = None

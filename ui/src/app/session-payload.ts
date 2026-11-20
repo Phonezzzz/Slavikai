@@ -515,6 +515,7 @@ export const parseUiDecision = (value: unknown): UiDecision | null => {
     && candidate.status !== 'rejected'
     && candidate.status !== 'executing'
     && candidate.status !== 'resolved'
+    && candidate.status !== 'expired'
   ) {
     return null;
   }
@@ -561,6 +562,7 @@ export const parseUiDecision = (value: unknown): UiDecision | null => {
       || candidate.decision_type === 'agent_decision'
       || candidate.decision_type === 'memory_save'
       || candidate.decision_type === 'end_session'
+      || candidate.decision_type === 'user_auth'
         ? candidate.decision_type
         : null,
     status: candidate.status,

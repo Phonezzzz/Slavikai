@@ -15,6 +15,7 @@ from core.approval_policy import (
     decide_request,
 )
 from core.managed_workspace import ManagedWorkspacePool, WorkspaceAccess
+from core.user_auth import UserAuthRequest, UserAuthRequired
 from shared.models import JSONValue, ToolRequest, ToolResult
 from shared.tool_capture import ToolCaptureFault
 from shared.workspace_binding import (
@@ -154,6 +155,10 @@ class ToolGateway:
             or subject != approval.request_json
         ):
             raise ValueError("approval_subject_mismatch")
+        if approval.user_auth_attempt_id is not None:
+            # E02-T04 rework: подтверждение продолжает активную попытку входа
+            # с тем же attempt_id (семантика возврата управления сохраняется).
+            request = replace(request, user_auth_resume=approval.user_auth_attempt_id)
         if request.name in _WORKSPACE_OPERATIONS:
             try:
                 if self._workspace_binding(request) != approval.workspace_binding:
@@ -181,6 +186,23 @@ class ToolGateway:
             ),
         )
         return scoped_gateway.call(request)
+
+    def call_user_auth_resumed(self, request: ToolRequest, pause: UserAuthRequest) -> ToolResult:
+        """Продолжить вызов, остановленный на ручном входе (E02-T04).
+
+        Владелец run вернул управление кнопкой «Готово». Это не доказательство
+        входа: тот же вызов исполняется заново через обычный ``call`` (policy
+        проверяется снова) с Python-only ``user_auth_resume``, и tool отвечает
+        свежим observation страницы. Подмена session или инструмента — отказ.
+        """
+        context = self.approval_context
+        if (
+            not pause.control_returned
+            or request.name != pause.tool
+            or (context.session_id if context is not None else None) != pause.session_id
+        ):
+            raise ValueError("user_auth_subject_mismatch")
+        return self.call(replace(request, user_auth_resume=pause.attempt_id))
 
     def call(self, request: ToolRequest) -> ToolResult:
         binding: WorkspaceBinding | None = None
@@ -238,6 +260,7 @@ class ToolGateway:
                         sort_keys=True,
                         allow_nan=False,
                     ),
+                    user_auth_attempt_id=request.user_auth_resume,
                 )
                 raise ApprovalRequired(approval_request)
             if decision.status == "block":
@@ -329,6 +352,12 @@ class ToolGateway:
         except WorkspaceUnavailable as exc:
             result = _workspace_failure(exc)
         except ToolCaptureFault:
+            raise
+        except UserAuthRequired as exc:
+            # Пауза на ручной вход, а не ошибка инструмента: привязываем её к
+            # session этого Gateway, чтобы «Готово» нельзя было принять чужой.
+            session_id = self.approval_context.session_id if self.approval_context else None
+            exc.request = replace(exc.request, session_id=session_id)
             raise
         except Exception as exc:  # noqa: BLE001
             logger.error("Ошибка инструмента %s: %s", request.name, exc)

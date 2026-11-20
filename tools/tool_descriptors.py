@@ -511,7 +511,12 @@ TOOL_METADATA: dict[str, ToolMetadata] = {
         description=(
             "Semantic Playwright browser automation using DOM/accessibility selectors. Use this "
             "before visual GUI for web pages. Supports tabs, navigation, accessible snapshots, "
-            "find/read/click/input/select/submit/wait, and verified downloads."
+            "find/read/click/input/select/submit/wait, and verified downloads. When a site needs "
+            "the user's own login (password, MFA), call login_handoff with the login page url: "
+            "the same browser profile reopens in a visible window on the user's PC, the run "
+            "pauses until the user returns control, and the result is a fresh page snapshot. "
+            "Returned control is not proof of login: inspect the snapshot before continuing. "
+            "Never ask the user for a password or code in chat."
         ),
         parameters_schema=_schema(
             {
@@ -535,6 +540,7 @@ TOOL_METADATA: dict[str, ToolMetadata] = {
                         "close_tab",
                         "download",
                         "close",
+                        "login_handoff",
                     ],
                 },
                 "url": {"type": "string"},

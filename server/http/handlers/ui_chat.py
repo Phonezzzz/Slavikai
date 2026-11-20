@@ -18,6 +18,7 @@ from core.desktop_policy import DesktopApprovalRule, DesktopApprovalScope, Deskt
 from core.response_preferences import ResponsePreferences
 from core.skills.index import SkillIndex
 from core.task_run_storage import RunAlreadyAdmittedError, RunConflictError, TaskRunStore
+from core.user_auth import UserAuthChoice
 from llm.chatgpt_plan import ChatGPTPlanError
 from llm.stream_model import Done, Error, StreamEvent, TextDelta
 from llm.types import ModelConfig
@@ -61,6 +62,7 @@ from server.http_api import (
     _apply_agent_runtime_state,
     _build_output_artifacts,
     _build_ui_approval_decision,
+    _build_ui_user_auth_decision,
     _decision_is_pending_blocking,
     _decision_workflow_context,
     _extract_files_from_tool_calls,
@@ -84,6 +86,7 @@ from server.http_api import (
     _resolve_ui_session_id_for_principal,
     _selected_model_snapshot,
     _serialize_approval_request,
+    _serialize_user_auth_request,
     _session_forbidden_response,
     _set_current_plan_step_status,
     _should_render_result_in_canvas,
@@ -1603,6 +1606,38 @@ async def _handle_ui_send_impl(
                         active_task=active_task,
                     ),
                 )
+            user_auth_request = _serialize_user_auth_request(
+                getattr(agent, "last_user_auth_request", None)
+            )
+            user_auth_payload_raw = getattr(agent, "last_approval_resume_payload", None)
+            if (
+                user_auth_request is not None
+                and approval_request is None
+                and isinstance(user_auth_payload_raw, dict)
+            ):
+                # E02-T04: run ждёт ручного входа (WAITING_USER_INPUT / NEEDS_USER_AUTH).
+                user_auth_payload = dict(user_auth_payload_raw)
+                user_auth_payload["workspace_root_snapshot"] = str(session_root)
+                user_auth_payload["user_message_id"] = user_message_id
+                user_auth_payload["selected_model_snapshot"] = dict(selected_model)
+                user_auth_payload["source_request"] = {
+                    "content": content_raw,
+                    "force_canvas": force_canvas,
+                    "web_search": web_search,
+                    "lane": lane,
+                    "attachments": attachments,
+                }
+                ui_decision = _build_ui_user_auth_decision(
+                    user_auth_request=user_auth_request,
+                    session_id=session_id,
+                    resume_payload=user_auth_payload,
+                    trace_id=trace_id,
+                    workflow_context=_decision_workflow_context(
+                        mode=mode,
+                        active_plan=active_plan,
+                        active_task=active_task,
+                    ),
+                )
         set_runtime_workspace_root(None)
 
         if latest_auto_state is not None:
@@ -2077,6 +2112,7 @@ async def handle_ui_approval_continue(
     desktop_scope: DesktopApprovalScope | None = None,
     choice: str = "approve_once",
     request_cancellation: asyncio.Event | None = None,
+    user_auth_choice: UserAuthChoice | None = None,
 ) -> dict[str, JSONValue]:
     def not_started(code: str) -> dict[str, JSONValue]:
         return {"ok": False, "error": code, "resume_started": False}
@@ -2197,27 +2233,42 @@ async def handle_ui_approval_continue(
                         return not_started("approval_continuation_unavailable")
                 except (ChatApprovalUnavailable, LookupError):
                     return not_started("approval_continuation_unavailable")
+            pause_reader = getattr(agent, "chat_user_auth_request", None)
+            try:
+                user_auth_pause = pause_reader(identity) if callable(pause_reader) else None
+            except ChatApprovalUnavailable as exc:
+                return not_started(str(exc))
+            if (user_auth_pause is not None) != (user_auth_choice is not None):
+                # Пауза на вход продолжается только «Готово»/retry, approval — только approval.
+                return not_started("approval_continuation_unavailable")
             if mode == "desktop":
                 principal_id = _request_principal_id(request)
-                if principal_id is None or desktop_scope is None:
+                if principal_id is None:
                     return not_started("approval_continuation_unavailable")
-                created_rule = DesktopApprovalRule.create(
-                    effect="allow",
-                    scope=desktop_scope,
-                    source="persistent"
-                    if choice == "always_allow"
-                    else "session"
-                    if choice == "approve_session"
-                    else "once",
-                    subject_principal_id=principal_id,
-                    description="Approved from Desktop UI",
-                )
-                if choice == "always_allow":
-                    persistent_store.add_rule(created_rule)
-                elif choice == "approve_once":
-                    agent.add_chat_approval_rule(identity, created_rule)
-                else:
-                    await session_store.add_desktop_rule(scope, created_rule)
+                if user_auth_choice is None:
+                    if desktop_scope is None:
+                        return not_started("approval_continuation_unavailable")
+                    created_rule = DesktopApprovalRule.create(
+                        effect="allow",
+                        scope=desktop_scope,
+                        source="persistent"
+                        if choice == "always_allow"
+                        else "session"
+                        if choice == "approve_session"
+                        else "once",
+                        subject_principal_id=principal_id,
+                        description="Approved from Desktop UI",
+                    )
+                    if choice == "always_allow":
+                        persistent_store.add_rule(created_rule)
+                    elif choice == "approve_once":
+                        agent.add_chat_approval_rule(identity, created_rule)
+                    else:
+                        await session_store.add_desktop_rule(scope, created_rule)
+                # E02-T04 rework: актуальные Desktop rules перечитываются перед
+                # любым продолжением, включая «Готово»/retry ручного входа:
+                # явные ask/deny, добавленные во время паузы, действуют.
+                # Создание approval rule для user-auth по-прежнему пропускается.
                 agent.set_desktop_policy_context(
                     await session_store.get_desktop_rules(scope), principal_id
                 )
@@ -2243,6 +2294,13 @@ async def handle_ui_approval_continue(
                 with workspace_root_context(session_root):
                     worker = asyncio.create_task(
                         asyncio.to_thread(
+                            agent.resume_chat_user_auth,
+                            identity,
+                            user_auth_choice,
+                            cancellation_token=generation.token,
+                        )
+                        if user_auth_choice is not None
+                        else asyncio.to_thread(
                             agent.resume_chat_approval,
                             identity,
                             cancellation_token=generation.token,
@@ -2293,6 +2351,25 @@ async def handle_ui_approval_continue(
                         session_id=session_id,
                         source_endpoint="chat.tool_continue",
                         resume_payload=next_payload,
+                        trace_id=None,
+                        workflow_context=_decision_workflow_context(
+                            mode=str(mode), active_plan=None, active_task=None
+                        ),
+                    )
+                user_auth = _serialize_user_auth_request(
+                    getattr(agent, "last_user_auth_request", None)
+                )
+                if next_decision is None and user_auth is not None:
+                    # Явный retry открыл новую попытку входа: снова NEEDS_USER_AUTH.
+                    retry_payload = dict(agent.last_approval_resume_payload or {})
+                    retry_payload["workspace_root_snapshot"] = str(session_root)
+                    retry_payload["user_message_id"] = parent
+                    retry_payload["selected_model_snapshot"] = selected
+                    retry_payload["execution_web_search"] = source_web_search
+                    next_decision = _build_ui_user_auth_decision(
+                        user_auth_request=user_auth,
+                        session_id=session_id,
+                        resume_payload=retry_payload,
                         trace_id=None,
                         workflow_context=_decision_workflow_context(
                             mode=str(mode), active_plan=None, active_task=None

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import mimetypes
 import os
+import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -30,6 +31,7 @@ from core.browser_service import (
     validate_browser_profile_dir,
 )
 from core.desktop_security import DesktopPathSecurity
+from core.user_auth import UserAuthRequest, UserAuthRequired
 from shared.models import JSONValue, ToolRequest, ToolResult
 
 __all__ = ["BrowserAutomationBackend", "DesktopBrowserTool", "PlaywrightBrowserBackend"]
@@ -37,6 +39,116 @@ __all__ = ["BrowserAutomationBackend", "DesktopBrowserTool", "PlaywrightBrowserB
 MAX_BROWSER_TEXT_CHARS = 30_000
 MAX_BROWSER_FIND_RESULTS = 50
 MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
+SENSITIVE_VALUE_MASK = "[redacted]"
+
+# E02-T04: Playwright aria_snapshot печатает value текстовых полей, включая
+# type=password (проверено на Chromium 2026-11-19). Перед снимком значения
+# чувствительных полей временно подменяются маской и сразу восстанавливаются:
+# снимок модели и tool log никогда не видят пароль или MFA-код. Для обычного
+# snapshot критерий — структурные признаки поля (type=password,
+# autocomplete), без угадывания по тексту страницы. Для observation после
+# ручного входа (``_finish_login_handoff``) этого мало: MFA-форма может
+# держать код в обычном текстовом поле без autocomplete, и структурно такое
+# поле неотличимо от любого другого. Поэтому там маскируются ВСЕ непустые
+# текстовые поля, а если отсутствие секретов подтвердить нельзя — snapshot
+# модели не уходит (fail-closed, см. _VERIFY_ALL_MASKED_JS).
+# E02-T04 rework round 3: строгая маскировка — свойство состояния сессии,
+# а не одной операции _finish_login_handoff(). После «Готово» MFA-код может
+# остаться в обычном поле той же страницы, и следующий обычный snapshot
+# отдал бы его модели. Поэтому страница ручного входа остаётся в строгом
+# режиме (``_strict_masking_pages``) до её закрытия; все model-visible
+# observations этой страницы идут через строгую маскировку. Другие
+# страницы сессии не затронуты: обычный просмотр не теряет содержимое
+# полей, а выход из строгого режима — явное закрытие вкладки, не тихое
+# ослабление по таймеру или навигации.
+_MASK_SENSITIVE_JS = """(mask) => {
+  const tokens = new Set(['current-password', 'new-password', 'one-time-code']);
+  let masked = 0;
+  const visit = (root) => {
+    for (const el of root.querySelectorAll('input')) {
+      const auto = (el.getAttribute('autocomplete') || '').toLowerCase().split(/\\s+/);
+      const sensitive = el.type === 'password' || auto.some((token) => tokens.has(token));
+      if (!sensitive || !el.value || el.__slavikaiMasked !== undefined) continue;
+      el.__slavikaiMasked = el.value;
+      el.value = mask;
+      masked += 1;
+    }
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) visit(el.shadowRoot);
+    }
+  };
+  visit(document);
+  return masked;
+}"""
+_RESTORE_SENSITIVE_JS = """() => {
+  const visit = (root) => {
+    for (const el of root.querySelectorAll('input, textarea')) {
+      if (el.__slavikaiMasked === undefined) continue;
+      el.value = el.__slavikaiMasked;
+      delete el.__slavikaiMasked;
+    }
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) visit(el.shadowRoot);
+    }
+  };
+  visit(document);
+}"""
+# Проверка после маскировки: сколько чувствительных полей всё ещё держат
+# реальное значение (включая открытые shadow roots). Ноль — маскировка
+# подтверждена; иначе snapshot модели не уходит (fail-closed).
+_VERIFY_MASKED_JS = """(mask) => {
+  const tokens = new Set(['current-password', 'new-password', 'one-time-code']);
+  let exposed = 0;
+  const visit = (root) => {
+    for (const el of root.querySelectorAll('input')) {
+      const auto = (el.getAttribute('autocomplete') || '').toLowerCase().split(/\\s+/);
+      const sensitive = el.type === 'password' || auto.some((token) => tokens.has(token));
+      if (sensitive && el.value && el.value !== mask) exposed += 1;
+    }
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) visit(el.shadowRoot);
+    }
+  };
+  visit(document);
+  return exposed;
+}"""
+# Строгая маскировка для observation после ручного входа: ВСЕ непустые
+# текстовые поля (input и textarea, кроме file — ему value не присвоить),
+# включая открытые shadow roots. MFA-код в обычном поле без
+# autocomplete="one-time-code" структурно неотличим от любого текста,
+# поэтому после handoff модели не уходит ни одно введённое значение.
+_MASK_ALL_TEXT_FIELDS_JS = """(mask) => {
+  let masked = 0;
+  const visit = (root) => {
+    for (const el of root.querySelectorAll('input, textarea')) {
+      if (el.type === 'file' || !el.value || el.__slavikaiMasked !== undefined) continue;
+      el.__slavikaiMasked = el.value;
+      el.value = mask;
+      masked += 1;
+    }
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) visit(el.shadowRoot);
+    }
+  };
+  visit(document);
+  return masked;
+}"""
+# Подтверждение строгой маскировки: ни одно текстовое поле не держит
+# реальное значение. Ноль — snapshot безопасен; иначе он не уходит модели.
+_VERIFY_ALL_MASKED_JS = """(mask) => {
+  let exposed = 0;
+  const visit = (root) => {
+    for (const el of root.querySelectorAll('input, textarea')) {
+      if (el.type === 'file') continue;
+      if (el.value && el.value !== mask) exposed += 1;
+    }
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) visit(el.shadowRoot);
+    }
+  };
+  visit(document);
+  return exposed;
+}"""
 
 
 class DesktopBrowserTool:
@@ -153,9 +265,24 @@ class PlaywrightBrowserBackend:
         self._context: BrowserContext | None = None
         self._pages: dict[str, Page] = {}
         self._active_page_id: str | None = None
+        # E02-T04: активная попытка ручного входа (attempt_id, page_id).
+        self._handoff: tuple[str, str] | None = None
+        # E02-T04 rework round 3: страницы в строгом режиме маскировки.
+        # Включается при открытии окна ручного входа, снимается только при
+        # закрытии страницы (close_tab/close) — секреты, введённые вручную,
+        # могут оставаться в полях страницы после «Готово».
+        self._strict_masking_pages: set[str] = set()
+        # E02-T04 rework: ошибка неподтверждённого закрытия Chromium. Пока она
+        # сохранена, close() не превращается в подтверждённое закрытие, а
+        # новый контекст на этом профиле не стартует.
+        self._close_error: Exception | None = None
 
     def handle(self, request: ToolRequest) -> ToolResult:
         operation = _operation(request, default="snapshot")
+        if operation == "login_handoff":
+            return self._login_handoff(request)
+        if request.user_auth_resume is not None:
+            raise ValueError("user_auth_resume is only valid for login_handoff")
         if operation == "start":
             self._ensure_started(request)
             return ToolResult.success(
@@ -175,22 +302,8 @@ class PlaywrightBrowserBackend:
             return self._navigate(page_id, page, _required_url(request), request=request)
         if operation == "snapshot":
             page_id, page = self._page(request)
-            snapshot = page.locator("body").aria_snapshot(
-                timeout=_timeout_ms(request),
-                mode="ai",
-            )
-            visible, truncated = _truncate(snapshot)
             return ToolResult.success(
-                {
-                    "output": visible,
-                    "operation": operation,
-                    "page_id": page_id,
-                    "url": page.url,
-                    "title": page.title(),
-                    "snapshot": visible,
-                    "truncated": truncated,
-                    "total_chars": len(snapshot),
-                }
+                {"operation": operation, **self._observation(page_id, page, request)}
             )
         if operation == "read":
             page_id, page = self._page(request)
@@ -320,6 +433,8 @@ class PlaywrightBrowserBackend:
             page_id, page = self._page(request, require_explicit=True)
             page.close()
             self._pages.pop(page_id, None)
+            # Страница закрыта — строгий режим маскировки для неё окончен.
+            self._strict_masking_pages.discard(page_id)
             self._active_page_id = next(iter(self._pages), None)
             return ToolResult.success(
                 {
@@ -342,32 +457,188 @@ class PlaywrightBrowserBackend:
             )
         return ToolResult.failure(
             "operation must be start|open|new_tab|navigate|snapshot|read|find|click|input|"
-            "select|submit|wait|tabs|switch_tab|close_tab|download|close"
+            "select|submit|wait|tabs|switch_tab|close_tab|download|close|login_handoff"
+        )
+
+    def _observation(
+        self,
+        page_id: str,
+        page: Page,
+        request: ToolRequest,
+        *,
+        mask_all_text_fields: bool = False,
+    ) -> dict[str, JSONValue]:
+        """Accessibility snapshot страницы без значений password/MFA-полей.
+
+        Строгая маскировка (все непустые текстовые поля) действует, когда
+        явно запрошена (``mask_all_text_fields``, observation после ручного
+        входа) ИЛИ страница находится в строгом режиме сессии
+        (``_strict_masking_pages`` — страница ручного входа до её закрытия):
+        MFA-код может лежать в обычном поле без ``autocomplete``, и
+        подтвердить отсутствие секретов иначе нельзя.
+        """
+        strict = mask_all_text_fields or page_id in self._strict_masking_pages
+        mask_js = _MASK_ALL_TEXT_FIELDS_JS if strict else _MASK_SENSITIVE_JS
+        verify_js = _VERIFY_ALL_MASKED_JS if strict else _VERIFY_MASKED_JS
+        frames = list(page.frames)
+        masked = 0
+        try:
+            for frame in frames:
+                masked += int(frame.evaluate(mask_js, SENSITIVE_VALUE_MASK))
+            # Маскировка подтверждается до снимка: если хоть одно поле
+            # (включая открытые shadow roots) осталось с реальным
+            # значением, snapshot модели не уходит — явный отказ, не fallback.
+            for frame in frames:
+                exposed = int(frame.evaluate(verify_js, SENSITIVE_VALUE_MASK))
+                if exposed:
+                    raise RuntimeError(
+                        "sensitive field masking could not be confirmed; snapshot withheld"
+                    )
+            snapshot = page.locator("body").aria_snapshot(timeout=_timeout_ms(request), mode="ai")
+        finally:
+            for frame in frames:
+                if not frame.is_detached():
+                    frame.evaluate(_RESTORE_SENSITIVE_JS)
+        visible, truncated = _truncate(snapshot)
+        return {
+            "output": visible,
+            "page_id": page_id,
+            "url": page.url,
+            "title": page.title(),
+            "snapshot": visible,
+            "truncated": truncated,
+            "total_chars": len(snapshot),
+            "masked_sensitive_fields": masked,
+            # Честный сигнал модели: страница в строгом режиме, значения
+            # всех текстовых полей скрыты до закрытия вкладки.
+            "strict_masking": strict,
+        }
+
+    def _login_handoff(self, request: ToolRequest) -> ToolResult:
+        """E02-T04: передать вход пользователю в видимом окне того же профиля.
+
+        Первый вызов: headless-сессия закрывается, тот же ``user_data_dir``
+        запускается headed (profile lease держит BrowserService, он не
+        отпускается), страница входа открывается в окне, и когда окно готово,
+        бросается :class:`UserAuthRequired`. Вызов с ``user_auth_resume``
+        (только после «Готово» владельца run) отвечает свежим observation —
+        это не подтверждение входа, решение остаётся за моделью.
+        """
+        if request.user_auth_resume is not None:
+            return self._finish_login_handoff(request, request.user_auth_resume)
+        if self._user_data_dir is None:
+            return ToolResult.failure("login_handoff requires a persistent browser profile.")
+        if self._handoff is not None:
+            return ToolResult.failure("A login handoff is already waiting for the user.")
+        # url обязателен: явный retry повторяет тот же вызов после закрытия окна,
+        # и страница входа не должна зависеть от уже закрытой вкладки.
+        explicit_url = _optional_string(request, "url")
+        if explicit_url is None:
+            raise ValueError("login_handoff requires url of the login page")
+        url = _validated_url(explicit_url)
+        page_id = f"page-{uuid.uuid4().hex[:10]}"
+        # Тот же профиль, видимое окно: headless-контекст закрывается, lease нет.
+        self.close()
+        self._ensure_started(request, headless=False)
+        context = self._context
+        if context is None:
+            raise RuntimeError("browser context unavailable")
+        page = context.new_page()
+        self._pages[page_id] = page
+        self._active_page_id = page_id
+        page.goto(url, wait_until="domcontentloaded", timeout=_timeout_ms(request))
+        page.bring_to_front()
+        # Строгий режим маскировки для этой страницы — с момента открытия
+        # окна и до закрытия вкладки: пользователь вводит секреты вручную,
+        # и они могут остаться в полях после «Готово».
+        self._strict_masking_pages.add(page_id)
+        attempt_id = uuid.uuid4().hex
+        self._handoff = (attempt_id, page_id)
+        raise UserAuthRequired(
+            UserAuthRequest(
+                attempt_id=attempt_id,
+                tool="desktop_browser",
+                page_id=page_id,
+                url=page.url,
+                title=page.title(),
+                window_ready_monotonic=time.monotonic(),
+            )
+        )
+
+    def _finish_login_handoff(self, request: ToolRequest, attempt_id: str) -> ToolResult:
+        handoff, self._handoff = self._handoff, None
+        if handoff is None or handoff[0] != attempt_id:
+            self._handoff = handoff
+            return ToolResult.failure(
+                "Login handoff attempt is not active.",
+                meta={"reason_code": "user_auth_attempt_unavailable"},
+            )
+        page_id = handoff[1]
+        page = self._pages.get(page_id)
+        if page is None or page.is_closed():
+            return ToolResult.failure(
+                "The login window was closed; login state is unknown.",
+                meta={"reason_code": "user_auth_window_closed"},
+            )
+        return ToolResult.success(
+            {
+                "operation": "login_handoff",
+                # Строгая маскировка: пользователь только что вводил секреты
+                # вручную, и MFA-код мог остаться в обычном текстовом поле.
+                **self._observation(page_id, page, request, mask_all_text_fields=True),
+                "user_returned_control": True,
+                # «Готово» — возврат управления, не доказательство входа.
+                "login_verified": False,
+            }
         )
 
     def close(self) -> None:
+        if self._close_error is not None:
+            # Закрытие уже падало: повторный cleanup не подтверждает его задним
+            # числом — BrowserService удержит profile lease (fail-closed).
+            raise self._close_error
         context, browser, playwright = self._context, self._browser, self._playwright
         self._pages.clear()
         self._active_page_id = None
+        self._handoff = None
+        self._strict_masking_pages.clear()
         self._context = None
         self._browser = None
         self._playwright = None
+        error: Exception | None = None
         try:
             if context is not None:
                 context.close()
-        finally:
-            try:
-                if self._owns_browser and browser is not None:
-                    browser.close()
-            finally:
-                if playwright is not None:
-                    playwright.stop()
+        except Exception as exc:  # noqa: BLE001 - ошибка сохраняется ниже
+            error = exc
+        try:
+            if self._owns_browser and browser is not None:
+                browser.close()
+        except Exception as exc:  # noqa: BLE001 - ошибка сохраняется ниже
+            error = error or exc
+        try:
+            if playwright is not None:
+                playwright.stop()
+        except Exception as exc:  # noqa: BLE001 - ошибка сохраняется ниже
+            error = error or exc
+        if error is not None:
+            # E02-T04 rework: неподтверждённое закрытие (в т.ч. при перезапуске
+            # headless -> headed внутри login_handoff) сохраняется на backend,
+            # чтобы последующий cleanup не отпустил profile lease.
+            self._close_error = error
+            raise error
 
-    def _ensure_started(self, request: ToolRequest) -> None:
+    def _ensure_started(self, request: ToolRequest, *, headless: bool | None = None) -> None:
+        if self._close_error is not None:
+            raise RuntimeError(
+                "browser close was not confirmed; refusing to start another "
+                "Chromium on this profile"
+            )
         if self._browser is not None and self._context is not None:
             return
-        headless_raw = request.args.get("headless")
-        headless = headless_raw if isinstance(headless_raw, bool) else True
+        if headless is None:
+            headless_raw = request.args.get("headless")
+            headless = headless_raw if isinstance(headless_raw, bool) else True
         playwright = sync_playwright().start()
         try:
             if self._user_data_dir is not None:

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 from core.approval_policy import ApprovalRequest, ApprovalRequired
 from core.tool_gateway import ToolGateway
+from core.user_auth import UserAuthRequest, UserAuthRequired
 from llm.brain_base import Brain
 from llm.cancellation import GenerationCancelled, cancellation_requested
 from llm.stream_model import (
@@ -91,7 +92,10 @@ class ToolLoopContinuation:
     history: list[LLMMessage]
     executed: list[ExecutedToolCall]
     pending_calls: list[ToolCall]
-    approval: ApprovalRequest
+    # Причина паузы: подтверждение действия (ApprovalRequest) или ручной вход
+    # пользователя (UserAuthRequest, E02-T04). Первый pending call при resume
+    # исполняется по-разному: approved-once или возврат управления/retry.
+    approval: ApprovalRequest | UserAuthRequest
     text: str
     iteration: int
     max_iterations: int
@@ -340,19 +344,33 @@ class AgentToolLoop:
                         model_usage=model_usage,
                     )
                 try:
-                    if resuming and call_index == 0 and continuation is not None:
+                    pause = continuation.approval if continuation is not None else None
+                    if resuming and call_index == 0 and isinstance(pause, ApprovalRequest):
                         tool_result = gateway.call_approved_once(
                             _captured_tool_request(tool_call, capture_binding),
-                            continuation.approval,
+                            pause,
+                        )
+                    elif (
+                        resuming
+                        and call_index == 0
+                        and isinstance(pause, UserAuthRequest)
+                        and pause.control_returned
+                    ):
+                        # «Готово»: тот же вызов завершается свежим observation.
+                        tool_result = gateway.call_user_auth_resumed(
+                            _captured_tool_request(tool_call, capture_binding),
+                            pause,
                         )
                     else:
+                        # Обычный dispatch; для UserAuthRequest без возврата
+                        # управления это явный retry — новая попытка входа.
                         tool_result = _dispatch_model_tool_call(
                             gateway=gateway,
                             tool_call=tool_call,
                             allowed_tool_names=allowed_tool_names,
                             capture_binding=capture_binding,
                         )
-                except ApprovalRequired as exc:
+                except (ApprovalRequired, UserAuthRequired) as exc:
                     exc.continuation = deepcopy(
                         ToolLoopContinuation(
                             history,
@@ -684,8 +702,37 @@ class AgentToolLoop:
                         cancelled=True,
                     )
                 try:
-                    tool_result = _dispatch_model_tool_call(
-                        gateway=gateway, tool_call=tool_call, allowed_tool_names=allowed_tool_names
+                    if _is_login_handoff_call(tool_call):
+                        # E02-T04: streaming-путь не умеет паузу на ручной вход.
+                        # Отказ — до dispatch, окно Chromium не открывается;
+                        # handoff проводит штатный Desktop-путь с continuation.
+                        tool_result = ToolResult.failure(
+                            "login_handoff is not supported on the streaming path; "
+                            "manual login requires the Desktop run path.",
+                            meta={
+                                "reason_code": "user_auth_streaming_unsupported",
+                                "execution_started": False,
+                            },
+                        )
+                    else:
+                        tool_result = _dispatch_model_tool_call(
+                            gateway=gateway,
+                            tool_call=tool_call,
+                            allowed_tool_names=allowed_tool_names,
+                        )
+                except UserAuthRequired:
+                    yield Error(
+                        message="Manual login handoff is not supported on the streaming path.",
+                        code="user_auth_streaming_unsupported",
+                    )
+                    yield Done(finish_reason="error")
+                    return AgentToolLoopResult(
+                        text=visible_text,
+                        messages=history,
+                        tool_calls=executed,
+                        iterations=iteration,
+                        error="user_auth_streaming_unsupported",
+                        error_code="user_auth_streaming_unsupported",
                     )
                 except ApprovalRequired as exc:
                     exc.continuation = deepcopy(
@@ -823,6 +870,14 @@ def _validate_dispatch_guard(
             ),
             exc,
         ) from exc
+
+
+def _is_login_handoff_call(tool_call: ToolCall) -> bool:
+    """Вызов ручного входа (E02-T04): desktop_browser с operation=login_handoff."""
+    if tool_call.name != "desktop_browser":
+        return False
+    operation = tool_call.arguments.get("operation")
+    return isinstance(operation, str) and operation.strip().lower() == "login_handoff"
 
 
 def _dispatch_model_tool_call(

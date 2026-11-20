@@ -16,11 +16,15 @@ export const getDecisionDisplayState = (
 ): DecisionDisplayState => {
   const nextDecision = decision ?? null;
   const isPending = nextDecision?.status === 'pending';
+  // E02-T04: отмена run по второму дедлайну ручного входа видна в UI как
+  // expired user_auth decision (без кнопок), а не исчезает молча.
+  const isExpiredUserAuth =
+    nextDecision?.status === 'expired' && nextDecision.decision_type === 'user_auth';
   return {
     decision: nextDecision,
     isPending,
     isBlocking: isPending && nextDecision.blocking === true,
-    shouldRender: isPending,
+    shouldRender: isPending || isExpiredUserAuth,
     busy,
     error,
   };

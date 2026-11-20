@@ -86,6 +86,9 @@ class ApprovalRequest:
     policy_rule_id: str | None = None
     request_json: str | None = None
     workspace_binding: WorkspaceBinding | None = None
+    # E02-T04 rework: approval на продолжение ручного входа завершает ту же
+    # попытку (attempt_id), а не запускает новый login_handoff.
+    user_auth_attempt_id: str | None = None
 
 
 class ApprovalRequired(RuntimeError):

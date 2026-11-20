@@ -7,7 +7,7 @@ import uuid
 from collections import deque
 from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Literal, TypedDict, cast
 
 from core.computer_activity_log import build_computer_activity_summary
@@ -32,6 +32,20 @@ from shared.session_domain import (
 
 def _utc_iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
+
+
+def _decision_expires_at(decision: dict[str, JSONValue]) -> datetime | None:
+    """Срок ``expires_at`` decision в UTC (зеркало проверки в session GET)."""
+    raw = decision.get("expires_at")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 SessionStatus = Literal["ok", "busy", "error"]
@@ -342,6 +356,10 @@ class UIHub:
         self._default_model_getter = default_model_getter
         self._on_session_pruned = on_session_pruned
         self._lock = asyncio.Lock()
+        # E02-T04: фоновые задачи истечения pending decision по expires_at —
+        # отмена run по второму дедлайну публикуется в SSE сразу, а не при
+        # следующем GET сессии.
+        self._decision_expiry_tasks: dict[str, asyncio.Task[None]] = {}
         self._restore_sessions()
         self._restore_folders()
         self._reconcile_session_folders()
@@ -420,6 +438,7 @@ class UIHub:
         normalized = session_id.strip()
         if not normalized:
             return False
+        self._schedule_decision_expiry(normalized, None)
         async with self._lock:
             if normalized not in self._sessions:
                 return False
@@ -1721,6 +1740,7 @@ class UIHub:
             self._prune_sessions_locked(keep_session_id=session_id)
             if state.decision_packet is None:
                 state.last_decision_id = None
+                self._schedule_decision_expiry(session_id, None)
                 return
             decision_id = state.decision_packet.get("id")
             if isinstance(decision_id, str):
@@ -1737,6 +1757,7 @@ class UIHub:
         if event is None:
             return
         self._publish_to_subscribers(subscribers, event)
+        self._schedule_decision_expiry(session_id, decision_payload)
 
     async def transition_session_decision(
         self,
@@ -1789,7 +1810,79 @@ class UIHub:
         if event is None:
             return True, decision_payload
         self._publish_to_subscribers(subscribers, event)
+        self._schedule_decision_expiry(session_id, decision_payload)
         return True, decision_payload
+
+    def _schedule_decision_expiry(
+        self,
+        session_id: str,
+        decision: dict[str, JSONValue] | None,
+    ) -> None:
+        """(Пере)запланировать публикацию ``expired`` по ``expires_at``.
+
+        E02-T04: run отменяется runtime'ом по второму дедлайну (попытка +
+        окно retry), но открытая вкладка узнавала об этом только из
+        следующего GET сессии. Теперь переход в ``expired`` происходит по
+        сроку и публикуется событием ``decision.packet`` через
+        :meth:`transition_session_decision`. Любая замена decision
+        отменяет прежнюю задачу; не-pending decision задачу не создаёт.
+        """
+        previous = self._decision_expiry_tasks.pop(session_id, None)
+        if previous is not None and previous is not asyncio.current_task():
+            previous.cancel()
+        if decision is None or decision.get("status") != "pending":
+            return
+        decision_id_raw = decision.get("id")
+        if not isinstance(decision_id_raw, str) or not decision_id_raw:
+            return
+        expires_at = _decision_expires_at(decision)
+        if expires_at is None:
+            return
+        self._decision_expiry_tasks[session_id] = asyncio.create_task(
+            self._expire_decision_at(session_id, decision_id_raw, expires_at)
+        )
+
+    async def _expire_decision_at(
+        self,
+        session_id: str,
+        decision_id: str,
+        expires_at: datetime,
+    ) -> None:
+        try:
+            while True:
+                remaining = (expires_at - datetime.now(UTC)).total_seconds()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(remaining)
+            current = await self.get_session_decision(session_id)
+            if (
+                current is None
+                or current.get("id") != decision_id
+                or current.get("status") != "pending"
+            ):
+                return
+            # Та же трансформация, что decision_flow.decision_with_status
+            # (status/resolved): expired + resolved_at + blocking=False.
+            expired = dict(current)
+            expired["status"] = "expired"
+            expired["updated_at"] = _utc_iso_now()
+            expired["resolved_at"] = _utc_iso_now()
+            expired["blocking"] = False
+            await self.transition_session_decision(
+                session_id,
+                expected_id=decision_id,
+                expected_status="pending",
+                next_decision=expired,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - фоновая публикация; lazy GET остаётся запасным путём
+            logging.getLogger(__name__).exception(
+                "decision expiry publication failed for session %s", session_id
+            )
+        finally:
+            if self._decision_expiry_tasks.get(session_id) is asyncio.current_task():
+                self._decision_expiry_tasks.pop(session_id, None)
 
     def _ensure_event_fields(self, event: dict[str, JSONValue]) -> dict[str, JSONValue]:
         if "id" not in event:
