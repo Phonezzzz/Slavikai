@@ -52,6 +52,15 @@ SENSITIVE_VALUE_MASK = "[redacted]"
 # поле неотличимо от любого другого. Поэтому там маскируются ВСЕ непустые
 # текстовые поля, а если отсутствие секретов подтвердить нельзя — snapshot
 # модели не уходит (fail-closed, см. _VERIFY_ALL_MASKED_JS).
+# E02-T04 rework round 3: строгая маскировка — свойство состояния сессии,
+# а не одной операции _finish_login_handoff(). После «Готово» MFA-код может
+# остаться в обычном поле той же страницы, и следующий обычный snapshot
+# отдал бы его модели. Поэтому страница ручного входа остаётся в строгом
+# режиме (``_strict_masking_pages``) до её закрытия; все model-visible
+# observations этой страницы идут через строгую маскировку. Другие
+# страницы сессии не затронуты: обычный просмотр не теряет содержимое
+# полей, а выход из строгого режима — явное закрытие вкладки, не тихое
+# ослабление по таймеру или навигации.
 _MASK_SENSITIVE_JS = """(mask) => {
   const tokens = new Set(['current-password', 'new-password', 'one-time-code']);
   let masked = 0;
@@ -258,6 +267,11 @@ class PlaywrightBrowserBackend:
         self._active_page_id: str | None = None
         # E02-T04: активная попытка ручного входа (attempt_id, page_id).
         self._handoff: tuple[str, str] | None = None
+        # E02-T04 rework round 3: страницы в строгом режиме маскировки.
+        # Включается при открытии окна ручного входа, снимается только при
+        # закрытии страницы (close_tab/close) — секреты, введённые вручную,
+        # могут оставаться в полях страницы после «Готово».
+        self._strict_masking_pages: set[str] = set()
         # E02-T04 rework: ошибка неподтверждённого закрытия Chromium. Пока она
         # сохранена, close() не превращается в подтверждённое закрытие, а
         # новый контекст на этом профиле не стартует.
@@ -419,6 +433,8 @@ class PlaywrightBrowserBackend:
             page_id, page = self._page(request, require_explicit=True)
             page.close()
             self._pages.pop(page_id, None)
+            # Страница закрыта — строгий режим маскировки для неё окончен.
+            self._strict_masking_pages.discard(page_id)
             self._active_page_id = next(iter(self._pages), None)
             return ToolResult.success(
                 {
@@ -454,13 +470,16 @@ class PlaywrightBrowserBackend:
     ) -> dict[str, JSONValue]:
         """Accessibility snapshot страницы без значений password/MFA-полей.
 
-        С ``mask_all_text_fields`` (observation после ручного входа)
-        маскируются все непустые текстовые поля: MFA-код может лежать в
-        обычном поле без ``autocomplete``, и подтвердить отсутствие
-        секретов иначе нельзя.
+        Строгая маскировка (все непустые текстовые поля) действует, когда
+        явно запрошена (``mask_all_text_fields``, observation после ручного
+        входа) ИЛИ страница находится в строгом режиме сессии
+        (``_strict_masking_pages`` — страница ручного входа до её закрытия):
+        MFA-код может лежать в обычном поле без ``autocomplete``, и
+        подтвердить отсутствие секретов иначе нельзя.
         """
-        mask_js = _MASK_ALL_TEXT_FIELDS_JS if mask_all_text_fields else _MASK_SENSITIVE_JS
-        verify_js = _VERIFY_ALL_MASKED_JS if mask_all_text_fields else _VERIFY_MASKED_JS
+        strict = mask_all_text_fields or page_id in self._strict_masking_pages
+        mask_js = _MASK_ALL_TEXT_FIELDS_JS if strict else _MASK_SENSITIVE_JS
+        verify_js = _VERIFY_ALL_MASKED_JS if strict else _VERIFY_MASKED_JS
         frames = list(page.frames)
         masked = 0
         try:
@@ -490,6 +509,9 @@ class PlaywrightBrowserBackend:
             "truncated": truncated,
             "total_chars": len(snapshot),
             "masked_sensitive_fields": masked,
+            # Честный сигнал модели: страница в строгом режиме, значения
+            # всех текстовых полей скрыты до закрытия вкладки.
+            "strict_masking": strict,
         }
 
     def _login_handoff(self, request: ToolRequest) -> ToolResult:
@@ -526,6 +548,10 @@ class PlaywrightBrowserBackend:
         self._active_page_id = page_id
         page.goto(url, wait_until="domcontentloaded", timeout=_timeout_ms(request))
         page.bring_to_front()
+        # Строгий режим маскировки для этой страницы — с момента открытия
+        # окна и до закрытия вкладки: пользователь вводит секреты вручную,
+        # и они могут остаться в полях после «Готово».
+        self._strict_masking_pages.add(page_id)
         attempt_id = uuid.uuid4().hex
         self._handoff = (attempt_id, page_id)
         raise UserAuthRequired(
@@ -575,6 +601,7 @@ class PlaywrightBrowserBackend:
         self._pages.clear()
         self._active_page_id = None
         self._handoff = None
+        self._strict_masking_pages.clear()
         self._context = None
         self._browser = None
         self._playwright = None

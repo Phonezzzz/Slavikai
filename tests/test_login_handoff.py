@@ -1202,3 +1202,166 @@ def test_real_chromium_strict_observation_withheld_when_unmaskable(tmp_path: Pat
     finally:
         tool.close()
         server.shutdown()
+
+
+# --- E02-T04 rework round 3: строгая маскировка как состояние сессии --------
+
+
+def test_snapshot_after_handoff_done_keeps_strict_masking(
+    tmp_path: Path, playwright: _Playwright
+) -> None:
+    # Цепочка login_handoff → done → snapshot: MFA-код остался в обычном
+    # поле после «Готово» — следующий обычный snapshot не должен отдать
+    # его модели. Строгий режим — состояние страницы сессии.
+    tool = _tool(tmp_path)
+    with pytest.raises(UserAuthRequired) as paused:
+        tool.handle(_handoff())
+    page = playwright.chromium.contexts[0].pages[0]
+    page.fields[0].value = PLAIN_MFA  # обычное поле без структурных признаков
+    page.fields[1].value = PASSWORD
+    page.fields[2].value = OTP
+    attempt = paused.value.request.attempt_id
+
+    done = tool.handle(
+        ToolRequest(
+            "desktop_browser",
+            {"operation": "login_handoff", "url": LOGIN_URL},
+            user_auth_resume=attempt,
+        )
+    )
+    assert done.ok
+    assert done.data["strict_masking"] is True
+
+    snapshot = tool.handle(ToolRequest("desktop_browser", {"operation": "snapshot"}))
+
+    assert snapshot.ok
+    for secret in (PLAIN_MFA, PASSWORD, OTP):
+        assert secret not in repr(snapshot.data)
+    assert snapshot.data["masked_sensitive_fields"] == 3
+    assert snapshot.data["strict_masking"] is True
+    # Значения восстановлены после снимка — страница не повреждена.
+    assert page.fields[0].value == PLAIN_MFA
+    tool.close()
+
+
+def test_snapshot_on_new_tab_after_handoff_is_not_strict(
+    tmp_path: Path, playwright: _Playwright
+) -> None:
+    # Обычный просмотр других страниц сессии содержимое полей не теряет:
+    # строгий режим привязан к странице ручного входа, не ко всей сессии.
+    tool = _tool(tmp_path)
+    with pytest.raises(UserAuthRequired) as paused:
+        tool.handle(_handoff())
+    attempt = paused.value.request.attempt_id
+    done = tool.handle(
+        ToolRequest(
+            "desktop_browser",
+            {"operation": "login_handoff", "url": LOGIN_URL},
+            user_auth_resume=attempt,
+        )
+    )
+    assert done.ok
+
+    opened = tool.handle(ToolRequest("desktop_browser", {"operation": "new_tab", "url": LOGIN_URL}))
+    assert opened.ok
+    new_page = playwright.chromium.contexts[0].pages[-1]
+    new_page.fields[0].value = "visible note"
+
+    snapshot = tool.handle(ToolRequest("desktop_browser", {"operation": "snapshot"}))
+
+    assert snapshot.ok
+    assert "visible note" in str(snapshot.data["snapshot"])
+    assert snapshot.data["strict_masking"] is False
+    assert snapshot.data["masked_sensitive_fields"] == 0
+    tool.close()
+
+
+def test_strict_masking_ends_when_handoff_tab_closed(
+    tmp_path: Path, playwright: _Playwright
+) -> None:
+    # Жизненный цикл: строгий режим снимается явным закрытием вкладки
+    # ручного входа, а не тихо по навигации или таймеру.
+    tool = _tool(tmp_path)
+    with pytest.raises(UserAuthRequired) as paused:
+        tool.handle(_handoff())
+    page = playwright.chromium.contexts[0].pages[0]
+    page.fields[0].value = PLAIN_MFA
+    attempt = paused.value.request.attempt_id
+    done = tool.handle(
+        ToolRequest(
+            "desktop_browser",
+            {"operation": "login_handoff", "url": LOGIN_URL},
+            user_auth_resume=attempt,
+        )
+    )
+    assert done.ok
+    handoff_page_id = str(done.data["page_id"])
+
+    closed = tool.handle(
+        ToolRequest(
+            "desktop_browser",
+            {"operation": "close_tab", "page_id": handoff_page_id},
+        )
+    )
+    assert closed.ok
+
+    opened = tool.handle(ToolRequest("desktop_browser", {"operation": "new_tab", "url": LOGIN_URL}))
+    assert opened.ok
+    new_page = playwright.chromium.contexts[0].pages[-1]
+    new_page.fields[0].value = "after close"
+
+    snapshot = tool.handle(ToolRequest("desktop_browser", {"operation": "snapshot"}))
+
+    assert snapshot.ok
+    assert "after close" in str(snapshot.data["snapshot"])
+    assert snapshot.data["strict_masking"] is False
+    tool.close()
+
+
+@pytest.mark.skipif(
+    os.environ.get("SLAVIK_RUN_BROWSER_PERSISTENCE_E2E") != "1",
+    reason="real headless Chromium redaction check is opt-in",
+)
+def test_real_chromium_session_strict_masking_covers_later_snapshot(tmp_path: Path) -> None:
+    # Реальный Chromium: страница в строгом режиме сессии — обычный
+    # snapshot (не _finish_login_handoff) маскирует все поля; после
+    # закрытия вкладки и открытия новой обычный просмотр снова виден.
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _PlainMfaFormHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/login"
+    tool = _tool(tmp_path)
+    try:
+        opened = tool.handle(ToolRequest("desktop_browser", {"operation": "open", "url": url}))
+        assert opened.ok, opened.error
+        backend, page_id, _page = _backend_and_page(tool)
+        # Состояние, которое выставляет открытие окна ручного входа.
+        backend._strict_masking_pages.add(page_id)
+
+        snapshot = tool.handle(ToolRequest("desktop_browser", {"operation": "snapshot"}))
+
+        assert snapshot.ok, snapshot.error
+        text = str(snapshot.data["snapshot"])
+        for secret in (PASSWORD, PLAIN_MFA, NOTE_SECRET, SHADOW_PLAIN, "owner@example.test"):
+            assert secret not in text
+        assert snapshot.data["masked_sensitive_fields"] == 5
+        assert snapshot.data["strict_masking"] is True
+
+        closed = tool.handle(
+            ToolRequest("desktop_browser", {"operation": "close_tab", "page_id": page_id})
+        )
+        assert closed.ok
+        reopened = tool.handle(ToolRequest("desktop_browser", {"operation": "new_tab", "url": url}))
+        assert reopened.ok, reopened.error
+
+        normal = tool.handle(ToolRequest("desktop_browser", {"operation": "snapshot"}))
+
+        assert normal.ok, normal.error
+        assert normal.data["strict_masking"] is False
+        # Обычный просмотр: нечувствительное поле снова видно модели.
+        assert "owner@example.test" in str(normal.data["snapshot"])
+        # Структурно чувствительные поля маскируются и без строгого режима.
+        assert PASSWORD not in str(normal.data["snapshot"])
+    finally:
+        tool.close()
+        server.shutdown()
