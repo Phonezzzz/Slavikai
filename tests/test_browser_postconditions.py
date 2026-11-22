@@ -1029,3 +1029,183 @@ def test_desktop_user_response_confirmed_run_is_done(
         delta_text, delta_report = _split_user_response(first_delta)
         assert delta_text == "Готово"
         assert delta_report["verifier"]["status"] == "ok"
+
+
+# --- rework round 3: предупреждение об очистке в проекции UNVERIFIED -----
+# P2 Codex (PR #183, id 4658068590): desktop_launch успешен, модель
+# исчерпывает final gate без подтверждения -> canonical UNVERIFIED.
+# DesktopRuntime при неудачной очистке добавляет desktop_cleanup_failed
+# в outcome.text, но проекция заменяла текст целиком и теряла
+# предупреждение. Известный отказ rollback не должен скрываться
+# неизвестностью основного результата.
+
+CLEANUP_FAILURE_REASON = "process 43210 still running"
+
+
+def _launch_allow_rule() -> DesktopApprovalRule:
+    return DesktopApprovalRule.create(
+        effect="allow",
+        source="session",
+        scope=DesktopApprovalScope(
+            tool="desktop_launch",
+            action="launch",
+            target_pattern=None,
+            risk_class="unknown",
+        ),
+    )
+
+
+def _launch_call() -> ToolCall:
+    return ToolCall(
+        id="launch-1",
+        name="desktop_launch",
+        arguments={"argv": ["app"]},
+    )
+
+
+class _DesktopLaunchAgent(Agent):
+    """Полный Agent с fake desktop_launch и fake cleanup для проекции."""
+
+    def __init__(self, home: Path, calls: list[ToolCall], *, cleanup_failure: str | None) -> None:
+        super().__init__(
+            brain=_BrowserBrain(calls),
+            desktop_home=home,
+            desktop_policy_store=DesktopPolicyStore(home / ".config/slavik/policy.json"),
+        )
+
+        def launch(_request: ToolRequest) -> ToolResult:
+            return ToolResult.success({"pid": 43210})
+
+        def cleanup(_request: ToolRequest) -> ToolResult:
+            if cleanup_failure is None:
+                return ToolResult.success({"terminated_pids": [43210], "verified": True})
+            return ToolResult.failure(cleanup_failure)
+
+        self.tool_registry.register(
+            "desktop_launch",
+            launch,
+            enabled=True,
+            capability="exec",
+            risk_classes=["execute"],
+            execution_targets={"desktop"},
+            description="Fake launch tool for projection tests",
+            parameters_schema={
+                "type": "object",
+                "properties": {"argv": {"type": "array", "items": {"type": "string"}}},
+            },
+        )
+        self.tool_registry.register(
+            "desktop_cleanup_unverified_launches",
+            cleanup,
+            enabled=True,
+            capability="exec",
+            risk_classes=["execute"],
+            model_exposed=False,
+            execution_targets={"desktop"},
+            description="Fake cleanup tool for projection tests",
+            parameters_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        )
+
+
+def _run_desktop_launch_agent_response(tmp_path, monkeypatch, entry, *, cleanup_failure):  # noqa: ANN001, ANN202
+    monkeypatch.chdir(tmp_path)
+    agent = _DesktopLaunchAgent(tmp_path, [_launch_call()], cleanup_failure=cleanup_failure)
+    agent.set_session_context("session", set())
+    agent.set_runtime_state(
+        mode="desktop", active_plan=None, active_task=None, enforce_plan_guard=False
+    )
+    rules = [_launch_allow_rule()]
+    first_delta = None
+    try:
+        if entry == "resume":
+            paused = agent.respond([LLMMessage(role="user", content="launch task")])
+            assert paused.runtime_result is None
+            identity = agent.last_approval_resume_payload["continuation_id"]
+            agent.set_desktop_policy_context(rules, "local")
+            response = agent.resume_chat_approval(identity)
+        elif entry == "stream":
+            agent.set_desktop_policy_context(rules, "local")
+
+            async def consume():  # noqa: ANN202
+                return [
+                    event
+                    async for event in _iterate_stream_in_thread(
+                        agent.respond_stream([LLMMessage(role="user", content="launch task")]),
+                        asyncio.Event(),
+                    )
+                ]
+
+            events = asyncio.run(consume())
+            deltas = [event for event in events if isinstance(event, TextDelta)]
+            assert deltas, "streaming must emit a TextDelta"
+            first_delta = deltas[0].text
+            produced = [event.response for event in events if isinstance(event, ResponseProduced)]
+            assert len(produced) == 1
+            response = produced[0]
+        else:
+            agent.set_desktop_policy_context(rules, "local")
+            response = agent.respond([LLMMessage(role="user", content="launch task")])
+        return response, first_delta
+    finally:
+        agent.close()
+
+
+@pytest.mark.parametrize("entry", ["sync", "stream", "resume"])
+def test_desktop_user_response_unverified_launch_keeps_cleanup_warning(
+    tmp_path,
+    monkeypatch,
+    entry,  # noqa: ANN001
+) -> None:
+    # Launch выполнен, результат не подтверждён (gate исчерпан), а
+    # очистка запущенного процесса отказала: пользователь видит
+    # UNVERIFIED-текст И предупреждение о неудачной очистке с причиной.
+    response, first_delta = _run_desktop_launch_agent_response(
+        tmp_path,
+        monkeypatch,
+        entry,
+        cleanup_failure=CLEANUP_FAILURE_REASON,
+    )
+
+    outcome = response.runtime_result
+    assert outcome.cleanup_failure == CLEANUP_FAILURE_REASON
+    canonical = outcome.canonical_outcome
+    assert canonical is not None
+    assert canonical.ui_label == "UNVERIFIED"
+    assert canonical.is_full_done is False
+
+    expected_text = (
+        "Действие выполнено, результат не подтверждён"
+        f"; desktop_cleanup_failed: {CLEANUP_FAILURE_REASON}"
+    )
+    user_text, report = _split_user_response(response.text)
+    assert user_text == expected_text
+    assert report["verifier"]["status"] != "ok"
+    assert "canonical=UNVERIFIED" in report["execution_summary"]
+    if first_delta is not None:
+        delta_text, delta_report = _split_user_response(first_delta)
+        assert delta_text == expected_text
+        assert delta_report["verifier"]["status"] != "ok"
+
+
+def test_desktop_user_response_unverified_launch_successful_cleanup_no_warning(
+    tmp_path,
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    # Очистка успешна: предупреждения нет, текст — ровно UNVERIFIED-сообщение.
+    response, _ = _run_desktop_launch_agent_response(
+        tmp_path,
+        monkeypatch,
+        "sync",
+        cleanup_failure=None,
+    )
+
+    outcome = response.runtime_result
+    assert outcome.cleanup_failure is None
+    canonical = outcome.canonical_outcome
+    assert canonical is not None
+    assert canonical.ui_label == "UNVERIFIED"
+
+    user_text, report = _split_user_response(response.text)
+    assert user_text == "Действие выполнено, результат не подтверждён"
+    assert "desktop_cleanup_failed" not in response.text
+    assert report["verifier"]["status"] != "ok"

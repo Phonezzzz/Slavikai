@@ -137,6 +137,11 @@ class DesktopRunOutcome:
     # комбинированной верификации (desktop observations + browser
     # postconditions). None только если деривация не запускалась.
     canonical_outcome: RunOutcome | None = None
+    # Фактическая причина неудачной очистки запущенных процессов
+    # (desktop_cleanup_failed). None — очистка успешна или не
+    # выполнялась. Известный отказ rollback не должен скрываться
+    # неизвестностью основного результата (E02-T06 rework round 3).
+    cleanup_failure: str | None = None
 
 
 class DesktopContinuationUnavailable(ValueError):
@@ -558,6 +563,7 @@ class DesktopRuntime:
                 verification=_failed_verification("desktop_task_cancelled"),
                 loop_result=loop_result,
                 canonical_outcome=canonical_outcome,
+                cleanup_failure=_cleanup_failure_reason(cleanup),
             )
         if loop_result.error is not None or verification.status != VerificationStatus.PASSED:
             cleanup = self._cleanup_unverified_launches(gateway)
@@ -567,6 +573,7 @@ class DesktopRuntime:
                 verification=verification,
                 loop_result=loop_result,
                 canonical_outcome=canonical_outcome,
+                cleanup_failure=_cleanup_failure_reason(cleanup),
             )
         text = loop_result.text.strip() or "Desktop task completed and verified."
         self.parent.desktop_execution_control.drain_launches()
@@ -675,8 +682,14 @@ def _failed_verification(reason: str) -> VerificationResult:
     )
 
 
-def _cleanup_failure_suffix(result: ToolResult) -> str:
+def _cleanup_failure_reason(result: ToolResult) -> str | None:
     if result.ok:
+        return None
+    return result.error or "unknown cleanup error"
+
+
+def _cleanup_failure_suffix(result: ToolResult) -> str:
+    reason = _cleanup_failure_reason(result)
+    if reason is None:
         return ""
-    reason = result.error or "unknown cleanup error"
     return f"; desktop_cleanup_failed: {reason}"

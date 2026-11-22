@@ -788,6 +788,13 @@ class AgentRoutingMixin:
             verification_label = canonical.verification.outcome.value
             if canonical.ui_label == "UNVERIFIED":
                 text = "Действие выполнено, результат не подтверждён"
+                # E02-T06 rework round 3: известный отказ rollback
+                # (неудачная очистка запущенных процессов) не должен
+                # скрываться неизвестностью основного результата —
+                # предупреждение с фактической причиной сохраняется
+                # в пользовательской проекции.
+                if outcome.cleanup_failure is not None:
+                    text += f"; desktop_cleanup_failed: {outcome.cleanup_failure}"
         self.last_execution_summary = (
             f"tool_calls={len(outcome.loop_result.tool_calls)}, "
             f"iterations={outcome.loop_result.iterations}, "
