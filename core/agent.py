@@ -361,6 +361,7 @@ class Agent(AgentRoutingMixin, AgentToolsMixin, AgentMemoryMixin):
         }
         self.decision_handler = DecisionHandler()
         self._pending_chat_approval: PendingChatApproval | None = None
+        self._active_desktop_run_id: str | None = None
         self.last_approval_request: ApprovalRequest | None = None
         self.last_user_auth_request: UserAuthRequest | None = None
         self.last_approval_source_endpoint: str | None = None

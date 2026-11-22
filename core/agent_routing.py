@@ -3,6 +3,7 @@ from __future__ import annotations
 # ruff: noqa: F401
 import asyncio
 import json
+import uuid
 from collections.abc import Callable, Generator, Iterator
 from typing import TYPE_CHECKING, Literal
 
@@ -106,6 +107,7 @@ class AgentRoutingMixin:
         short_term: list[LLMMessage]
         main_config: ModelConfig | None
         _last_skill_match: SkillMatch | None
+        _active_desktop_run_id: str | None
         desktop_runtime: DesktopRuntime
         last_plan_summary: str | None
         last_execution_summary: str | None
@@ -732,6 +734,10 @@ class AgentRoutingMixin:
         *,
         cancellation_token: asyncio.Event | None = None,
     ) -> AgentResponse:
+        # E02-T09: каждый desktop-run (sync и stream сходятся здесь)
+        # получает свежую identity; editing-грант прошлого run не
+        # наследуется. Пауза переносит её через PendingChatApproval.
+        self._active_desktop_run_id = uuid.uuid4().hex
         outcome = self.desktop_runtime.run(
             goal, messages=messages, cancellation_token=cancellation_token
         )

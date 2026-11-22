@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Literal
 
 from core.desktop_policy import (
@@ -62,6 +62,13 @@ class ApprovalContext:
     execution_target: Literal["sandbox", "desktop"] = "sandbox"
     desktop_policy: DesktopPolicyRuntime | None = None
     desktop_security: DesktopPathSecurity | None = None
+    # E02-T09: identity текущего run (editing-грант живёт только в нём) и
+    # доверенный провайдер origin целевой страницы браузера. Провайдер
+    # получает page_id-идентификатор из запроса (или None = активная
+    # страница) и возвращает origin из фактического page.url backend'а;
+    # значение origin из аргументов модели не берётся никогда.
+    run_id: str | None = None
+    browser_origin: Callable[[str | None], str | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +78,10 @@ class ApprovalDecision:
     intents: list[ActionIntent]
     required_categories: list[ApprovalCategory]
     policy_rule_id: str | None = None
+    # E02-T09: origin страницы на момент policy-решения для browser
+    # input/select. Gateway передаёт его tool'у Python-only полем
+    # запроса; tool перепроверяет фактический origin перед исполнением.
+    expected_browser_origin: str | None = None
 
 
 @dataclass(frozen=True)
@@ -217,6 +228,21 @@ def decide_request(
     actions = desktop_actions_from_request(request)
     if not actions:
         return ApprovalDecision("block", "desktop_tool_unknown", [], []), None
+    if request.name == "desktop_browser":
+        # E02-T09: origin действия — только из доверенного провайдера
+        # фактической страницы; run identity — из контекста. Аргументы
+        # модели (url/page_id/selector) origin не задают: page_id лишь
+        # выбирает страницу, чей page.url читает провайдер.
+        page_id_raw = request.args.get("page_id")
+        page_id_hint = (
+            page_id_raw.strip() if isinstance(page_id_raw, str) and page_id_raw.strip() else None
+        )
+        trusted_origin = (
+            context.browser_origin(page_id_hint) if context.browser_origin is not None else None
+        )
+        actions = [
+            replace(action, origin=trusted_origin, run_id=context.run_id) for action in actions
+        ]
     canonical_actions = [
         _canonical_desktop_action(action, context.desktop_security) for action in actions
     ]
@@ -268,12 +294,23 @@ def decide_request(
         (resolution.rule_id for resolution in resolutions if resolution.rule_id is not None),
         None,
     )
+    expected_origin = next(
+        (
+            action.origin
+            for action in canonical_actions
+            if action.tool == "desktop_browser"
+            and action.action in {"input", "select"}
+            and action.origin is not None
+        ),
+        None,
+    )
     return ApprovalDecision(
         "allow",
         reason,
         intents,
         [],
         policy_rule_id=policy_rule_id,
+        expected_browser_origin=expected_origin,
     ), exact_scope_for_action(canonical_actions[-1])
 
 
@@ -319,6 +356,8 @@ def _canonical_desktop_action(
         command=action.command,
         risk_class=action.risk_class,
         execution_target=action.execution_target,
+        origin=action.origin,
+        run_id=action.run_id,
     )
 
 
@@ -431,6 +470,7 @@ def _desktop_intent(action: DesktopAction, request: ToolRequest) -> ActionIntent
         "command_class": action.command_class,
         "risk_class": action.risk_class,
         "execution_target": action.execution_target,
+        "origin": action.origin,
         "arguments": request.args,
     }
     return _intent(action.tool, category, details)
@@ -636,6 +676,28 @@ def _build_prompt(
     tool: str,
     details: dict[str, JSONValue],
 ) -> ApprovalPrompt:
+    if tool == "desktop_browser" and details.get("action") in {"input", "select"}:
+        # E02-T09: approval на ввод в поля — это editing-грант на сайт,
+        # а не разрешение на одно поле. Текст обязан честно показывать
+        # границы: разные поля origin X, только текущий запуск, и что
+        # обработчики страницы могут выполнять autosave/запросы.
+        origin_raw = details.get("origin")
+        origin = origin_raw if isinstance(origin_raw, str) and origin_raw else "текущий сайт"
+        return ApprovalPrompt(
+            what=(f"Разрешить редактирование полей на сайте {origin} в пределах текущего запуска"),
+            why=(
+                "Агент заполняет поля формы. Разрешение распространяется на разные "
+                f"поля сайта {origin} только в рамках текущего запуска, а не на "
+                "одно поле и не бессрочно. Отправка формы и клики этим "
+                "разрешением не покрываются."
+            ),
+            risk=(
+                "Обработчики страницы могут выполнять autosave и сетевые запросы "
+                "сразу при вводе, без явной отправки формы. Это не гарантия "
+                "отсутствия внешних эффектов."
+            ),
+            changes=[f"Сайт: {origin}", "Операции: ввод и выбор значений в полях"],
+        )
     what = _build_what(tool, details)
     why = "Для выполнения запроса пользователя."
     risk = _RISK_TEXT.get(category, "Есть риск.")

@@ -30,6 +30,11 @@ class ToolRequest:
     # кнопкой «Готово». Python-only, как workspace_binding: выставляет только
     # ToolGateway.call_user_auth_resumed, модель задать его не может.
     user_auth_resume: str | None = field(default=None, repr=False, compare=False)
+    # E02-T09: origin страницы на момент policy-решения для browser
+    # input/select. Python-only: выставляет только ToolGateway после
+    # allow-решения; browser tool перепроверяет фактический origin
+    # перед исполнением и не выполняет действие при расхождении.
+    expected_browser_origin: str | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass

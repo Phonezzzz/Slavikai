@@ -30,6 +30,11 @@ class DesktopAction:
     command: str | None = None
     risk_class: str | None = None
     execution_target: str = "desktop"
+    # E02-T09: фактический origin целевой страницы браузера (только из
+    # доверенного провайдера, никогда из аргументов модели) и identity
+    # текущего run. None = неизвестно/не применимо.
+    origin: str | None = None
+    run_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,11 +46,22 @@ class DesktopApprovalScope:
     command_exact: str | None = None
     risk_class: str | None = None
     execution_target: str = "desktop"
+    # E02-T09: editing-грант на точный origin (scheme+hostname+port, без
+    # wildcard) для явно перечисленных операций в пределах одного run.
+    # Все три поля опциональны: отсутствие = старое поведение.
+    origin_pattern: str | None = None
+    actions: tuple[str, ...] | None = None
+    run_id: str | None = None
 
     def matches(self, action: DesktopAction) -> bool:
         if self.execution_target != action.execution_target:
             return False
-        if self.tool != action.tool or self.action != action.action:
+        if self.tool != action.tool:
+            return False
+        if self.actions is not None:
+            if action.action not in self.actions:
+                return False
+        elif self.action != action.action:
             return False
         if self.command_class is not None and self.command_class != action.command_class:
             return False
@@ -53,8 +69,16 @@ class DesktopApprovalScope:
             return False
         if self.risk_class is not None and self.risk_class != action.risk_class:
             return False
+        if self.origin_pattern is not None and action.origin != self.origin_pattern:
+            return False
+        if self.run_id is not None and action.run_id != self.run_id:
+            return False
         if self.target_pattern is None:
-            return action.target is None
+            # Scope с origin_pattern и без target_pattern — грант на любой
+            # selector этого origin (opt-in поведение E02-T09); без
+            # origin_pattern None по-прежнему совпадает только с
+            # действием без target.
+            return self.origin_pattern is not None or action.target is None
         if action.target is None:
             return False
         if self.target_pattern.endswith("/**"):
@@ -100,7 +124,7 @@ class DesktopApprovalScope:
         )
 
     def to_dict(self) -> dict[str, JSONValue]:
-        return {
+        payload: dict[str, JSONValue] = {
             "tool": self.tool,
             "action": self.action,
             "target_pattern": self.target_pattern,
@@ -109,6 +133,13 @@ class DesktopApprovalScope:
             "risk_class": self.risk_class,
             "execution_target": self.execution_target,
         }
+        if self.origin_pattern is not None:
+            payload["origin_pattern"] = self.origin_pattern
+        if self.actions is not None:
+            payload["actions"] = list(self.actions)
+        if self.run_id is not None:
+            payload["run_id"] = self.run_id
+        return payload
 
     @classmethod
     def from_dict(cls, raw: object) -> DesktopApprovalScope:
@@ -134,6 +165,9 @@ class DesktopApprovalScope:
             command_class=_optional_string(raw.get("command_class")),
             command_exact=_optional_string(raw.get("command_exact")),
             risk_class=_optional_string(raw.get("risk_class")),
+            origin_pattern=_optional_string(raw.get("origin_pattern")),
+            actions=_optional_actions(raw.get("actions")),
+            run_id=_optional_string(raw.get("run_id")),
         )
 
 
@@ -244,6 +278,20 @@ class DesktopPolicyRuntime:
             allows = [rule for rule in matching if rule.effect == "allow"]
             if allows:
                 selected = max(allows, key=lambda item: item.scope.specificity)
+                if selected.scope.origin_pattern is not None:
+                    # E02-T09: широкий origin-грант — правило наименьшей
+                    # специфичности. Конкретный explicit ask на selector
+                    # продолжает спрашивать внутри гранта. Исключение
+                    # scoped только для гранта: глобальный порядок
+                    # allow > ask для остальных правил не меняется.
+                    concrete_asks = [
+                        rule
+                        for rule in matching
+                        if rule.effect == "ask" and rule.scope.target_pattern is not None
+                    ]
+                    if concrete_asks:
+                        ask_selected = max(concrete_asks, key=lambda item: item.scope.specificity)
+                        return DesktopPolicyResolution("ask", "explicit_ask", ask_selected.rule_id)
                 consumed: str | None = None
                 if selected.source == "once" and consume_once:
                     self._rules = [item for item in self._rules if item.rule_id != selected.rule_id]
@@ -456,7 +504,33 @@ class DesktopPolicyStore:
                 temp_path.unlink()
 
 
+# E02-T09: операции, которые editing-грант покрывает явным перечислением.
+# Новая операция класса local_mutation грантом автоматически не покрывается.
+BROWSER_EDITING_ACTIONS: tuple[str, ...] = ("input", "select")
+
+
 def exact_scope_for_action(action: DesktopAction) -> DesktopApprovalScope:
+    if (
+        action.tool == "desktop_browser"
+        and action.action in BROWSER_EDITING_ACTIONS
+        and action.origin is not None
+    ):
+        # Editing-грант: точный origin, любой selector на нём, только
+        # input/select и только текущий run. Без известного origin
+        # грант не создаётся — ниже legacy exact scope на конкретный
+        # selector (поведение до E02-T09).
+        return DesktopApprovalScope(
+            tool=action.tool,
+            action=action.action,
+            target_pattern=None,
+            command_class=action.command_class,
+            command_exact=action.command,
+            risk_class=action.risk_class,
+            execution_target=action.execution_target,
+            origin_pattern=action.origin,
+            actions=BROWSER_EDITING_ACTIONS,
+            run_id=action.run_id,
+        )
     return DesktopApprovalScope(
         tool=action.tool,
         action=action.action,
@@ -797,7 +871,22 @@ def _optional_string(value: object) -> str | None:
     return value.strip()
 
 
+def _optional_actions(value: object) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not value:
+        raise ValueError("scope.actions должен быть непустым списком операций")
+    actions: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("scope.actions должен содержать только непустые строки")
+        actions.append(item.strip())
+    return tuple(actions)
+
+
 def _validate_persistent_rule(rule: DesktopApprovalRule) -> None:
+    if rule.scope.run_id is not None:
+        raise ValueError("Run-scoped editing-грант не может быть persistent rule")
     if rule.scope.tool == "desktop_cleanup_unverified_launches":
         raise ValueError("Runtime cleanup policy недоступна для persistent Desktop rules")
     if rule.effect == "allow" and not rule.scope.supports_persistent_allow:

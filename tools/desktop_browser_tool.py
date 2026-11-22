@@ -218,9 +218,34 @@ class DesktopBrowserTool:
 
         return _persistent
 
+    def current_origin(self, page_id: str | None = None) -> str | None:
+        """Origin фактической целевой страницы профиля (E02-T09)."""
+        return self._service.current_origin(self._profile, page_id)
+
     def handle(self, request: ToolRequest) -> ToolResult:
         if self._cancelled():
             return ToolResult.failure("Browser operation cancelled before execution.")
+        operation = _operation(request, default="snapshot")
+        if operation in {"input", "select"} and request.expected_browser_origin is not None:
+            # E02-T09: повторная проверка origin непосредственно перед
+            # исполнением. Redirect, ручной переход или переключение
+            # вкладки между policy-решением и исполнением меняют
+            # фактический origin — действие не выполняется по старому
+            # разрешению, policy переоценивается на следующем вызове.
+            page_id_raw = request.args.get("page_id")
+            page_id_hint = (
+                page_id_raw.strip()
+                if isinstance(page_id_raw, str) and page_id_raw.strip()
+                else None
+            )
+            actual_origin = self.current_origin(page_id_hint)
+            if actual_origin != request.expected_browser_origin:
+                return ToolResult.failure(
+                    "Browser origin changed since the policy decision "
+                    f"(expected {request.expected_browser_origin}, "
+                    f"actual {actual_origin or 'unknown'}); "
+                    "the edit was not executed and policy must be re-evaluated."
+                )
         try:
             return self._service.handle(self._profile, request)
         except (OSError, RuntimeError, ValueError, PlaywrightError) as exc:
@@ -782,6 +807,24 @@ class PlaywrightBrowserBackend:
                 "verified": True,
             }
         )
+
+    def page_url(self, page_id: str | None = None) -> str | None:
+        """URL целевой страницы для провайдера origin (E02-T09).
+
+        Явный ``page_id`` резолвится в backend-состоянии страниц, без
+        него — активная страница. Нет страницы/неизвестный id — None,
+        без исключений: policy-провайдер обязан быть fail-closed.
+        """
+        resolved = page_id if page_id is not None else self._active_page_id
+        if resolved is None:
+            return None
+        page = self._pages.get(resolved)
+        if page is None:
+            return None
+        try:
+            return page.url
+        except Exception:  # noqa: BLE001 - закрытая страница не должна ронять policy
+            return None
 
     def _page(
         self,

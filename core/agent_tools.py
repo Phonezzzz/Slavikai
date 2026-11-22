@@ -151,6 +151,9 @@ class PendingChatApproval:
     mode: str
     auto_run_id: str | None = None
     task_run: TaskRun | None = None
+    # E02-T09: identity desktop-run, в котором выдаётся editing-грант.
+    # Пауза и resume того же run сохраняют её; новый run минтит новую.
+    desktop_run_id: str | None = None
     security_fingerprint: str | None = None
     accepted_categories: frozenset[ApprovalCategory] = frozenset()
     desktop_once_rules: tuple[DesktopApprovalRule, ...] = ()
@@ -165,6 +168,7 @@ class AgentToolsMixin:
         desktop_runtime: DesktopRuntime
         logger: logging.Logger
         _pending_chat_approval: PendingChatApproval | None
+        _active_desktop_run_id: str | None
         brain: Brain
         tracer: Tracer
         decision_handler: DecisionHandler
@@ -434,6 +438,9 @@ class AgentToolsMixin:
             auto_run_id=self.auto_preset.pending_run_id(exc.continuation)
             if self.runtime_mode == "auto"
             else None,
+            desktop_run_id=getattr(self, "_active_desktop_run_id", None)
+            if self.runtime_mode == "desktop"
+            else None,
             policy_application=policy_application,
             web_evidence=web_evidence,
             record_in_history=record_in_history,
@@ -611,6 +618,9 @@ class AgentToolsMixin:
             self.last_approval_resume_payload,
         )
         self._reset_approval_state(cancel_runtime=False)
+        # E02-T09: resume того же run сохраняет его identity — editing-
+        # грант этого run продолжает действовать после перевалидации.
+        self._active_desktop_run_id = pending.desktop_run_id
         runtime_result: RuntimeResult | None = None
         try:
             if pending.mode == "auto":
@@ -860,6 +870,8 @@ class AgentToolsMixin:
         if safe_mode_override is not None:
             safe_mode = safe_mode_override
         normalized: set[ApprovalCategory] = set(self.approved_categories)
+        browser_tool = getattr(self, "desktop_browser_tool", None)
+        current_origin = getattr(browser_tool, "current_origin", None)
         return ApprovalContext(
             safe_mode=safe_mode,
             session_id=self.session_id,
@@ -869,6 +881,8 @@ class AgentToolsMixin:
             ),
             desktop_policy=getattr(self, "desktop_policy_runtime", None),
             desktop_security=getattr(self, "desktop_security", None),
+            run_id=getattr(self, "_active_desktop_run_id", None),
+            browser_origin=current_origin if callable(current_origin) else None,
         )
 
     def _build_tool_gateway(
@@ -1224,19 +1238,26 @@ class AgentToolsMixin:
         if not raw_input.startswith("ui:"):
             pre_call = self._workspace_diff_pre_call
             post_call = self._workspace_diff_post_call
-        gateway = self._build_tool_gateway(
-            pre_call=pre_call,
-            post_call=post_call,
-            safe_mode_override=safe_mode_override,
-            confirmed_decision=confirmed_decision,
-            run_mode=run_mode,
-        )
+        # E02-T09: прямой вызов инструмента — отдельный run: editing-
+        # грант прошлого run сюда не переносится.
+        previous_run_id = getattr(self, "_active_desktop_run_id", None)
+        self._active_desktop_run_id = uuid.uuid4().hex
         try:
-            result = gateway.call(request)
-        except ApprovalRequired:
-            result = ToolResult.failure("Требуется подтверждение")
-            self._log_tool_interaction(raw_input=raw_input, request=request, result=result)
-            raise
+            gateway = self._build_tool_gateway(
+                pre_call=pre_call,
+                post_call=post_call,
+                safe_mode_override=safe_mode_override,
+                confirmed_decision=confirmed_decision,
+                run_mode=run_mode,
+            )
+            try:
+                result = gateway.call(request)
+            except ApprovalRequired:
+                result = ToolResult.failure("Требуется подтверждение")
+                self._log_tool_interaction(raw_input=raw_input, request=request, result=result)
+                raise
+        finally:
+            self._active_desktop_run_id = previous_run_id
         self._log_tool_interaction(raw_input=raw_input, request=request, result=result)
         return result
 

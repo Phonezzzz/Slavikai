@@ -289,6 +289,11 @@ class ToolGateway:
                     block_message,
                     meta={"policy_reason": decision.reason},
                 )
+            if decision.status == "allow" and decision.expected_browser_origin is not None:
+                # E02-T09: decision-time origin уходит tool'у Python-only
+                # полем; tool перепроверит фактический origin страницы
+                # непосредственно перед исполнением input/select.
+                request = replace(request, expected_browser_origin=decision.expected_browser_origin)
             if decision.status == "allow" and decision.intents:
                 bypass_safe_mode = True
                 if self.log_event:

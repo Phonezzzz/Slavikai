@@ -42,7 +42,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from core.browser_lease import (
     BrowserProfileLease,
@@ -65,6 +65,29 @@ class BrowserAutomationBackend(Protocol):
     def handle(self, request: ToolRequest) -> ToolResult: ...
 
     def close(self) -> None: ...
+
+
+def browser_origin_of_url(url: str | None) -> str | None:
+    """Точный origin URL: scheme + hostname + port, без wildcard.
+
+    Default-порты (80/http, 443/https) нормализуются прочь — так их
+    пишет ``page.url``. Не-http(s) URL (about:blank, data:) и мусор
+    дают None: origin неизвестен, editing-грант не совпадает (ask).
+    """
+    if not isinstance(url, str) or not url.strip():
+        return None
+    try:
+        parts = urlsplit(url.strip())
+        port = parts.port
+    except ValueError:
+        return None
+    scheme = parts.scheme.lower()
+    hostname = (parts.hostname or "").lower()
+    if scheme not in {"http", "https"} or not hostname:
+        return None
+    if port is None or (scheme, port) in {("http", 80), ("https", 443)}:
+        return f"{scheme}://{hostname}"
+    return f"{scheme}://{hostname}:{port}"
 
 
 @dataclass(frozen=True)
@@ -375,6 +398,28 @@ class BrowserService:
     def _release_lease(lease: BrowserProfileLease | None) -> None:
         if lease is not None:
             lease.release()
+
+    def current_origin(self, profile: BrowserProfile, page_id: str | None = None) -> str | None:
+        """Origin фактической целевой страницы профиля (E02-T09).
+
+        Читается из живого ``page.url`` backend'а при каждом вызове:
+        redirect и переключение вкладки отражаются сразу. Сессия не
+        создаётся ради проверки: нет активной сессии, backend не умеет
+        ``page_url`` или страницы нет — None (fail-closed: грант не
+        совпадает, policy спрашивает). ``page_id`` — идентификатор
+        страницы в backend-состоянии, не источник origin.
+        """
+        session = self._sessions.get(self._key(profile))
+        if session is None:
+            return None
+        page_url = getattr(session.backend, "page_url", None)
+        if not callable(page_url):
+            return None
+        try:
+            url = page_url(page_id)
+        except Exception:  # noqa: BLE001 - policy-провайдер не должен ронять decide
+            return None
+        return browser_origin_of_url(url if isinstance(url, str) else None)
 
     def is_active(self, profile: BrowserProfile) -> bool:
         return self._key(profile) in self._sessions

@@ -234,6 +234,15 @@ def build_ui_approval_decision(
     if isinstance(workflow_context, dict):
         for key, value in workflow_context.items():
             context_payload[str(key)] = normalize_json_value_fn(value)
+    persistent_scope: DesktopApprovalScope | None = None
+    if isinstance(scope_raw, dict):
+        try:
+            persistent_scope = DesktopApprovalScope.from_dict(scope_raw)
+        except ValueError:
+            persistent_scope = None
+    # E02-T09: editing-грант действует только в текущем запуске, а не
+    # всю сессию — подпись опции обязана это показывать.
+    is_editing_grant = persistent_scope is not None and persistent_scope.origin_pattern is not None
     options: list[dict[str, JSONValue]] = [
         {
             "id": "approve_once",
@@ -244,18 +253,16 @@ def build_ui_approval_decision(
         },
         {
             "id": "approve_session",
-            "title": "Approve for session",
+            "title": (
+                "Allow editing on this site for this run"
+                if is_editing_grant
+                else "Approve for session"
+            ),
             "action": "approve_session",
             "payload": {},
             "risk": "high",
         },
     ]
-    persistent_scope: DesktopApprovalScope | None = None
-    if isinstance(scope_raw, dict):
-        try:
-            persistent_scope = DesktopApprovalScope.from_dict(scope_raw)
-        except ValueError:
-            persistent_scope = None
     if persistent_scope is not None and persistent_scope.supports_persistent_allow:
         options.append(
             {
