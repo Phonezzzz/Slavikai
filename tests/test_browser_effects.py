@@ -14,7 +14,11 @@ from pathlib import Path
 import pytest
 
 from core.approval_policy import ApprovalContext, decide_request
-from core.browser_effects import classify_browser_operation, known_browser_operations
+from core.browser_effects import (
+    classify_browser_operation,
+    known_browser_operations,
+    superseded_effect_classes,
+)
 from core.desktop_policy import (
     DesktopApprovalRule,
     DesktopApprovalScope,
@@ -180,12 +184,51 @@ def test_click_does_not_inherit_read_allowance(tmp_path: Path) -> None:
     )
 
 
+def test_download_initiating_click_requires_approval(tmp_path: Path) -> None:
+    # E02-T05 rework (P1): _download() performs a real locator.click() on
+    # the selector, so the initiating click is checked as an external
+    # side effect exactly like a standalone click — before any effect.
+    destination = str(tmp_path / "report.pdf")
+    args = {"operation": "download", "selector": "#delete", "destination": destination}
+
+    assert _decide(tmp_path, args) == "require_approval"
+
+
+def test_download_click_deny_blocks_even_with_allowed_destination(tmp_path: Path) -> None:
+    deny_click = _rule(
+        effect="deny", action="click", target="#delete", risk_class="external_side_effect"
+    )
+    args = {
+        "operation": "download",
+        "selector": "#delete",
+        "destination": str(tmp_path / "report.pdf"),
+    }
+
+    assert _decide(tmp_path, args, rules=[deny_click]) == "block"
+
+
 def test_download_is_write_but_overwrite_still_asks(tmp_path: Path) -> None:
     destination = str(tmp_path / "report.pdf")
     base = {"operation": "download", "selector": "#dl", "destination": destination}
+    allow_click = _rule(
+        effect="allow", action="click", target="#dl", risk_class="external_side_effect"
+    )
 
-    assert _decide(tmp_path, base) == "allow"
-    assert _decide(tmp_path, {**base, "overwrite": True}) == "require_approval"
+    # With the initiating click allowed, writing a new file needs no
+    # further approval; overwriting still asks.
+    assert _decide(tmp_path, base, rules=[allow_click]) == "allow"
+    assert _decide(tmp_path, {**base, "overwrite": True}, rules=[allow_click]) == "require_approval"
+
+
+def test_superseded_effect_classes_cover_reclassified_operations() -> None:
+    # Before E02-T05 these operations were external_side_effect; persisted
+    # restrictive rules may still carry that class (see migration tests
+    # in test_desktop_policy.py).
+    assert superseded_effect_classes("input") == frozenset({"external_side_effect"})
+    assert superseded_effect_classes("select") == frozenset({"external_side_effect"})
+    assert superseded_effect_classes("download") == frozenset({"external_side_effect"})
+    assert superseded_effect_classes("click") == frozenset()
+    assert superseded_effect_classes("snapshot") == frozenset()
 
 
 def test_unknown_operation_requires_approval_not_allow(tmp_path: Path) -> None:

@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from core.browser_effects import classify_browser_operation
+from core.browser_effects import classify_browser_operation, superseded_effect_classes
 from shared.models import JSONValue, ToolRequest
 
 PolicyEffect = Literal["allow", "ask", "deny"]
@@ -405,6 +405,25 @@ class DesktopPolicyStore:
                         subject_principal_id=self._legacy_subject_principal_id,
                     )
                     migrated = True
+                # E02-T05 rework (P1): переклассификация browser-эффектов
+                # не должна молча отключать сохранённые запреты владельца.
+                # Ограничительные правила (deny/ask) со старым risk class
+                # той же операции мигрируют на текущий класс; allow-
+                # правила не мигрируют (fail-closed: перестают совпадать,
+                # прежнее разрешение не расширяется на новые операции).
+                if (
+                    rule.effect in {"deny", "ask"}
+                    and rule.scope.tool == "desktop_browser"
+                    and rule.scope.risk_class in superseded_effect_classes(rule.scope.action)
+                ):
+                    rule = replace(
+                        rule,
+                        scope=replace(
+                            rule.scope,
+                            risk_class=classify_browser_operation(rule.scope.action),
+                        ),
+                    )
+                    migrated = True
                 rules.append(rule)
             except ValueError as exc:
                 message = f"rule[{index}] invalid: {exc}"
@@ -588,6 +607,20 @@ def desktop_actions_from_request(request: ToolRequest) -> list[DesktopAction]:
                         risk_class=("overwrite" if args.get("overwrite") is True else "write"),
                     )
                 )
+            # E02-T05 rework (P1): _download() инициирует скачивание
+            # обычным locator.click() по selector. Инициирующий клик
+            # проходит ту же проверку external-side-effect, что и
+            # самостоятельная операция click, — до любого эффекта;
+            # запись файла отдельно проверяется как write/overwrite
+            # действием download_destination выше.
+            actions.append(
+                DesktopAction(
+                    tool=tool,
+                    action="click",
+                    target=target,
+                    risk_class=classify_browser_operation("click"),
+                )
+            )
         # E02-T05: эффект операции берётся из одной явной таблицы
         # (core/browser_effects.py): read/navigate не требуют approval,
         # ввод в поля — local_mutation, submit/click — external side

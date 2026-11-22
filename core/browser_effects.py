@@ -8,7 +8,12 @@ blanket right to act on the owner's behalf:
   bookkeeping that changes no page or external state);
 - ``network`` — navigation: fetches pages but submits nothing;
 - ``local_mutation`` — draft edits inside the page (typing, selecting);
-  nothing leaves the browser until an explicit submit/click;
+  the agent performs no explicit submit, but page handlers may react to
+  the edit immediately (autosave, fetch/XHR, WebSocket) — verified by a
+  real browser test (tests/test_browser_input_external_effect.py:
+  Playwright ``fill`` dispatches ``input``, ``select_option`` dispatches
+  ``input``/``change``, and handlers sent requests with no submit/click),
+  so this class is NOT a guarantee that nothing leaves the browser;
 - ``write`` — writes a local file (download payload; the destination path
   itself is classified separately by the download-destination action);
 - ``external_side_effect`` — can change state outside this browser
@@ -46,7 +51,8 @@ _OPERATION_EFFECTS: Final[dict[str, BrowserEffectClass]] = {
     "open": "network",
     "new_tab": "network",
     "navigate": "network",
-    # Draft edits stay inside the page until an explicit submit/click.
+    # Draft edits: no explicit submit by the agent, but page handlers
+    # may react with network requests (see module docstring).
     "input": "local_mutation",
     "select": "local_mutation",
     # Download writes a local file; the destination path is a separate
@@ -78,3 +84,22 @@ def classify_browser_operation(operation: str) -> BrowserEffectClass:
 def known_browser_operations() -> frozenset[str]:
     """Operations with an explicit classification (for coverage tests)."""
     return frozenset(_OPERATION_EFFECTS)
+
+
+# Effect classes that earlier versions assigned to an operation and that
+# persisted owner rules may still carry. Before E02-T05, input/select/
+# download were classified ``external_side_effect`` by the inline table
+# in desktop policy derivation. Restrictive (deny/ask) rules saved with a
+# superseded class are migrated to the current class at load time so a
+# reclassification never silently drops an owner's prohibition; allow
+# rules are never migrated (fail closed: they simply stop matching).
+_SUPERSEDED_EFFECTS: Final[dict[str, frozenset[str]]] = {
+    "input": frozenset({"external_side_effect"}),
+    "select": frozenset({"external_side_effect"}),
+    "download": frozenset({"external_side_effect"}),
+}
+
+
+def superseded_effect_classes(operation: str) -> frozenset[str]:
+    """Effect classes previously assigned to ``operation`` (may be empty)."""
+    return _SUPERSEDED_EFFECTS.get(operation.strip().lower(), frozenset())

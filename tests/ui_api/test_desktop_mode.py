@@ -718,8 +718,12 @@ def test_desktop_compound_request_retains_exact_once_scopes(tmp_path, monkeypatc
     target.write_text("original")
     # E02-T05: download is a write effect (allow by default); an explicit
     # ask rule on the main action keeps this request compound alongside
-    # the overwrite ask on the destination. Seeded before Agent init,
-    # which loads persistent rules into the policy runtime.
+    # the overwrite ask on the destination. E02-T05 rework (P1): the
+    # initiating click inside download is checked as an external side
+    # effect too, so the compound request now needs three sequential
+    # approvals (destination overwrite, initiating click, main download).
+    # Seeded before Agent init, which loads persistent rules into the
+    # policy runtime.
     from server.http.common.auth import _principal_id_from_token
 
     DesktopPolicyStore(tmp_path / ".config/slavik/policy.json").add_rule(
@@ -803,13 +807,19 @@ def test_desktop_compound_request_retains_exact_once_scopes(tmp_path, monkeypatc
             assert second["id"] != first["id"] and second["status"] == "pending"
             assert calls == []
             assert len(agent._pending_chat_approval.desktop_once_rules) == 1
+            response = await respond(second, "approve_once")
+            assert response.status == 200
+            third = (await response.json())["decision"]
+            assert third["id"] != second["id"] and third["status"] == "pending"
+            assert calls == []
+            assert len(agent._pending_chat_approval.desktop_once_rules) == 2
             if finish == "approve":
-                completed = await respond(second, "approve_once")
+                completed = await respond(third, "approve_once")
                 assert completed.status == 200
                 assert (await completed.json())["status"] == "resolved"
                 assert len(calls) == 1 and calls[0].args == args
             elif finish == "reject":
-                assert (await respond(second, "reject")).status == 200
+                assert (await respond(third, "reject")).status == 200
                 assert calls == []
             else:
                 superseded = await client.post(

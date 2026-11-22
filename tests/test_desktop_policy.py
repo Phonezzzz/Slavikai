@@ -557,6 +557,149 @@ def test_browser_download_cannot_target_protected_policy_store(tmp_path: Path) -
     assert scope is not None and scope.action == "download_destination"
 
 
+def _write_policy_store(path: Path, rules: list[DesktopApprovalRule]) -> DesktopPolicyStore:
+    """Write a store file directly, as an older version would have saved it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps([rule.to_dict() for rule in rules], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return DesktopPolicyStore(path)
+
+
+def _legacy_browser_rule(
+    *,
+    effect: str,
+    action: str,
+    target: str,
+    risk_class: str,
+) -> DesktopApprovalRule:
+    return DesktopApprovalRule.create(
+        effect=effect,  # type: ignore[arg-type]
+        source="persistent",
+        scope=DesktopApprovalScope(
+            tool="desktop_browser",
+            action=action,
+            target_pattern=target,
+            risk_class=risk_class,
+        ),
+    )
+
+
+def test_persisted_deny_with_superseded_browser_risk_class_still_blocks(
+    tmp_path: Path,
+) -> None:
+    # E02-T05 rework (P1): a deny saved before input was reclassified
+    # external_side_effect -> local_mutation must keep blocking input
+    # instead of silently turning into desktop_safe_default allow.
+    store = _write_policy_store(
+        tmp_path / "approvals.json",
+        [
+            _legacy_browser_rule(
+                effect="deny",
+                action="input",
+                target="#name",
+                risk_class="external_side_effect",
+            )
+        ],
+    )
+
+    loaded = store.list_rules()
+
+    assert loaded[0].scope.risk_class == "local_mutation"
+    decision, _ = decide_request(
+        context=_context(tmp_path, rules=loaded),
+        request=ToolRequest(
+            "desktop_browser",
+            {"operation": "input", "selector": "#name", "value": "draft"},
+        ),
+    )
+    assert decision.status == "block"
+
+
+def test_persisted_ask_with_superseded_browser_risk_class_still_asks(
+    tmp_path: Path,
+) -> None:
+    store = _write_policy_store(
+        tmp_path / "approvals.json",
+        [
+            _legacy_browser_rule(
+                effect="ask",
+                action="select",
+                target="#kind",
+                risk_class="external_side_effect",
+            )
+        ],
+    )
+
+    loaded = store.list_rules()
+
+    assert loaded[0].scope.risk_class == "local_mutation"
+    decision, _ = decide_request(
+        context=_context(tmp_path, rules=loaded),
+        request=ToolRequest(
+            "desktop_browser",
+            {"operation": "select", "selector": "#kind", "value": "a"},
+        ),
+    )
+    assert decision.status == "require_approval"
+
+
+def test_persisted_deny_with_superseded_download_risk_class_still_blocks(
+    tmp_path: Path,
+) -> None:
+    store = _write_policy_store(
+        tmp_path / "approvals.json",
+        [
+            _legacy_browser_rule(
+                effect="deny",
+                action="download",
+                target="https://example.test/file",
+                risk_class="external_side_effect",
+            )
+        ],
+    )
+
+    loaded = store.list_rules()
+
+    assert loaded[0].scope.risk_class == "write"
+    decision, _ = decide_request(
+        context=_context(tmp_path, rules=loaded),
+        request=ToolRequest(
+            "desktop_browser",
+            {
+                "operation": "download",
+                "url": "https://example.test/file",
+                "selector": "#dl",
+                "destination": str(tmp_path / "file.bin"),
+            },
+        ),
+    )
+    assert decision.status == "block"
+
+
+def test_persisted_allow_with_superseded_browser_risk_class_is_not_migrated(
+    tmp_path: Path,
+) -> None:
+    # Fail closed: an old allow is never remapped onto the new class, so
+    # reclassification cannot widen a previous permission.
+    store = _write_policy_store(
+        tmp_path / "approvals.json",
+        [
+            _legacy_browser_rule(
+                effect="allow",
+                action="input",
+                target="#name",
+                risk_class="external_side_effect",
+            )
+        ],
+    )
+
+    loaded = store.list_rules()
+
+    assert loaded[0].scope.risk_class == "external_side_effect"
+
+
 def test_browser_gui_and_clipboard_persistent_allow_are_rejected(tmp_path: Path) -> None:
     store = DesktopPolicyStore(tmp_path / "approvals.json")
     for scope in (
