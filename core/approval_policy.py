@@ -280,7 +280,11 @@ def decide_request(
                     [intent.category],
                     policy_rule_id=resolution.rule_id,
                 ),
-                exact_scope_for_action(action),
+                # Конкретный explicit ask: подтверждение должно создать
+                # точное разрешение на этот selector, а не широкий
+                # origin-грант — иначе при resume ask выберется снова
+                # и approval зациклится.
+                exact_scope_for_action(action, exact=resolution.reason == "explicit_ask"),
             )
     policy.consume_once_rule_ids(
         {resolution.rule_id for resolution in resolutions if resolution.rule_id is not None}

@@ -445,3 +445,180 @@ def test_gateway_attaches_expected_origin(tmp_path: Path) -> None:
     result = gateway.call(_input_request())
     assert result.ok
     assert seen[0].expected_browser_origin == ORIGIN
+
+
+# --- Rework round 1 (findings Codex по PR #187) ---
+
+
+def test_ipv6_origin_keeps_brackets_and_grant_does_not_leak(tmp_path: Path) -> None:
+    # P2: без скобок http://[2001:db8::1]:8080 и http://[2001:db8::1:8080]
+    # нормализовались в один origin — грант протекал между сайтами.
+    first = browser_origin_of_url("http://[2001:db8::1]:8080/form")
+    second = browser_origin_of_url("http://[2001:db8::1:8080]/form")
+    assert first == "http://[2001:db8::1]:8080"
+    assert second == "http://[2001:db8::1:8080]"
+    assert first != second
+
+    grant = _grant_rule(origin=first or "")
+    allowed, _ = decide_request(
+        context=_context(tmp_path, rules=[grant], origin=first),
+        request=_input_request(),
+    )
+    assert allowed.status == "allow"
+
+    leaked, _ = decide_request(
+        context=_context(tmp_path, rules=[grant], origin=second),
+        request=_input_request(),
+    )
+    assert leaked.status == "require_approval"
+
+
+def _card_ask_rule() -> DesktopApprovalRule:
+    return DesktopApprovalRule.create(
+        effect="ask",
+        source="session",
+        scope=DesktopApprovalScope(
+            tool="desktop_browser",
+            action="input",
+            target_pattern="#card",
+            risk_class="local_mutation",
+        ),
+    )
+
+
+@pytest.mark.parametrize("source", ["once", "session"])
+@pytest.mark.parametrize("with_grant", [True, False])
+def test_explicit_ask_approval_passes_confirmed_action(
+    tmp_path: Path, source: str, with_grant: bool
+) -> None:
+    # P2: подтверждение explicit ask создавало широкий грант, и при resume
+    # ask выбирался снова — бесконечный approval. Scope подтверждения
+    # должен быть точным на selector.
+    rules: list[DesktopApprovalRule] = [_card_ask_rule()]
+    if with_grant:
+        rules.insert(0, _grant_rule())
+    context = _context(tmp_path, rules=rules)
+
+    decision, scope = decide_request(context=context, request=_input_request("#card"))
+    assert decision.status == "require_approval"
+    assert decision.reason == "explicit_ask"
+    assert scope is not None
+    assert scope.target_pattern == "#card"
+    assert scope.origin_pattern is None
+
+    # Пользователь подтвердил: правило создаётся из возвращённого scope.
+    approved = DesktopApprovalRule.create(effect="allow", source=source, scope=scope)  # type: ignore[arg-type]
+    resumed = _context(tmp_path, rules=[*rules, approved])
+    passed, _ = decide_request(context=resumed, request=_input_request("#card"))
+    assert passed.status == "allow"
+    assert passed.expected_browser_origin == ORIGIN
+
+    again, _ = decide_request(context=resumed, request=_input_request("#card"))
+    if source == "once":
+        # Once-разрешение израсходовано: ask спрашивает снова.
+        assert again.status == "require_approval"
+        assert again.reason == "explicit_ask"
+    else:
+        assert again.status == "allow"
+
+    # Точное подтверждение не создаёт грант на другие поля.
+    other, _ = decide_request(context=resumed, request=_input_request("#name"))
+    assert other.status == ("allow" if with_grant else "require_approval")
+
+
+class _FakeLocator:
+    def __init__(self) -> None:
+        self.filled: list[str] = []
+
+    def fill(self, value: str, timeout: int | None = None) -> None:
+        self.filled.append(value)
+
+    def input_value(self, timeout: int | None = None) -> str:
+        return self.filled[-1] if self.filled else ""
+
+
+class _FakePage:
+    """Страница с устаревшим кешем Page.url и свежим href документа."""
+
+    def __init__(self, cached_url: str, fresh_url: str) -> None:
+        self.url = cached_url
+        self._fresh_url = fresh_url
+        self.locator = _FakeLocator()
+
+    def evaluate(self, expression: str) -> str:
+        assert expression == "window.location.href"
+        return self._fresh_url
+
+    def is_closed(self) -> bool:
+        return False
+
+    def get_by_role(self, *args: object, **kwargs: object) -> _FakeLocator:
+        return self.locator
+
+
+def _backend_with_page(tmp_path: Path, page: _FakePage):  # noqa: ANN202
+    from tools.desktop_browser_tool import PlaywrightBrowserBackend
+
+    backend = PlaywrightBrowserBackend(_security(tmp_path), cancelled=lambda: False)
+    backend._browser = object()  # type: ignore[assignment]
+    backend._context = object()  # type: ignore[assignment]
+    backend._pages["page-1"] = page  # type: ignore[assignment]
+    backend._active_page_id = "page-1"
+    return backend
+
+
+def test_page_url_reads_fresh_document_not_stale_cache(tmp_path: Path) -> None:
+    # P1: Page.url — кеш Frame._url. После навигации во время approval
+    # провайдер origin должен видеть фактический документ.
+    page = _FakePage(
+        cached_url="https://example.test/form",
+        fresh_url="https://other.test/form",
+    )
+    backend = _backend_with_page(tmp_path, page)
+    assert backend.page_url() == "https://other.test/form"
+
+
+def test_backend_rechecks_fresh_origin_before_fill(tmp_path: Path) -> None:
+    # P1: кеш говорит example.test (разрешённый origin), но документ уже
+    # на other.test — fill не выполняется.
+    page = _FakePage(
+        cached_url="https://example.test/form",
+        fresh_url="https://other.test/form",
+    )
+    backend = _backend_with_page(tmp_path, page)
+    request = ToolRequest(
+        "desktop_browser",
+        {"operation": "input", "selector": "#name", "value": "x"},
+        expected_browser_origin=ORIGIN,
+    )
+    result = backend.handle(request)
+    assert not result.ok
+    assert "origin changed" in (result.error or "")
+    assert page.locator.filled == []
+
+    # Документ на разрешённом origin — ввод выполняется.
+    page._fresh_url = "https://example.test/form"
+    result = backend.handle(request)
+    assert result.ok
+    assert page.locator.filled == ["x"]
+
+
+def test_exact_allow_with_origin_beats_concrete_ask(tmp_path: Path) -> None:
+    # Точное allow на selector (даже с origin_pattern) — не широкий грант:
+    # конкретный ask его не перехватывает.
+    exact_allow = DesktopApprovalRule.create(
+        effect="allow",
+        source="session",
+        scope=DesktopApprovalScope(
+            tool="desktop_browser",
+            action="input",
+            target_pattern="#card",
+            risk_class="local_mutation",
+            origin_pattern=ORIGIN,
+            actions=("input", "select"),
+            run_id=RUN_ID,
+        ),
+    )
+    context = _context(tmp_path, rules=[exact_allow, _card_ask_rule()])
+    decision, _ = decide_request(context=context, request=_input_request("#card"))
+    assert decision.status == "allow"

@@ -278,12 +278,17 @@ class DesktopPolicyRuntime:
             allows = [rule for rule in matching if rule.effect == "allow"]
             if allows:
                 selected = max(allows, key=lambda item: item.scope.specificity)
-                if selected.scope.origin_pattern is not None:
+                if (
+                    selected.scope.origin_pattern is not None
+                    and selected.scope.target_pattern is None
+                ):
                     # E02-T09: широкий origin-грант — правило наименьшей
                     # специфичности. Конкретный explicit ask на selector
                     # продолжает спрашивать внутри гранта. Исключение
                     # scoped только для гранта: глобальный порядок
                     # allow > ask для остальных правил не меняется.
+                    # Точное allow на selector (подтверждённое действие)
+                    # грантом не является и проходит.
                     concrete_asks = [
                         rule
                         for rule in matching
@@ -509,9 +514,10 @@ class DesktopPolicyStore:
 BROWSER_EDITING_ACTIONS: tuple[str, ...] = ("input", "select")
 
 
-def exact_scope_for_action(action: DesktopAction) -> DesktopApprovalScope:
+def exact_scope_for_action(action: DesktopAction, *, exact: bool = False) -> DesktopApprovalScope:
     if (
-        action.tool == "desktop_browser"
+        not exact
+        and action.tool == "desktop_browser"
         and action.action in BROWSER_EDITING_ACTIONS
         and action.origin is not None
     ):

@@ -27,6 +27,7 @@ from core.browser_service import (
     BrowserProfile,
     BrowserService,
     acquire_browser_profile_lease,
+    browser_origin_of_url,
     resolve_browser_profile_dir,
     validate_browser_profile_dir,
 )
@@ -365,6 +366,9 @@ class PlaywrightBrowserBackend:
             )
         if operation == "input":
             page_id, page = self._page(request)
+            origin_failure = self._origin_recheck_failure(page, request)
+            if origin_failure is not None:
+                return origin_failure
             value = _required_string(request, "value", allow_empty=True)
             locator = _locator(page, request)
             locator.fill(value, timeout=_timeout_ms(request))
@@ -384,6 +388,9 @@ class PlaywrightBrowserBackend:
             )
         if operation == "select":
             page_id, page = self._page(request)
+            origin_failure = self._origin_recheck_failure(page, request)
+            if origin_failure is not None:
+                return origin_failure
             value = _required_string(request, "value")
             selected = _locator(page, request).select_option(
                 value=value,
@@ -808,12 +815,52 @@ class PlaywrightBrowserBackend:
             }
         )
 
+    @staticmethod
+    def _fresh_url(page: Page) -> str | None:
+        """Текущий URL документа через протокольный round-trip.
+
+        ``Page.url`` читает кеш ``Frame._url``, который обновляется
+        обработчиком события навигации; само чтение свойства события не
+        обрабатывает. Если страница перешла на другой origin во время
+        ожидания модели или approval, кеш отдаёт устаревший адрес.
+        ``evaluate`` синхронизирует состояние с браузером и возвращает
+        href фактического документа. Ошибка (навигация в процессе,
+        закрытая страница) — None: fail-closed, без fallback на кеш.
+        """
+        try:
+            href = page.evaluate("window.location.href")
+        except Exception:  # noqa: BLE001 - policy-провайдер не должен ронять decide
+            return None
+        return href if isinstance(href, str) and href else None
+
+    def _origin_recheck_failure(self, page: Page, request: ToolRequest) -> ToolResult | None:
+        """Перепроверка origin на исполняющей странице перед input/select.
+
+        Привязывает исполнение к проверенному документу: свежий origin
+        читается протокольным вызовом на той же странице непосредственно
+        перед fill/select_option. Не совпал с origin policy-решения —
+        действие не выполняется, policy переоценивается.
+        """
+        expected = request.expected_browser_origin
+        if expected is None:
+            return None
+        actual = browser_origin_of_url(self._fresh_url(page))
+        if actual == expected:
+            return None
+        return ToolResult.failure(
+            "Browser origin changed since the policy decision "
+            f"(expected {expected}, actual {actual or 'unknown'}); "
+            "the edit was not executed and policy must be re-evaluated."
+        )
+
     def page_url(self, page_id: str | None = None) -> str | None:
         """URL целевой страницы для провайдера origin (E02-T09).
 
         Явный ``page_id`` резолвится в backend-состоянии страниц, без
         него — активная страница. Нет страницы/неизвестный id — None,
         без исключений: policy-провайдер обязан быть fail-closed.
+        URL читается свежим протокольным вызовом (см. ``_fresh_url``),
+        а не из кеша ``Page.url``.
         """
         resolved = page_id if page_id is not None else self._active_page_id
         if resolved is None:
@@ -821,10 +868,7 @@ class PlaywrightBrowserBackend:
         page = self._pages.get(resolved)
         if page is None:
             return None
-        try:
-            return page.url
-        except Exception:  # noqa: BLE001 - закрытая страница не должна ронять policy
-            return None
+        return self._fresh_url(page)
 
     def _page(
         self,

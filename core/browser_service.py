@@ -85,9 +85,13 @@ def browser_origin_of_url(url: str | None) -> str | None:
     hostname = (parts.hostname or "").lower()
     if scheme not in {"http", "https"} or not hostname:
         return None
+    # IPv6: parts.hostname отдаёт адрес без квадратных скобок. Без них
+    # http://[2001:db8::1]:8080 и http://[2001:db8::1:8080] нормализуются
+    # в один origin — грант протекал бы между разными сайтами.
+    host = f"[{hostname}]" if ":" in hostname else hostname
     if port is None or (scheme, port) in {("http", 80), ("https", 443)}:
-        return f"{scheme}://{hostname}"
-    return f"{scheme}://{hostname}:{port}"
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
 
 
 @dataclass(frozen=True)
