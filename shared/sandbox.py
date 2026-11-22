@@ -12,6 +12,12 @@ _MOUNT_ESCAPE_RE = re.compile(r"\\(011|012|040|134)")
 
 SANDBOX_ROOT: Final[Path] = Path("sandbox").resolve()
 CHATGPT_PLAN_STORAGE: Final[Path] = Path.home() / ".local" / "state" / "slavikai" / "chatgpt-plan"
+BROWSER_PROFILE_STORAGE: Final[Path] = (
+    Path.home() / ".local" / "state" / "slavikai" / "browser-profiles"
+)
+BROWSER_PROFILE_LEASE_STORAGE: Final[Path] = (
+    Path.home() / ".local" / "state" / "slavikai" / "browser-profiles.leases"
+)
 
 
 def read_mount_bindings() -> list[tuple[Path, Path]]:
@@ -44,12 +50,22 @@ def source_mount_root(path: Path, bindings: list[tuple[Path, Path]]) -> Path | N
 
 
 def is_private_runtime_path(path: Path, *, includes_descendants: bool = False) -> bool:
+    """True when ``path`` is (or, optionally, contains) closed SlavikAI state.
+
+    The private roots are the ChatGPT-plan token storage and the browser
+    profile / lease storage (E02-T07): session cookies in a browser profile
+    are credentials-equivalent, so no workspace tool or executor may read
+    them, and no workspace root may be pointed at them.
+    """
     try:
         resolved = path.resolve()
-        private = CHATGPT_PLAN_STORAGE.resolve()
-        return resolved.is_relative_to(private) or (
-            includes_descendants and private.is_relative_to(resolved)
-        )
+        for root in (CHATGPT_PLAN_STORAGE, BROWSER_PROFILE_STORAGE, BROWSER_PROFILE_LEASE_STORAGE):
+            private = root.resolve()
+            if resolved.is_relative_to(private) or (
+                includes_descendants and private.is_relative_to(resolved)
+            ):
+                return True
+        return False
     except (OSError, RuntimeError):
         return True
 

@@ -1132,6 +1132,10 @@ upload → external/write
 
 **Negative.** Symlink из workspace в profile root блокируется.
 
+**Что сделано.** `shared/sandbox.py` — корни browser-профилей и lease (`BROWSER_PROFILE_STORAGE`, `BROWSER_PROFILE_LEASE_STORAGE`) добавлены в private runtime paths рядом с chatgpt-plan storage: `is_private_runtime_path` теперь покрывает все три корня (fail-closed при ошибке resolve). `core/browser_service.py` берёт `DEFAULT_BROWSER_PROFILE_ROOT` из `shared.sandbox` (единый источник, значение то же). Следствия по существующим проверкам: workspace root нельзя выставить на profile dir/root (`_resolve_workspace_root` → отказ); `ReadFileTool` при root-родителе профиля не читает файлы профиля (`_ensure_in_workspace` → private-отказ); `ListFilesTool` скрывает private-каталоги целиком, не только symlink на них; subtree-операции и UI workspace paths используют тот же предикат. Symlink из workspace в profile root блокируется containment-проверкой workspace-инструментов и `O_NOFOLLOW`-отказом managed capture (`_capture_tree`). Claim `runtime.browser.session_service` version 5 → 6, partial → implemented.
+
+**Tests.** Новый `tests/test_browser_profile_secret_boundary.py` (8): private-предикат для профиля и lease; root на profile dir/root → отказ; чтение Cookies при root-родителе → отказ без утечки содержимого; list скрывает каталог профиля; symlink из workspace → профиль → отказ чтения и скрытие в list; managed capture с symlink на Cookies → `WorkspaceUnavailable`; обычный workspace-доступ не сломан. Мутации: удаление profile-корней из предиката роняет 4 теста, возврат symlink-only условия в `_walk` роняет list-тест.
+
 #### E02-T08 — browser real E2E acceptance
 
 **Scenario.**

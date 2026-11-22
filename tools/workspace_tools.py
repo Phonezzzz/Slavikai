@@ -325,9 +325,7 @@ class ListFilesTool:
     def _dir_has_visible_children(self, path: Path) -> bool:
         try:
             for item in path.iterdir():
-                if item.name.startswith(".") or (
-                    item.is_symlink() and is_private_runtime_path(item)
-                ):
+                if item.name.startswith(".") or is_private_runtime_path(item):
                     continue
                 if item.is_dir() and item.name not in IGNORED_DIR_NAMES:
                     return True
@@ -358,7 +356,7 @@ class ListFilesTool:
 
         visible_children = 0
         for item in iter_items:
-            if item.name.startswith(".") or (item.is_symlink() and is_private_runtime_path(item)):
+            if item.name.startswith(".") or is_private_runtime_path(item):
                 continue
             is_dir = item.is_dir() and item.name not in IGNORED_DIR_NAMES
             is_file = item.is_file() and _is_allowed_workspace_file(item)

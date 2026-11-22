@@ -193,7 +193,7 @@
 |---|---|---:|---|
 | E00 | T01–T03 | 3 | E00-T01 done; E00-T02 done; E00-T03 done |
 | E01 | T01–T09 | 9 | E01 T01–T09 DONE |
-| E02 | T01–T09 | 9 | T01 DONE (PR #166); T02 DONE (PR #167); T03 DONE (PR #180); T04 DONE (PR #181); T05 DONE (PR #182); T06 PARTIAL (PR #183, main dd207de); T09 внесён в ROADMAP, T10 черновик |
+| E02 | T01–T09 | 9 | T01 DONE (PR #166); T02 DONE (PR #167); T03 DONE (PR #180); T04 DONE (PR #181); T05 DONE (PR #182); T06 PARTIAL (PR #183, main dd207de); T07 IN_REVIEW; T09 внесён в ROADMAP, T10 черновик |
 | E03 | T01–T11 | 11 | READY после E02 |
 | E04 | T01–T06 | 6 | T03 slice DONE (PR #164); остальное NEEDS_REFINEMENT |
 | E05 | T01–T07 | 7 | NEEDS_REFINEMENT |
@@ -213,4 +213,4 @@
 
 ## Resume
 
-**Next active:** E02-T07. E02-T06 — PARTIAL (PR #183 MERGED, main `dd207de`; полный acceptance до E02-T10). **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.
+**Next active:** E02-T07 IN_REVIEW (ветка `pr-e02-t07-profile-secret-boundary`). E02-T06 — PARTIAL (PR #183 MERGED, main `dd207de`; полный acceptance до E02-T10). **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.

@@ -50,11 +50,12 @@ from core.browser_lease import (
     acquire_profile_lease,
 )
 from shared.models import ToolRequest, ToolResult
+from shared.sandbox import BROWSER_PROFILE_STORAGE
 
 DEFAULT_PROFILE_ID = "default"
 DEFAULT_OWNER_ID = "local"
 
-DEFAULT_BROWSER_PROFILE_ROOT = Path.home() / ".local" / "state" / "slavikai" / "browser-profiles"
+DEFAULT_BROWSER_PROFILE_ROOT = BROWSER_PROFILE_STORAGE
 
 _LEASE_ROOT_SUFFIX = ".leases"
 _LEASE_FILE_SUFFIX = ".lease"
