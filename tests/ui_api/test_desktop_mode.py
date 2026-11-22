@@ -716,6 +716,25 @@ def test_desktop_compound_request_retains_exact_once_scopes(tmp_path, monkeypatc
     target = tmp_path / "Downloads" / "compound.iso"
     target.parent.mkdir()
     target.write_text("original")
+    # E02-T05: download is a write effect (allow by default); an explicit
+    # ask rule on the main action keeps this request compound alongside
+    # the overwrite ask on the destination. Seeded before Agent init,
+    # which loads persistent rules into the policy runtime.
+    from server.http.common.auth import _principal_id_from_token
+
+    DesktopPolicyStore(tmp_path / ".config/slavik/policy.json").add_rule(
+        DesktopApprovalRule.create(
+            effect="ask",
+            source="persistent",
+            scope=DesktopApprovalScope(
+                tool="desktop_browser",
+                action="download",
+                target_pattern="https://example.test/download",
+                risk_class="write",
+            ),
+            subject_principal_id=_principal_id_from_token(TEST_API_TOKEN),
+        )
+    )
     agent = DesktopApprovalAgent(str(target))
     calls = []
     args = {

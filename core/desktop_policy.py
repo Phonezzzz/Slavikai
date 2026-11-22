@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
+from core.browser_effects import classify_browser_operation
 from shared.models import JSONValue, ToolRequest
 
 PolicyEffect = Literal["allow", "ask", "deny"]
@@ -587,17 +588,11 @@ def desktop_actions_from_request(request: ToolRequest) -> list[DesktopAction]:
                         risk_class=("overwrite" if args.get("overwrite") is True else "write"),
                     )
                 )
-        risk_class = (
-            "network"
-            if action in {"open", "new_tab", "navigate"}
-            else "external_side_effect"
-            if action in {"click", "input", "select", "submit", "download", "close_tab"}
-            # E02-T04: передача входа пользователю сама по себе ждёт его явного
-            # действия в окне и кнопки «Готово»; отдельного approval не нужно.
-            else "user_handoff"
-            if action == "login_handoff"
-            else "read"
-        )
+        # E02-T05: эффект операции берётся из одной явной таблицы
+        # (core/browser_effects.py): read/navigate не требуют approval,
+        # ввод в поля — local_mutation, submit/click — external side
+        # effect, download — write; неизвестная операция fail-closed.
+        risk_class = classify_browser_operation(action)
     elif tool == "desktop_gui":
         action = str(args.get("operation") or "observe").strip().lower()
         target = _optional_string(args.get("accessible_path")) or _optional_string(

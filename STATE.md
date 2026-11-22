@@ -133,7 +133,7 @@
 - Rework после Codex review (round 2, 1×P2): lease root и `user_data_dir` выводятся из одного канонического profile root — алиас root (symlink на него) получает тот же lease, второй run через алиас → `profile_busy`. `tests/test_browser_profile_lease.py` — 25 тестов; `make check` зелёный (2530 passed, 5 skipped, coverage 83.27%).
 - **Статус:** DONE. PR #180 MERGED 2026-11-19 (main f2e94ba).
 
-## E02-T04: ветка pr-e02-t04-login-handoff (IN_REVIEW)
+## E02-T04: ветка pr-e02-t04-login-handoff (MERGED, main 30bd0da)
 
 - Ветка `pr-e02-t04-login-handoff` от `origin/main` (`f2e94ba`, PR #180 MERGED).
 - Решение владельца 2026-11-19 — вариант A: существующий continuation, фаза `WAITING_USER_INPUT`, причина `NEEDS_USER_AUTH`; тот же persistent profile headed, lease через перезапуск и всю попытку; «Готово» — только владельцу run, ровно один раз, затем re-observation; таймаут 5 мин → окно закрыто, lease отпущен после подтверждённого закрытия, явный retry.
@@ -143,6 +143,13 @@
 
 - Rework после Codex review (round 2, 1×P1 + 1×P2; план владельца 2026-11-20): observation после handoff маскирует все непустые текстовые поля (MFA-код в обычном поле без autocomplete не уходит модели; неподтверждённая маскировка → явный отказ; real headless-тесты plain MFA/shadow/textarea + getter-only поле); `UIHub` публикует переход decision в `expired` по `expires_at` событием `decision.packet` без отдельного GET (открытая вкладка показывает «Вход не выполнен»); respond на истёкший decision — `410 decision_expired` независимо от источника перехода. Тесты: +2 fake и +2 opt-in real в `tests/test_login_handoff.py`, +1 в `tests/ui_api/test_login_handoff_api.py`; мутации (4) убиты; `make check` зелёный (2556 passed, 9 skipped, coverage 83.39%).
 - Rework после Codex review (round 3, 1×P1; уточнение владельца 2026-11-20): строгая маскировка — состояние сессии, а не операция `_finish_login_handoff()`: страница ручного входа остаётся в строгом режиме (`_strict_masking_pages`) с открытия окна до закрытия вкладки, все её observations (`snapshot` и завершение handoff — единственный механизм `_observation`) идут через строгую маскировку с подтверждением; снятие — только явное закрытие вкладки, другие страницы не затронуты; observation сообщает `strict_masking`. Тесты: +3 fake (цепочка handoff → done → snapshot; новая вкладка не строгая; конец режима по close_tab) и +1 opt-in real headless в `tests/test_login_handoff.py`; мутации (3) убиты; `make check` зелёный (2559 passed, 10 skipped, coverage 83.40%).
+- **Статус:** DONE. PR #181 MERGED 2026-11-22 (main 30bd0da; CI зелёный, Codex review без findings).
+
+## E02-T05: ветка pr-e02-t05-effect-classification (IN_REVIEW)
+
+- Ветка `pr-e02-t05-effect-classification` от `origin/main` (`30bd0da`, PR #181 MERGED).
+- Содержимое: новый `core/browser_effects.py` — явная таблица effect-классов generic browser operations (read / network / local_mutation / write / external_side_effect / user_handoff; неизвестная операция fail-closed в external_side_effect); `core/desktop_policy.py` берёт risk class из таблицы вместо inline-sets; claim `runtime.browser.session_service` version 4 → 5. Поведение: чтение страницы и ввод в поля без approval по умолчанию (явные ask/deny действуют), submit/click — external side effect, download — write (destination sub-action без изменений), click не наследует read. ROADMAP.md record (implementation + мини-аудит + тесты + мутации).
+- Локальные гейты: `make check` зелёный (2588 passed, 10 skipped, coverage 83.41%); новый `tests/test_browser_effects.py` (29 тестов); мутации (4) убиты.
 - **Статус:** IN_REVIEW. Merge — после GitHub CI и чистого Codex review.
 
 ## Текущая очередь
@@ -162,7 +169,8 @@
 - **E02-T01 — DONE** (BrowserProfile + BrowserService minimal API: lifecycle сессии отделён от DesktopBrowserTool; generic actions идут через service). Evidence: запись в ROADMAP.md (E02-T01 implementation + мини-аудит), новый `tests/test_browser_service.py` (11 тестов), `make check` зелёный (2497 passed, coverage 83.16%); ветка `pr-e02-t01-browser-service`; PR #166 MERGED (main d8f0498).
 - **E02-T02 — DONE** (dedicated persistent Chromium profile: `user_data_dir` на профиль, `launch_persistent_context`, login переживает restart; основной Chrome-профиль владельца выбрать нельзя). Evidence: запись в ROADMAP.md (E02-T02 implementation + мини-аудит), новый `tests/test_browser_persistence.py` (10 тестов), `make check` зелёный (2506 passed, 4 skipped, coverage 83.24%); ветка `pr-e02-t02-persistent-profile`; PR #167 MERGED (main a4932bc).
 - **E02-T03 — DONE** (один active writer lease на profile: `flock` на lease-файле в отдельном lease root, второй run → `profile_busy`, crash holder → recoverable после health validation, алиасы профилей отклоняются). Evidence: запись в ROADMAP.md (E02-T03 implementation + мини-аудит + дизайн-решение + rework rounds 1–2), новый `tests/test_browser_profile_lease.py` (25 тестов), `make check` зелёный (2530 passed, 5 skipped, coverage 83.27%); ветка `pr-e02-t03-profile-lease`; PR #180 MERGED (main f2e94ba).
-- **E02-T04 — IN_REVIEW** (manual login handoff по решению владельца, вариант A: `NEEDS_USER_AUTH` / `WAITING_USER_INPUT`, headed-перезапуск того же профиля под lease, одноразовое «Готово» владельца → re-observation, таймаут 5 мин → окно закрыто, lease после подтверждённого закрытия, явный retry; пароль/MFA не в model messages, tool log, effect log и snapshot). Evidence: запись в ROADMAP.md, `tests/test_login_handoff.py` + `tests/ui_api/test_login_handoff_api.py` + фронтенд-тест, rework round 1 (2×P1 + 2×P2 закрыты), round 2 (1×P1 + 1×P2 закрыты) и round 3 (1×P1 закрыт), `make check` зелёный (2559 passed, 10 skipped, coverage 83.40%); ветка `pr-e02-t04-login-handoff`.
+- **E02-T04 — DONE** (manual login handoff по решению владельца, вариант A: `NEEDS_USER_AUTH` / `WAITING_USER_INPUT`, headed-перезапуск того же профиля под lease, одноразовое «Готово» владельца → re-observation, таймаут 5 мин → окно закрыто, lease после подтверждённого закрытия, явный retry; пароль/MFA не в model messages, tool log, effect log и snapshot). Evidence: запись в ROADMAP.md, `tests/test_login_handoff.py` + `tests/ui_api/test_login_handoff_api.py` + фронтенд-тест, rework round 1 (2×P1 + 2×P2 закрыты), round 2 (1×P1 + 1×P2 закрыты) и round 3 (1×P1 закрыт), `make check` зелёный (2559 passed, 10 skipped, coverage 83.40%); ветка `pr-e02-t04-login-handoff`; PR #181 MERGED (main 30bd0da).
+- **E02-T05 — IN_REVIEW** (effect classification browser actions: одна таблица `core/browser_effects.py` — read/network/local_mutation/write/external_side_effect/user_handoff, неизвестная операция fail-closed; ввод в поля — local mutation без approval по умолчанию, submit/click — external side effect, download — write, click не наследует read). Evidence: запись в ROADMAP.md (implementation + мини-аудит), новый `tests/test_browser_effects.py` (29 тестов, мутации 4/4), `make check` зелёный (2588 passed, 10 skipped, coverage 83.40%); ветка `pr-e02-t05-effect-classification`.
 
 ## Readiness: 63 последовательных тикета
 
@@ -170,7 +178,7 @@
 |---|---|---:|---|
 | E00 | T01–T03 | 3 | E00-T01 done; E00-T02 done; E00-T03 done |
 | E01 | T01–T09 | 9 | E01 T01–T09 DONE |
-| E02 | T01–T08 | 8 | T01 DONE (PR #166); T02 DONE (PR #167); T03 DONE (PR #180); T04 IN_REVIEW |
+| E02 | T01–T08 | 8 | T01 DONE (PR #166); T02 DONE (PR #167); T03 DONE (PR #180); T04 DONE (PR #181); T05 IN_REVIEW |
 | E03 | T01–T11 | 11 | READY после E02 |
 | E04 | T01–T06 | 6 | T03 slice DONE (PR #164); остальное NEEDS_REFINEMENT |
 | E05 | T01–T07 | 7 | NEEDS_REFINEMENT |
@@ -190,4 +198,4 @@
 
 ## Resume
 
-**Next active:** E02-T04 — IN_REVIEW (ветка `pr-e02-t04-login-handoff`). **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.
+**Next active:** E02-T05 — IN_REVIEW (ветка `pr-e02-t05-effect-classification`). **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.
