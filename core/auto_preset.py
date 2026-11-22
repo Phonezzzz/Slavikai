@@ -68,7 +68,14 @@ from core.mwv.verifier_runtime import (
 from core.mwv.verifier_summary import extract_verifier_excerpt
 from core.response_preferences import compose_response_preferences
 from core.run_contract import RunBudget
-from core.run_outcome import RunOutcome, TerminalReason, Verification, outcome_from_loop_result
+from core.run_outcome import (
+    PostconditionCheck,
+    RunOutcome,
+    TerminalReason,
+    Verification,
+    VerificationOutcome,
+    outcome_from_loop_result,
+)
 from core.skills.index import SkillResolution
 from core.skills.runtime import skill_run_metadata, skill_run_report
 from core.tool_gateway import AutoFileEffects
@@ -682,14 +689,16 @@ class AutoPresetRunner:
             # the canonical verifier ran, its result is attached to the
             # derivation, so a passed postcondition yields full DONE and
             # a lost verification can never silently become DONE.
+            # E02-T06 (семантика B): browser postconditions подключаются
+            # только к канонической деривации, мимо перехвата
+            # FAILED_VERIFIER выше. Неподтверждённый browser postcondition
+            # (click/submit без ожидаемого состояния) даёт UNVERIFIED и
+            # не перекрывается успешным процессным verifier.
+            browser_verification = _browser_postcondition_result(loop_result)
             canonical = outcome_from_loop_result(
                 loop_result,
                 state_changing=bool(loop_result.tool_calls),
-                verification=(
-                    Verification.from_verification_result(verification)
-                    if verification is not None
-                    else None
-                ),
+                verification=_canonical_verification(verification, browser_verification),
             )
             if canonical.terminal_reason is not TerminalReason.COMPLETED:
                 state["error"] = "canonical_outcome_not_completed"
@@ -1128,6 +1137,63 @@ class AutoPresetRunner:
         if self.progress_callback is not None:
             self.progress_callback(dict(normalized))
         return normalized
+
+
+def _browser_postcondition_result(
+    loop_result: AgentToolLoopResult,
+) -> VerificationResult | None:
+    """Browser postcondition verification для канонической деривации (E02-T06).
+
+    Семантика B (решение владельца 2026-11-22): результат подключается
+    только к каноническому outcome, мимо перехвата FAILED_VERIFIER
+    процессного verifier. Отсутствие подтверждения browser
+    postcondition даёт UNVERIFIED, а не FAILED_VERIFIER.
+    """
+    calls = [
+        (item.call.name, dict(item.call.arguments), item.result) for item in loop_result.tool_calls
+    ]
+    return VerifierRuntime().verify_browser_postconditions(calls)
+
+
+def _canonical_verification(
+    process_result: VerificationResult | None,
+    browser_result: VerificationResult | None,
+) -> Verification | None:
+    """Скомбинировать процессную и browser верификации для канонического outcome.
+
+    PASSED только если каждая применимая проверка PASSED: успешный
+    процессный verifier не перекрывает неподтверждённый browser
+    postcondition (решение владельца 2026-11-22). FAILED любой
+    проверки -> FAILED (UNVERIFIED в деривации, не FAILED_VERIFIER);
+    ERROR без FAILED -> unknown. Без browser-результата поведение
+    прежнее: процессный результат как есть.
+    """
+    if browser_result is None:
+        if process_result is None:
+            return None
+        return Verification.from_verification_result(process_result)
+    checks: list[PostconditionCheck] = []
+    outcomes: list[VerificationOutcome] = []
+    if process_result is not None:
+        process_verification = Verification.from_verification_result(process_result)
+        outcomes.append(process_verification.outcome)
+        checks.extend(
+            PostconditionCheck(name="process_verifier", passed=check.passed, detail=check.detail)
+            for check in process_verification.checks
+        )
+    browser_verification = Verification.from_verification_result(browser_result)
+    outcomes.append(browser_verification.outcome)
+    checks.extend(
+        PostconditionCheck(name="browser_postconditions", passed=check.passed, detail=check.detail)
+        for check in browser_verification.checks
+    )
+    if VerificationOutcome.FAILED in outcomes:
+        outcome = VerificationOutcome.FAILED
+    elif VerificationOutcome.UNKNOWN in outcomes:
+        outcome = VerificationOutcome.UNKNOWN
+    else:
+        outcome = VerificationOutcome.PASSED
+    return Verification(outcome=outcome, checks=tuple(checks), source="canonical_verification")
 
 
 def _has_failed_tool_call(tool_calls: list[ExecutedToolCall]) -> bool:

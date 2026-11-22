@@ -105,6 +105,21 @@ def has_canonical_check_definition(project_root: Path) -> bool:
     return (project_root / "Makefile").is_file()
 
 
+def _browser_observation_confirms(args: dict[str, JSONValue], result: ToolResult) -> bool:
+    """Семантическая observation браузера, пригодная как подтверждение.
+
+    ``find`` с ``total=0`` — успешный поиск, который ничего не нашёл:
+    он не подтверждает ничего (E02-T06, дыра acceptance). Подтверждает
+    только find с total>=1; read/snapshot/wait подтверждают факт
+    наблюдения страницы.
+    """
+    operation = args.get("operation")
+    if operation == "find":
+        total = result.data.get("total")
+        return isinstance(total, int) and not isinstance(total, bool) and total >= 1
+    return operation in {"read", "snapshot", "wait"}
+
+
 def _desktop_change_is_verified(
     name: str,
     args: dict[str, JSONValue],
@@ -172,11 +187,10 @@ def _desktop_change_is_verified(
         page_id = result.data.get("page_id")
         if not isinstance(page_id, str):
             return False
-        semantic_observations = {"find", "read", "snapshot", "wait"}
         return any(
             later_name == "desktop_browser"
             and later_result.ok
-            and later_args.get("operation") in semantic_observations
+            and _browser_observation_confirms(later_args, later_result)
             and later_result.data.get("page_id") == page_id
             for later_name, later_args, later_result in later
         )
@@ -306,6 +320,83 @@ class VerifierRuntime:
         return _desktop_observation_result(
             status=VerificationStatus.PASSED,
             reason=f"Verified {len(calls)} Desktop tool observation(s).",
+            duration_seconds=time.monotonic() - start,
+        )
+
+    def verify_browser_postconditions(
+        self,
+        calls: Sequence[tuple[str, dict[str, JSONValue], ToolResult]],
+    ) -> VerificationResult | None:
+        """Каноническая проверка browser postconditions (E02-T06, семантика B).
+
+        Отвечает на вопрос канонического outcome — «подтверждено ли
+        целевое состояние», а не на вопрос desktop gate «была ли
+        re-observation перед финишем» (это ``verify_desktop_observations``;
+        семантика desktop-пути не меняется).
+
+        Правила (решение владельца 2026-11-22):
+        - self-verified операции (``verified=True`` в результате tool:
+          navigate/input/select/download/close_tab/close — read-back
+          значения, файл на диске, final_url) подтверждены самим tool.
+        - ``click``/``submit`` без self-verification НЕ подтверждаются
+          фактом повторной observation: snapshot/read доказывают факт
+          наблюдения, find — факт наличия элемента, но не достижение
+          целевого состояния конкретного действия. Ожидаемое
+          postcondition, связанное с результатом действия, существующими
+          механизмами не выражается (нет контракта ожидаемого
+          состояния) — поэтому click/submit остаются неподтверждёнными
+          (FAILED -> UNVERIFIED в канонической деривации), пока такой
+          контракт не появится. Если будущий контракт будет ставить
+          ``verified=True`` на результате click/submit, это правило
+          пропустит его без изменений.
+        - setup-операции без self-verification (open/new_tab пустой
+          вкладки) подтверждаются последующей observation той же
+          страницы — как в desktop-семантике.
+        - нет state-changing browser-вызовов -> ``None``: browser
+          postcondition неприменим и не блокирует DONE.
+        """
+        start = time.monotonic()
+        change_attempts = [
+            (index, args, result)
+            for index, (name, args, result) in enumerate(calls)
+            if name == "desktop_browser" and _desktop_call_changes_state(name, args)
+        ]
+        if not change_attempts:
+            return None
+        successful_changes = [
+            (index, args, result) for index, args, result in change_attempts if result.ok
+        ]
+        if not successful_changes:
+            last_error = next(
+                (result.error for _, _, result in reversed(change_attempts) if result.error),
+                "browser_no_successful_change",
+            )
+            return _desktop_observation_result(
+                status=VerificationStatus.FAILED,
+                reason=last_error,
+                duration_seconds=time.monotonic() - start,
+            )
+        for index, args, result in successful_changes:
+            if result.data.get("verified") is True:
+                continue
+            operation = args.get("operation")
+            if operation in {"click", "submit"}:
+                return _desktop_observation_result(
+                    status=VerificationStatus.FAILED,
+                    reason=f"browser_postcondition_unconfirmed:{operation}",
+                    duration_seconds=time.monotonic() - start,
+                )
+            later = calls[index + 1 :]
+            if _desktop_change_is_verified("desktop_browser", args, result, later):
+                continue
+            return _desktop_observation_result(
+                status=VerificationStatus.FAILED,
+                reason="browser_postcondition_unconfirmed:desktop_browser",
+                duration_seconds=time.monotonic() - start,
+            )
+        return _desktop_observation_result(
+            status=VerificationStatus.PASSED,
+            reason=f"Verified {len(successful_changes)} browser postcondition(s).",
             duration_seconds=time.monotonic() - start,
         )
 
