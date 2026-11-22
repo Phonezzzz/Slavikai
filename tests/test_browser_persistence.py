@@ -75,9 +75,13 @@ class _RecordingContext:
         self.browser: _RecordingBrowser | None = None
         self.closed = False
         self.timeout_ms: int | None = None
+        self.init_scripts: list[str] = []
 
     def set_default_timeout(self, timeout: int) -> None:
         self.timeout_ms = timeout
+
+    def add_init_script(self, *, script: str) -> None:
+        self.init_scripts.append(script)
 
     def new_page(self) -> None:
         raise AssertionError("recording context has no pages")

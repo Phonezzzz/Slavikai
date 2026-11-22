@@ -52,6 +52,26 @@ SENSITIVE_VALUE_MASK = "[redacted]"
 # fallback на устаревший кеш ``Page.url``).
 FRESH_URL_TIMEOUT_MS = 3_000
 
+# E02-T09 rework round 5: origin документа элемента нельзя читать
+# evaluate в main world страницы — скрипт cross-origin iframe может
+# подменить ``ownerDocument``/``window.origin`` через
+# ``Object.defineProperty`` и вернуть гранту чужой origin как свой.
+# Вместо этого init-скрипт контекста при создании каждого документа
+# (до любых скриптов страницы) фиксирует ``window.origin`` в
+# non-configurable свойстве: значение нельзя переопределить или
+# удалить из JS страницы. CDP isolated world не используется: вызовы
+# CDP-сессии (``Page.getFrameTree``/``Runtime.evaluate``) не имеют
+# timeout и неограниченно висят на фрейме с заблокированным основным
+# потоком (проверено на Playwright 1.62), а чтение запечатанного
+# значения через ``wait_for_function`` ограничено timeout драйвера.
+_DOCUMENT_ORIGIN_PROPERTY = "__slavikai_document_origin__"
+_DOCUMENT_ORIGIN_INIT_SCRIPT = (
+    "try { Object.defineProperty(window, "
+    f'"{_DOCUMENT_ORIGIN_PROPERTY}", '
+    "{ value: window.origin, configurable: false, writable: false, "
+    "enumerable: false }); } catch (e) {}"
+)
+
 # E02-T04: Playwright aria_snapshot печатает value текстовых полей, включая
 # type=password (проверено на Chromium 2026-11-19). Перед снимком значения
 # чувствительных полей временно подменяются маской и сразу восстанавливаются:
@@ -704,6 +724,9 @@ class PlaywrightBrowserBackend:
                 browser = playwright.chromium.launch(headless=headless)
                 context = browser.new_context(accept_downloads=True)
                 context.set_default_timeout(15_000)
+            # E02-T09 rework round 5: запечатать window.origin каждого
+            # документа до скриптов страницы (см. _DOCUMENT_ORIGIN_*).
+            context.add_init_script(script=_DOCUMENT_ORIGIN_INIT_SCRIPT)
         except Exception:
             playwright.stop()
             raise
@@ -887,31 +910,19 @@ class PlaywrightBrowserBackend:
         Грант привязан к origin верхнего документа, но css-селектор с
         переходом во фрейм (``iframe >> internal:control=enter-frame``)
         может выбрать поле внутри iframe другого origin — проверка URL
-        страницы такой ввод не ловит. Origin читается протокольным
-        evaluate на самом элементе (``location.origin`` документа
-        элемента) непосредственно перед fill/select_option.
-        ``location.origin`` учитывает наследование: iframe без ``src``
-        или с ``srcdoc`` наследует origin родителя, хотя его URL —
-        ``about:blank``/``about:srcdoc``; opaque origin (sandbox без
-        ``allow-same-origin``) даёт строку ``"null"`` и не совпадает ни
-        с каким грантом. Ошибка чтения или несовпадение с origin
-        policy-решения — fail-closed: действие не выполняется, policy
+        страницы такой ввод не ловит. Принадлежность элемента фрейму
+        определяет Playwright по своему дереву фреймов
+        (``owner_frame``), а origin документа читается из значения,
+        запечатанного init-скриптом контекста при создании документа
+        (см. ``_DOCUMENT_ORIGIN_INIT_SCRIPT``) — скрипты страницы не
+        могут его подменить. Несовпадение с origin policy-решения или
+        ошибка чтения — fail-closed: действие не выполняется, policy
         переоценивается.
         """
         expected = request.expected_browser_origin
         if expected is None:
             return None
-        try:
-            document_origin = locator.evaluate(
-                "(el) => (el.ownerDocument && el.ownerDocument.defaultView "
-                "? el.ownerDocument.defaultView.location.origin : null)",
-                timeout=_timeout_ms(request),
-            )
-        except Exception:  # noqa: BLE001 - проверка origin не должна ронять handle
-            document_origin = None
-        actual = browser_origin_of_url(
-            document_origin if isinstance(document_origin, str) else None
-        )
+        actual = self._element_document_origin(locator, request)
         if actual == expected:
             return None
         return ToolResult.failure(
@@ -919,6 +930,39 @@ class PlaywrightBrowserBackend:
             f"(expected {expected}, actual {actual or 'unknown'}); "
             "the edit was not executed and policy must be re-evaluated."
         )
+
+    def _element_document_origin(self, locator: Locator, request: ToolRequest) -> str | None:
+        """Origin документа элемента из доверенных источников.
+
+        ``owner_frame`` резолвится серверной стороной Playwright по
+        дереву фреймов браузера, без исполнения JS страницы. Для
+        cross-origin iframe, выбранного page-level селектором с
+        переходом во фрейм, ``owner_frame`` возвращает None: элемент
+        не принадлежит документу верхней страницы, и грант на её
+        origin такой ввод не покрывает. Origin документа берётся из
+        ``window.origin``, зафиксированного init-скриптом до запуска
+        скриптов страницы в non-configurable свойстве: наследование
+        (iframe без ``src``/``srcdoc``) даёт origin родителя, opaque
+        origin (sandbox без ``allow-same-origin``, CSP sandbox) —
+        строку ``"null"``, которая не совпадает ни с каким грантом.
+        Чтение через ``wait_for_function`` ограничено
+        ``FRESH_URL_TIMEOUT_MS``: на фрейме с заблокированным основным
+        потоком падает по timeout драйвера, а не висит. Любая ошибка —
+        None (fail-closed).
+        """
+        try:
+            handle = locator.element_handle(timeout=_timeout_ms(request))
+            frame = handle.owner_frame()
+            if frame is None:
+                return None
+            origin_handle = frame.wait_for_function(
+                f"() => window.{_DOCUMENT_ORIGIN_PROPERTY}",
+                timeout=FRESH_URL_TIMEOUT_MS,
+            )
+            value = origin_handle.json_value()
+        except Exception:  # noqa: BLE001 - проверка origin не должна ронять handle
+            return None
+        return browser_origin_of_url(value if isinstance(value, str) else None)
 
     def page_url(self, page_id: str | None = None) -> str | None:
         """URL целевой страницы для провайдера origin (E02-T09).

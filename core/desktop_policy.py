@@ -116,9 +116,19 @@ class DesktopApprovalScope:
             ("desktop_session", "notify"),
             ("desktop_session", "lock"),
         }
+        # matches() при заданном actions заменяет проверку action
+        # списком: persistent allow допустим, только если КАЖДАЯ
+        # реально покрываемая операция не запрещена для persistent
+        # allow. Иначе scope с action="query" и actions=["install"]
+        # разрешал бы установку пакетов без нового approval.
+        covered_actions = {self.action}
+        if self.actions is not None:
+            covered_actions.update(self.actions)
         return (
             self.tool not in {"desktop_shell", "desktop_launch", "desktop_browser", "desktop_gui"}
-            and (self.tool, self.action) not in non_persistent_actions
+            and all(
+                (self.tool, covered) not in non_persistent_actions for covered in covered_actions
+            )
             and self.command_class is None
             and self.command_exact is None
         )

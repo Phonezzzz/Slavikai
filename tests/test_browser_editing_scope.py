@@ -530,24 +530,30 @@ class _FakeLocator:
     def __init__(self) -> None:
         self.filled: list[str] = []
         self.selected: list[str] = []
-        # Security origin документа элемента для evaluate(location.origin);
-        # None — документ страницы (page._fresh_url). "null" — opaque
-        # origin (sandbox без allow-same-origin). raise_on_evaluate — сбой
-        # протокольного чтения origin.
+        # Запечатанный origin документа элемента (init-скрипт контекста);
+        # None — документ страницы (origin из page._fresh_url). "null" —
+        # opaque origin (sandbox без allow-same-origin).
+        # raise_on_origin_read — сбой чтения запечатанного значения;
+        # origin_read_timeout — wait_for_function падает по timeout
+        # (заблокированный основной поток фрейма или init-скрипт не
+        # отработал); owner_frame_none — элемент в cross-origin iframe,
+        # выбранном page-level селектором (owner_frame не резолвится);
+        # raise_on_element_handle — элемент не разрешился.
         self.document_origin: str | None = None
-        self.raise_on_evaluate = False
+        self.raise_on_origin_read = False
+        self.origin_read_timeout = False
+        self.owner_frame_none = False
+        self.raise_on_element_handle = False
         self.page: _FakePage | None = None
 
     def __call__(self, selector: str) -> _FakeLocator:
         # page.locator(selector) при selector_type="css".
         return self
 
-    def evaluate(self, expression: str, timeout: float | None = None) -> str | None:
-        if self.raise_on_evaluate:
-            raise RuntimeError("evaluate failed")
-        if self.document_origin is not None:
-            return self.document_origin
-        return self.page._fresh_url if self.page is not None else None
+    def element_handle(self, timeout: float | None = None) -> _FakeElementHandle:
+        if self.raise_on_element_handle:
+            raise TimeoutError("Locator.element_handle: Timeout exceeded.")
+        return _FakeElementHandle(self)
 
     def fill(self, value: str, timeout: int | None = None) -> None:
         self.filled.append(value)
@@ -559,6 +565,32 @@ class _FakeLocator:
 
     def input_value(self, timeout: int | None = None) -> str:
         return self.filled[-1] if self.filled else ""
+
+
+class _FakeElementHandle:
+    def __init__(self, locator: _FakeLocator) -> None:
+        self._locator = locator
+
+    def owner_frame(self) -> _FakeFrame | None:
+        if self._locator.owner_frame_none:
+            return None
+        return _FakeFrame(self._locator)
+
+
+class _FakeFrame:
+    def __init__(self, locator: _FakeLocator) -> None:
+        self._locator = locator
+
+    def wait_for_function(self, expression: str, timeout: float | None = None) -> _FakeJSHandle:
+        assert "__slavikai_document_origin__" in expression
+        if self._locator.raise_on_origin_read:
+            raise RuntimeError("origin read failed")
+        if self._locator.origin_read_timeout:
+            raise TimeoutError("Frame.wait_for_function: Timeout exceeded.")
+        if self._locator.document_origin is not None:
+            return _FakeJSHandle(self._locator.document_origin)
+        page = self._locator.page
+        return _FakeJSHandle(page._fresh_url if page is not None else "")
 
 
 class _FakeJSHandle:
@@ -726,7 +758,7 @@ def test_backend_element_origin_check_is_fail_closed(tmp_path: Path) -> None:
         cached_url="https://example.test/form",
         fresh_url="https://example.test/form",
     )
-    page.locator.raise_on_evaluate = True
+    page.locator.raise_on_origin_read = True
     backend = _backend_with_page(tmp_path, page)
     request = ToolRequest(
         "desktop_browser",
@@ -790,6 +822,108 @@ def test_backend_rejects_edit_in_opaque_origin_iframe(tmp_path: Path) -> None:
     assert not result.ok
     assert "different origin" in (result.error or "")
     assert page.locator.filled == []
+
+
+# --- Rework round 5 (findings Codex P1+P2 по PR #187) ---
+
+
+def test_backend_rejects_edit_when_owner_frame_unknown(tmp_path: Path) -> None:
+    # P1: элемент в cross-origin iframe, выбранном page-level
+    # селектором с переходом во фрейм: owner_frame не резолвится в
+    # документ верхней страницы — грант на её origin ввод не покрывает,
+    # даже если скрипт iframe подменил ownerDocument/window.origin.
+    page = _FakePage(
+        cached_url="https://example.test/form",
+        fresh_url="https://example.test/form",
+    )
+    page.locator.owner_frame_none = True
+    backend = _backend_with_page(tmp_path, page)
+    request = ToolRequest(
+        "desktop_browser",
+        {
+            "operation": "input",
+            "selector_type": "css",
+            "selector": "iframe >> internal:control=enter-frame >> input",
+            "value": "x",
+        },
+        expected_browser_origin=ORIGIN,
+    )
+    result = backend.handle(request)
+    assert not result.ok
+    assert "different origin" in (result.error or "")
+    assert page.locator.filled == []
+
+
+def test_backend_rejects_edit_when_sealed_origin_unavailable(tmp_path: Path) -> None:
+    # Запечатанный origin недоступен (init-скрипт не отработал или
+    # основной поток фрейма заблокирован): wait_for_function падает по
+    # timeout — fail-closed, без fallback на evaluate в main world.
+    page = _FakePage(
+        cached_url="https://example.test/form",
+        fresh_url="https://example.test/form",
+    )
+    page.locator.origin_read_timeout = True
+    backend = _backend_with_page(tmp_path, page)
+    request = ToolRequest(
+        "desktop_browser",
+        {"operation": "input", "selector": "#name", "value": "x"},
+        expected_browser_origin=ORIGIN,
+    )
+    result = backend.handle(request)
+    assert not result.ok
+    assert page.locator.filled == []
+
+
+def test_backend_rejects_edit_when_element_handle_fails(tmp_path: Path) -> None:
+    # Элемент не разрешился (нет в DOM или фрейм не отвечает) —
+    # принадлежность документа установить нельзя, ввод не выполняется.
+    page = _FakePage(
+        cached_url="https://example.test/form",
+        fresh_url="https://example.test/form",
+    )
+    page.locator.raise_on_element_handle = True
+    backend = _backend_with_page(tmp_path, page)
+    request = ToolRequest(
+        "desktop_browser",
+        {"operation": "input", "selector": "#name", "value": "x"},
+        expected_browser_origin=ORIGIN,
+    )
+    result = backend.handle(request)
+    assert not result.ok
+    assert page.locator.filled == []
+
+
+def test_persistent_allow_checks_all_covered_actions(tmp_path: Path) -> None:
+    # P2: matches() при заданном actions заменяет проверку action
+    # списком, поэтому persistent allow обязан проверять каждую
+    # реально покрываемую операцию. Scope с action="query" и
+    # actions=["install"] не должен сохраняться как persistent allow.
+    bypass = DesktopApprovalScope(
+        tool="desktop_package",
+        action="query",
+        actions=("install",),
+        target_pattern="vim",
+    )
+    assert bypass.supports_persistent_allow is False
+    store = DesktopPolicyStore(tmp_path / "desktop-approvals.json")
+    with pytest.raises(ValueError, match="Persistent allow запрещён"):
+        store.add_rule(
+            DesktopApprovalRule.create(effect="allow", source="persistent", scope=bypass)
+        )
+
+    for tool, sensitive in (
+        ("desktop_clipboard", "read"),
+        ("desktop_clipboard", "write"),
+        ("desktop_systemd", "enable"),
+        ("desktop_package", "remove"),
+        ("desktop_package", "update_metadata"),
+    ):
+        scope = DesktopApprovalScope(tool=tool, action="query", actions=(sensitive,))
+        assert scope.supports_persistent_allow is False
+
+    # Безопасные операции в actions persistent allow не ломают.
+    safe = DesktopApprovalScope(tool="desktop_package", action="query", actions=("query",))
+    assert safe.supports_persistent_allow is True
 
 
 # --- Rework round 4 (finding Codex P2 по PR #187) ---

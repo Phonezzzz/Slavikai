@@ -204,9 +204,13 @@ class _Context:
         self.closed = False
         self.pages: list[_LoginPage] = []
         self.browser = object()
+        self.init_scripts: list[str] = []
 
     def set_default_timeout(self, timeout: int) -> None:
         assert timeout > 0
+
+    def add_init_script(self, *, script: str) -> None:
+        self.init_scripts.append(script)
 
     def new_page(self) -> _LoginPage:
         page = _LoginPage()
