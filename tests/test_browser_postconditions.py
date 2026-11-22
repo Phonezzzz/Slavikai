@@ -526,6 +526,165 @@ def test_preset_self_verified_browser_run_is_done(tmp_path, monkeypatch) -> None
     assert outcome.canonical_outcome.is_full_done is True
 
 
+# --- Пользовательский ответ Auto из канонического outcome ----------------
+# Отдельный PR от main (решение владельца 2026-11-22): в
+# AutoPresetRunner._execute_frame пользовательский текст и статус
+# верификатора выводятся из RunOutcome, как в Desktop-проекции (#183).
+# COMPLETED — факт остановки прогона; DONE и публикацию успеха
+# определяет RunOutcome. Тот же путь обслуживает resume.
+
+
+class _CapturingBrowserE2EAgent(_BrowserE2EAgent):
+    """_BrowserE2EAgent, записывающий kwargs report/stop блоков."""
+
+    def __init__(self, brain, registry, workspace):  # noqa: ANN001
+        super().__init__(brain, registry, workspace)
+        self.report_kwargs_history: list[dict] = []
+        self.stop_kwargs_history: list[dict] = []
+
+    def _append_report_block(self, text: str, **kwargs):  # noqa: ANN003, ANN202
+        self.report_kwargs_history.append(kwargs)
+        return text
+
+    def _format_stop_response(self, **kwargs):  # noqa: ANN003, ANN202
+        self.stop_kwargs_history.append(kwargs)
+        return f"stop:{kwargs.get('what', '')}"
+
+
+class _MutableRulesBrowserAgent(_CapturingBrowserE2EAgent):
+    """Gateway строится из изменяемого списка правил (для resume)."""
+
+    def __init__(self, brain, registry, workspace):  # noqa: ANN001
+        super().__init__(brain, registry, workspace)
+        self.rules: list[DesktopApprovalRule] = []
+
+    def _build_tool_gateway(self, *, budget=None):  # noqa: ANN001, ANN202
+        del budget
+        security = DesktopPathSecurity(
+            home=self._workspace.root,
+            policy_store_path=self._workspace.root / ".run" / "desktop_approvals.json",
+        )
+        return ToolGateway(
+            self.tool_registry,
+            approval_context=ApprovalContext(
+                safe_mode=True,
+                session_id="session-test",
+                approved_categories=set(),
+                execution_target="desktop",
+                desktop_policy=DesktopPolicyRuntime(self.rules),
+                desktop_security=security,
+            ),
+            workspace_access=WorkspaceAccess(self._workspace, "test-principal", "session-test"),
+        )
+
+
+def _run_preset_capturing(tmp_path: Path, monkeypatch, calls: list[ToolCall], handler=None):  # noqa: ANN001, ANN202
+    workspace, _registry = _build_browser_e2e(tmp_path)
+    registry = ToolRegistry()
+    registry.register(
+        "desktop_browser",
+        handler or _fake_browser_handler,
+        description="Fake browser tool for postcondition tests",
+        parameters_schema={"type": "object", "properties": {"operation": {"type": "string"}}},
+        capability="exec",
+        risk_classes=["network", "external_side_effect"],
+    )
+    monkeypatch.chdir(workspace.root)
+    agent = _CapturingBrowserE2EAgent(_BrowserBrain(calls), registry, workspace)
+    with workspace_root_context(workspace.root):
+        outcome = AutoPresetRunner(agent, workspace_root=workspace.root).run("browser task")
+    return outcome, agent
+
+
+def test_auto_user_response_unverified_click_is_not_success(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    # Действие выполнено, результат не подтверждён: пользователь видит
+    # UNVERIFIED-текст и не-ok статус верификатора, а не финальный
+    # текст модели «Готово».
+    outcome, agent = _run_preset_capturing(tmp_path, monkeypatch, [_click_call(), _snapshot_call()])
+
+    assert outcome.status == AutoRunStatus.COMPLETED
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.ui_label == "UNVERIFIED"
+    assert outcome.canonical_outcome.is_full_done is False
+    assert outcome.text == "Действие выполнено, результат не подтверждён"
+    assert "Готово" not in outcome.text
+    report_kwargs = agent.report_kwargs_history[-1]
+    assert report_kwargs["verifier"].ok is False
+    assert "canonical=UNVERIFIED" in report_kwargs["execution_summary"]
+    assert "verification=passed" not in report_kwargs["execution_summary"]
+
+
+def test_auto_user_response_confirmed_run_is_done(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    # Ожидаемый результат подтверждён (self-verified navigate + input):
+    # DONE, текст модели сохраняется, статус верификатора — ok.
+    outcome, agent = _run_preset_capturing(
+        tmp_path,
+        monkeypatch,
+        [
+            ToolCall(
+                id="nav-1",
+                name="desktop_browser",
+                arguments={"operation": "navigate", "url": "https://example.test/"},
+            ),
+            ToolCall(
+                id="input-1",
+                name="desktop_browser",
+                arguments={"operation": "input", "selector": "#name", "value": "x"},
+            ),
+        ],
+    )
+
+    assert outcome.status == AutoRunStatus.COMPLETED
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.ui_label == "DONE"
+    assert outcome.canonical_outcome.is_full_done is True
+    assert outcome.text == "Готово"
+    report_kwargs = agent.report_kwargs_history[-1]
+    assert report_kwargs["verifier"].ok is True
+    assert "canonical=DONE" in report_kwargs["execution_summary"]
+
+
+def test_auto_user_response_failed_click_keeps_error(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    # Действие завершилось реальной ошибкой: FAILED_WORKER с фактической
+    # причиной в stop-ответе, успех не публикуется.
+    outcome, agent = _run_preset_capturing(
+        tmp_path, monkeypatch, [_click_call()], handler=_failing_click_handler
+    )
+
+    assert outcome.status == AutoRunStatus.FAILED_WORKER
+    assert outcome.canonical_outcome is None
+    assert "Готово" not in outcome.text
+    assert "неустранённый сбой tool call" in outcome.text
+    stop_kwargs = agent.stop_kwargs_history[-1]
+    assert "verifier evidence" in stop_kwargs["why"]
+
+
+def test_auto_user_response_unverified_after_resume(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    # Resume после approval идёт через тот же _execute_frame: проекция
+    # по RunOutcome применяется и к продолженному прогону.
+    workspace, registry = _build_browser_e2e(tmp_path)
+    monkeypatch.chdir(workspace.root)
+    agent = _MutableRulesBrowserAgent(
+        _BrowserBrain([_click_call(), _snapshot_call()]), registry, workspace
+    )
+    preset = AutoPresetRunner(agent, workspace_root=workspace.root)
+    with workspace_root_context(workspace.root):
+        with pytest.raises(ApprovalRequired):
+            preset.run("browser task")
+        assert agent.last_auto_state["status"] == AutoRunStatus.WAITING_APPROVAL.value
+        agent.rules = [_allow_rule("click", "#publish", "external_side_effect")]
+        outcome = preset.resume(agent.last_auto_state["run_id"])
+
+    assert outcome.status == AutoRunStatus.COMPLETED
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.ui_label == "UNVERIFIED"
+    assert outcome.text == "Действие выполнено, результат не подтверждён"
+    assert "Готово" not in outcome.text
+    report_kwargs = agent.report_kwargs_history[-1]
+    assert report_kwargs["verifier"].ok is False
+    assert "canonical=UNVERIFIED" in report_kwargs["execution_summary"]
+
+
 # --- DesktopRuntime integration (real registry/gateway/runtime) -----------
 #
 # Rework по P2 Codex (PR #183): каноническая browser verification должна

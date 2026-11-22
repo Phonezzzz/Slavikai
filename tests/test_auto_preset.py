@@ -601,7 +601,12 @@ def test_auto_success_text_excludes_service_report(tmp_path) -> None:  # noqa: A
     assert outcome.status == AutoRunStatus.COMPLETED
     assert "Auto-run v1 завершён успешно" not in outcome.text
     assert "Tool calls:" not in outcome.text
-    assert "auto v1 final" in outcome.text
+    # Echo tool call без verifier evidence: канонический outcome —
+    # UNVERIFIED, финальный текст модели не публикуется как успех.
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.ui_label == "UNVERIFIED"
+    assert outcome.text == "Действие выполнено, результат не подтверждён"
+    assert "auto v1 final" not in outcome.text
 
 
 def test_auto_preset_parity_write_scenario(tmp_path, monkeypatch) -> None:

@@ -722,12 +722,42 @@ class AutoPresetRunner:
                 )
             self._set_status(state, AutoRunStatus.COMPLETED)
             response_only = not loop_result.tool_calls
+            # Auto-проекция по RunOutcome (решение владельца 2026-11-22,
+            # отдельный PR от main): пользовательский текст и статус
+            # верификатора выводятся из канонического RunOutcome, а не из
+            # loop_result.text и процессного verifier — как в
+            # Desktop-проекции (#183). COMPLETED — факт остановки
+            # прогона; DONE и публикацию успеха определяет только
+            # RunOutcome. COMPLETED + UNVERIFIED: действие выполнено,
+            # результат не подтверждён — без «Готово», без Verifier OK
+            # и без final_success. Фактическая причина ошибки или
+            # отмены в FAILED/CANCELLED ветках выше не переписывается.
+            user_text = loop_result.text
+            if canonical.ui_label == "UNVERIFIED":
+                user_text = "Действие выполнено, результат не подтверждён"
+            report_verifier = canonical.report_verification_result(
+                duration_seconds=(
+                    verification.duration_seconds if verification is not None else 0.0
+                )
+            )
+            execution_summary = (
+                "Модель вернула final response без tool calls."
+                if response_only
+                else (
+                    f"Native tool loop iterations={loop_result.iterations}, "
+                    f"tool_calls={len(loop_result.tool_calls)}."
+                )
+            )
+            execution_summary += (
+                f" verification={canonical.verification.outcome.value}, "
+                f"canonical={canonical.ui_label}"
+            )
             text = self.parent._append_report_block(
-                loop_result.text,
+                user_text,
                 route="auto",
                 trace_id=None,
                 attempts=(1, 1),
-                verifier=verification,
+                verifier=report_verifier,
                 next_steps=[],
                 stop_reason_code=None,
                 plan_summary=(
@@ -735,14 +765,7 @@ class AutoPresetRunner:
                     if response_only
                     else "Auto preset использовал canonical AgentToolLoop и ToolGateway."
                 ),
-                execution_summary=(
-                    "Модель вернула final response без tool calls."
-                    if response_only
-                    else (
-                        f"Native tool loop iterations={loop_result.iterations}, "
-                        f"tool_calls={len(loop_result.tool_calls)}."
-                    )
-                ),
+                execution_summary=execution_summary,
                 skill=_skill_state(state),
             )
             return AutoRunOutcome(

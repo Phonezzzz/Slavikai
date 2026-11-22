@@ -7,7 +7,7 @@ from aiohttp import web
 
 from core.agent_response import AgentResponse
 from core.auto_preset import AutoRunOutcome
-from core.mwv.models import MWV_REPORT_PREFIX
+from core.mwv.models import MWV_REPORT_PREFIX, VerificationStatus
 from shared.models import JSONValue, LLMMessage
 from shared.sanitize import safe_json_loads
 
@@ -177,19 +177,43 @@ def _project_agent_response(response: AgentResponse) -> tuple[str, dict[str, JSO
     # Остальные поля остаются legacy UI presentation, не lifecycle authority.
     projected = dict(report) if report is not None else {}
     projected["route"] = "auto"
-    projected["runtime_status"] = outcome.status.value
+    canonical = outcome.canonical_outcome
+    if canonical is not None:
+        # Канонический статус результата и проверки — из RunOutcome, а
+        # не из outcome.status и процессного verifier: COMPLETED — факт
+        # остановки прогона, DONE и публикацию успеха определяет
+        # RunOutcome. Успешный процессный verifier не даёт «ok» для
+        # неподтверждённого результата (UNVERIFIED).
+        projected["runtime_status"] = canonical.ui_label.lower()
+        report_verifier = canonical.report_verification_result(
+            duration_seconds=(
+                outcome.verifier.duration_seconds if outcome.verifier is not None else 0.0
+            )
+        )
+        projected["verifier"] = {
+            "status": (
+                "ok"
+                if report_verifier.status is VerificationStatus.PASSED
+                else "fail"
+                if report_verifier.status is VerificationStatus.FAILED
+                else "unknown"
+            ),
+            "duration_ms": (outcome.verifier.duration_ms if outcome.verifier is not None else None),
+        }
+    else:
+        projected["runtime_status"] = outcome.status.value
+        projected["verifier"] = (
+            {
+                "status": "ok" if outcome.verifier.ok else "fail",
+                "duration_ms": outcome.verifier.duration_ms,
+            }
+            if outcome.verifier is not None
+            else {"status": "unknown", "duration_ms": None}
+        )
     projected["stop_reason_code"] = (
         outcome.stop_reason_code.value if outcome.stop_reason_code is not None else None
     )
     projected["next_steps"] = list(outcome.next_steps)
-    projected["verifier"] = (
-        {
-            "status": "ok" if outcome.verifier.ok else "fail",
-            "duration_ms": outcome.verifier.duration_ms,
-        }
-        if outcome.verifier is not None
-        else {"status": "unknown", "duration_ms": None}
-    )
     return text, projected
 
 
