@@ -371,6 +371,9 @@ class PlaywrightBrowserBackend:
                 return origin_failure
             value = _required_string(request, "value", allow_empty=True)
             locator = _locator(page, request)
+            element_failure = self._element_origin_failure(locator, request)
+            if element_failure is not None:
+                return element_failure
             locator.fill(value, timeout=_timeout_ms(request))
             verified = locator.input_value(timeout=_timeout_ms(request)) == value
             if not verified:
@@ -392,7 +395,11 @@ class PlaywrightBrowserBackend:
             if origin_failure is not None:
                 return origin_failure
             value = _required_string(request, "value")
-            selected = _locator(page, request).select_option(
+            locator = _locator(page, request)
+            element_failure = self._element_origin_failure(locator, request)
+            if element_failure is not None:
+                return element_failure
+            selected = locator.select_option(
                 value=value,
                 timeout=_timeout_ms(request),
             )
@@ -849,6 +856,37 @@ class PlaywrightBrowserBackend:
             return None
         return ToolResult.failure(
             "Browser origin changed since the policy decision "
+            f"(expected {expected}, actual {actual or 'unknown'}); "
+            "the edit was not executed and policy must be re-evaluated."
+        )
+
+    def _element_origin_failure(self, locator: Locator, request: ToolRequest) -> ToolResult | None:
+        """Проверка origin документа фактически выбранного элемента.
+
+        Грант привязан к origin верхнего документа, но css-селектор с
+        переходом во фрейм (``iframe >> internal:control=enter-frame``)
+        может выбрать поле внутри iframe другого origin — проверка URL
+        страницы такой ввод не ловит. Origin читается протокольным
+        evaluate на самом элементе (``el.ownerDocument.URL``)
+        непосредственно перед fill/select_option; ошибка чтения или
+        несовпадение с origin policy-решения — fail-closed: действие не
+        выполняется, policy переоценивается.
+        """
+        expected = request.expected_browser_origin
+        if expected is None:
+            return None
+        try:
+            document_url = locator.evaluate(
+                "(el) => (el.ownerDocument ? el.ownerDocument.URL : null)",
+                timeout=_timeout_ms(request),
+            )
+        except Exception:  # noqa: BLE001 - проверка origin не должна ронять handle
+            document_url = None
+        actual = browser_origin_of_url(document_url if isinstance(document_url, str) else None)
+        if actual == expected:
+            return None
+        return ToolResult.failure(
+            "Browser target element is in a document with a different origin "
             f"(expected {expected}, actual {actual or 'unknown'}); "
             "the edit was not executed and policy must be re-evaluated."
         )

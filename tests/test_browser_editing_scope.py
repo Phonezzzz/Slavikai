@@ -529,9 +529,32 @@ def test_explicit_ask_approval_passes_confirmed_action(
 class _FakeLocator:
     def __init__(self) -> None:
         self.filled: list[str] = []
+        self.selected: list[str] = []
+        # URL документа элемента для evaluate(ownerDocument.URL); None —
+        # документ страницы (page._fresh_url). raise_on_evaluate — сбой
+        # протокольного чтения origin.
+        self.document_url: str | None = None
+        self.raise_on_evaluate = False
+        self.page: _FakePage | None = None
+
+    def __call__(self, selector: str) -> _FakeLocator:
+        # page.locator(selector) при selector_type="css".
+        return self
+
+    def evaluate(self, expression: str, timeout: float | None = None) -> str | None:
+        if self.raise_on_evaluate:
+            raise RuntimeError("evaluate failed")
+        if self.document_url is not None:
+            return self.document_url
+        return self.page._fresh_url if self.page is not None else None
 
     def fill(self, value: str, timeout: int | None = None) -> None:
         self.filled.append(value)
+
+    def select_option(self, value: str | None = None, timeout: int | None = None) -> list[str]:
+        if value is not None:
+            self.selected.append(value)
+        return self.selected
 
     def input_value(self, timeout: int | None = None) -> str:
         return self.filled[-1] if self.filled else ""
@@ -544,6 +567,7 @@ class _FakePage:
         self.url = cached_url
         self._fresh_url = fresh_url
         self.locator = _FakeLocator()
+        self.locator.page = self
 
     def evaluate(self, expression: str) -> str:
         assert expression == "window.location.href"
@@ -622,3 +646,73 @@ def test_exact_allow_with_origin_beats_concrete_ask(tmp_path: Path) -> None:
     context = _context(tmp_path, rules=[exact_allow, _card_ask_rule()])
     decision, _ = decide_request(context=context, request=_input_request("#card"))
     assert decision.status == "allow"
+
+
+# --- Rework round 2 (finding Codex P1 по PR #187) ---
+
+
+def test_backend_rejects_edit_in_cross_origin_iframe(tmp_path: Path) -> None:
+    # P1: грант на верхний документ example.test не покрывает поле в
+    # iframe other.test — origin документа элемента проверяется перед fill.
+    page = _FakePage(
+        cached_url="https://example.test/form",
+        fresh_url="https://example.test/form",
+    )
+    page.locator.document_url = "https://other.test/frame"
+    backend = _backend_with_page(tmp_path, page)
+    request = ToolRequest(
+        "desktop_browser",
+        {
+            "operation": "input",
+            "selector_type": "css",
+            "selector": "iframe >> internal:control=enter-frame >> input",
+            "value": "x",
+        },
+        expected_browser_origin=ORIGIN,
+    )
+    result = backend.handle(request)
+    assert not result.ok
+    assert "different origin" in (result.error or "")
+    assert page.locator.filled == []
+
+    # Поле в документе того же origin по гранту работает как прежде.
+    page.locator.document_url = "https://example.test/frame"
+    result = backend.handle(request)
+    assert result.ok
+    assert page.locator.filled == ["x"]
+
+
+def test_backend_rejects_select_in_cross_origin_iframe(tmp_path: Path) -> None:
+    page = _FakePage(
+        cached_url="https://example.test/form",
+        fresh_url="https://example.test/form",
+    )
+    page.locator.document_url = "https://other.test/frame"
+    backend = _backend_with_page(tmp_path, page)
+    request = ToolRequest(
+        "desktop_browser",
+        {"operation": "select", "selector": "#country", "value": "LT"},
+        expected_browser_origin=ORIGIN,
+    )
+    result = backend.handle(request)
+    assert not result.ok
+    assert "different origin" in (result.error or "")
+    assert page.locator.selected == []
+
+
+def test_backend_element_origin_check_is_fail_closed(tmp_path: Path) -> None:
+    # Origin документа элемента прочитать нельзя — ввод не выполняется.
+    page = _FakePage(
+        cached_url="https://example.test/form",
+        fresh_url="https://example.test/form",
+    )
+    page.locator.raise_on_evaluate = True
+    backend = _backend_with_page(tmp_path, page)
+    request = ToolRequest(
+        "desktop_browser",
+        {"operation": "input", "selector": "#name", "value": "x"},
+        expected_browser_origin=ORIGIN,
+    )
+    result = backend.handle(request)
+    assert not result.ok
+    assert page.locator.filled == []
