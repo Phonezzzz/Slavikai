@@ -147,6 +147,50 @@ class Verification:
         return cls(outcome=VerificationOutcome.UNKNOWN, source=source)
 
 
+def combine_verification_results(
+    primary: VerificationResult | None,
+    browser: VerificationResult | None,
+    *,
+    primary_name: str = "verifier",
+    browser_name: str = "browser_postconditions",
+) -> Verification | None:
+    """Скомбинировать основную и browser верификации для канонического outcome.
+
+    PASSED только если каждая применимая проверка PASSED: успешная
+    основная проверка не перекрывает неподтверждённый browser
+    postcondition (E02-T06, семантика B). FAILED любой проверки ->
+    FAILED (UNVERIFIED в канонической деривации); ERROR (unknown) без
+    FAILED -> unknown. Без browser-результата основная проверка
+    возвращается как есть.
+    """
+    if browser is None:
+        if primary is None:
+            return None
+        return Verification.from_verification_result(primary)
+    checks: list[PostconditionCheck] = []
+    outcomes: list[VerificationOutcome] = []
+    if primary is not None:
+        primary_verification = Verification.from_verification_result(primary)
+        outcomes.append(primary_verification.outcome)
+        checks.extend(
+            PostconditionCheck(name=primary_name, passed=check.passed, detail=check.detail)
+            for check in primary_verification.checks
+        )
+    browser_verification = Verification.from_verification_result(browser)
+    outcomes.append(browser_verification.outcome)
+    checks.extend(
+        PostconditionCheck(name=browser_name, passed=check.passed, detail=check.detail)
+        for check in browser_verification.checks
+    )
+    if VerificationOutcome.FAILED in outcomes:
+        outcome = VerificationOutcome.FAILED
+    elif VerificationOutcome.UNKNOWN in outcomes:
+        outcome = VerificationOutcome.UNKNOWN
+    else:
+        outcome = VerificationOutcome.PASSED
+    return Verification(outcome=outcome, checks=tuple(checks), source="canonical_verification")
+
+
 @dataclass(frozen=True)
 class RunOutcome:
     """One canonical outcome for a run.

@@ -15,6 +15,12 @@ from core.mwv.models import VerificationResult, VerificationStatus
 from core.mwv.verifier_runtime import VerifierRuntime
 from core.response_preferences import ResponsePreferences, compose_response_preferences
 from core.run_contract import RunBudget
+from core.run_outcome import (
+    RunOutcome,
+    Verification,
+    combine_verification_results,
+    outcome_from_loop_result,
+)
 from core.tool_gateway import ToolGateway
 from core.tool_loop import (
     AgentToolLoop,
@@ -127,6 +133,10 @@ class DesktopRunOutcome:
     text: str
     verification: VerificationResult
     loop_result: AgentToolLoopResult
+    # Канонический outcome (ADR-0002), выведенный из loop result и
+    # комбинированной верификации (desktop observations + browser
+    # postconditions). None только если деривация не запускалась.
+    canonical_outcome: RunOutcome | None = None
 
 
 class DesktopContinuationUnavailable(ValueError):
@@ -196,6 +206,7 @@ class DesktopRuntime:
                     text="Desktop task stopped: another Desktop run is active.",
                     verification=verification,
                     loop_result=empty,
+                    canonical_outcome=self._derive_canonical_outcome(empty, None, ()),
                 )
             self._lease_held = True
             try:
@@ -441,6 +452,7 @@ class DesktopRuntime:
                 text=f"Desktop: {capability.reason}",
                 verification=verification,
                 loop_result=empty,
+                canonical_outcome=self._derive_canonical_outcome(empty, None, ()),
             )
         run_budget = RunBudget(max_iterations=self.max_iterations)
         gateway = self.parent._build_tool_gateway(budget=run_budget)
@@ -457,15 +469,20 @@ class DesktopRuntime:
                 text="Desktop tool registry is unavailable.",
                 verification=verification,
                 loop_result=empty,
+                canonical_outcome=self._derive_canonical_outcome(empty, None, ()),
             )
         tool_specs_raw = list_specs(policy=gateway.run_policy)
         tool_specs: list[ToolSpec] = [item for item in tool_specs_raw if isinstance(item, ToolSpec)]
+
+        gate_errors: list[str] = []
 
         def _final_gate(calls: Sequence[ExecutedToolCall]) -> str | None:
             verification = self._verify(list(calls))
             if verification.status == VerificationStatus.PASSED:
                 return None
-            return verification.error or verification.excerpt or "desktop_verification_failed"
+            error = verification.error or verification.excerpt or "desktop_verification_failed"
+            gate_errors.append(error)
+            return error
 
         self.parent.desktop_execution_control.bind(cancellation_token)
         try:
@@ -514,7 +531,25 @@ class DesktopRuntime:
             if self._paused is None:
                 self._close_resources()
                 self.parent.desktop_execution_control.clear()
-        verification = self._verify(loop_result.tool_calls)
+        observations = [
+            (item.call.name, dict(item.call.arguments), item.result)
+            for item in loop_result.tool_calls
+        ]
+        verification = self.verifier.verify_desktop_observations(observations)
+        # E02-T06 (семантика B): browser postconditions проверяются на
+        # реальном desktop-пути и подключаются только к канонической
+        # деривации. Неподтверждённый click/submit даёт UNVERIFIED, а
+        # не DONE и не ошибку выполнения.
+        browser_verification = self.verifier.verify_browser_postconditions(observations)
+        canonical_outcome = self._derive_canonical_outcome(
+            loop_result,
+            combine_verification_results(
+                verification,
+                browser_verification,
+                primary_name="desktop_observations",
+            ),
+            gate_errors,
+        )
         if loop_result.cancelled:
             cleanup = self._cleanup_unverified_launches(gateway)
             cleanup_suffix = _cleanup_failure_suffix(cleanup)
@@ -522,6 +557,7 @@ class DesktopRuntime:
                 text=f"Desktop task cancelled before further host actions.{cleanup_suffix}",
                 verification=_failed_verification("desktop_task_cancelled"),
                 loop_result=loop_result,
+                canonical_outcome=canonical_outcome,
             )
         if loop_result.error is not None or verification.status != VerificationStatus.PASSED:
             cleanup = self._cleanup_unverified_launches(gateway)
@@ -530,14 +566,43 @@ class DesktopRuntime:
                 text=f"Desktop task stopped: {reason}{_cleanup_failure_suffix(cleanup)}",
                 verification=verification,
                 loop_result=loop_result,
+                canonical_outcome=canonical_outcome,
             )
         text = loop_result.text.strip() or "Desktop task completed and verified."
         self.parent.desktop_execution_control.drain_launches()
-        return DesktopRunOutcome(text=text, verification=verification, loop_result=loop_result)
+        return DesktopRunOutcome(
+            text=text,
+            verification=verification,
+            loop_result=loop_result,
+            canonical_outcome=canonical_outcome,
+        )
 
     def _verify(self, calls: list[ExecutedToolCall]) -> VerificationResult:
         observations = [(item.call.name, dict(item.call.arguments), item.result) for item in calls]
         return self.verifier.verify_desktop_observations(observations)
+
+    def _derive_canonical_outcome(
+        self,
+        loop_result: AgentToolLoopResult,
+        combined_verification: Verification | None,
+        gate_errors: Sequence[str],
+    ) -> RunOutcome:
+        """Канонический outcome desktop-run (ADR-0002, E02-T06 семантика B).
+
+        Исчерпание final_gate (loop остановился только потому, что
+        gate отклонил финальный ответ) не подменяет отсутствие
+        подтверждения ошибкой выполнения: работа выполнена, результат
+        не подтверждён — деривация идёт как по чистому финишу и даёт
+        UNVERIFIED, а не FAILED.
+        """
+        effective = loop_result
+        if loop_result.error is not None and gate_errors and loop_result.error == gate_errors[-1]:
+            effective = replace(loop_result, error=None)
+        return outcome_from_loop_result(
+            effective,
+            state_changing=bool(loop_result.tool_calls),
+            verification=combined_verification,
+        )
 
     def _cleanup_unverified_launches(self, gateway: ToolGateway) -> ToolResult:
         result = gateway.call(ToolRequest("desktop_cleanup_unverified_launches", {}))

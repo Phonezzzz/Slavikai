@@ -69,11 +69,10 @@ from core.mwv.verifier_summary import extract_verifier_excerpt
 from core.response_preferences import compose_response_preferences
 from core.run_contract import RunBudget
 from core.run_outcome import (
-    PostconditionCheck,
     RunOutcome,
     TerminalReason,
     Verification,
-    VerificationOutcome,
+    combine_verification_results,
     outcome_from_loop_result,
 )
 from core.skills.index import SkillResolution
@@ -1168,32 +1167,11 @@ def _canonical_verification(
     ERROR без FAILED -> unknown. Без browser-результата поведение
     прежнее: процессный результат как есть.
     """
-    if browser_result is None:
-        if process_result is None:
-            return None
-        return Verification.from_verification_result(process_result)
-    checks: list[PostconditionCheck] = []
-    outcomes: list[VerificationOutcome] = []
-    if process_result is not None:
-        process_verification = Verification.from_verification_result(process_result)
-        outcomes.append(process_verification.outcome)
-        checks.extend(
-            PostconditionCheck(name="process_verifier", passed=check.passed, detail=check.detail)
-            for check in process_verification.checks
-        )
-    browser_verification = Verification.from_verification_result(browser_result)
-    outcomes.append(browser_verification.outcome)
-    checks.extend(
-        PostconditionCheck(name="browser_postconditions", passed=check.passed, detail=check.detail)
-        for check in browser_verification.checks
+    return combine_verification_results(
+        process_result,
+        browser_result,
+        primary_name="process_verifier",
     )
-    if VerificationOutcome.FAILED in outcomes:
-        outcome = VerificationOutcome.FAILED
-    elif VerificationOutcome.UNKNOWN in outcomes:
-        outcome = VerificationOutcome.UNKNOWN
-    else:
-        outcome = VerificationOutcome.PASSED
-    return Verification(outcome=outcome, checks=tuple(checks), source="canonical_verification")
 
 
 def _has_failed_tool_call(tool_calls: list[ExecutedToolCall]) -> bool:

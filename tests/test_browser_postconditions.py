@@ -17,18 +17,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from core.approval_policy import ApprovalContext
+import pytest
+
+from core.approval_policy import ApprovalContext, ApprovalRequired
 from core.auto_preset import (
     AutoPresetRunner,
     _browser_postcondition_result,
     _canonical_verification,
 )
 from core.desktop_policy import DesktopApprovalRule, DesktopApprovalScope, DesktopPolicyRuntime
+from core.desktop_runtime import DesktopExecutionControl, DesktopRuntime
 from core.desktop_security import DesktopPathSecurity
 from core.managed_workspace import ManagedWorkspace, WorkspaceAccess
 from core.mwv.models import VerificationResult, VerificationStatus
 from core.mwv.verifier_runtime import VerifierRuntime
-from core.run_outcome import VerificationOutcome, outcome_from_loop_result
+from core.response_preferences import ResponsePreferences
+from core.run_contract import RunPolicy
+from core.run_outcome import TerminalReason, VerificationOutcome, outcome_from_loop_result
 from core.tool_gateway import ToolGateway
 from core.tool_loop import AgentToolLoopResult, ExecutedToolCall
 from llm.brain_base import Brain
@@ -468,3 +473,194 @@ def test_preset_self_verified_browser_run_is_done(tmp_path, monkeypatch) -> None
     assert outcome.canonical_outcome is not None
     assert outcome.canonical_outcome.ui_label == "DONE"
     assert outcome.canonical_outcome.is_full_done is True
+
+
+# --- DesktopRuntime integration (real registry/gateway/runtime) -----------
+#
+# Rework по P2 Codex (PR #183): каноническая browser verification должна
+# работать на реальном production-пути ToolRegistry -> ToolGateway ->
+# DesktopRuntime, а не только в AutoPresetRunner с подменённым
+# desktop-контекстом. Gateway здесь строится как в production Agent:
+# ApprovalContext(execution_target="desktop", desktop_policy=...) +
+# RunPolicy(mode="desktop", execution_target="desktop"); desktop_browser
+# зарегистрирован только для desktop target. Никакого monkeypatch
+# execution target или policy.
+
+
+class _DesktopBrowserParent:
+    """Родитель DesktopRuntime с production-формой gateway (desktop target)."""
+
+    response_preferences = ResponsePreferences()
+
+    def __init__(self, brain, registry, workspace_root, rules):  # noqa: ANN001
+        self.brain = brain
+        self.tool_registry = registry
+        self.main_config = None
+        self.desktop_execution_control = DesktopExecutionControl()
+        self._workspace_root = workspace_root
+        self._rules = rules
+
+    def _get_main_brain(self):  # noqa: ANN202
+        return self.brain
+
+    def _build_tool_gateway(self, *, budget=None):  # noqa: ANN001, ANN202
+        del budget
+        security = DesktopPathSecurity(
+            home=self._workspace_root,
+            policy_store_path=self._workspace_root / ".run" / "desktop_approvals.json",
+        )
+        return ToolGateway(
+            self.tool_registry,
+            approval_context=ApprovalContext(
+                safe_mode=True,
+                session_id="session-test",
+                approved_categories=set(),
+                execution_target="desktop",
+                desktop_policy=DesktopPolicyRuntime(self._rules),
+                desktop_security=security,
+            ),
+            run_policy=RunPolicy(mode="desktop", execution_target="desktop"),
+        )
+
+
+def _desktop_browser_registry() -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register(
+        "desktop_browser",
+        _fake_browser_handler,
+        description="Fake browser tool for postcondition tests",
+        parameters_schema={"type": "object", "properties": {"operation": {"type": "string"}}},
+        capability="exec",
+        risk_classes=["network", "external_side_effect"],
+        execution_targets={"desktop"},
+    )
+    return registry
+
+
+def _run_desktop_browser(tmp_path: Path, calls: list[ToolCall], rules):  # noqa: ANN001, ANN202
+    parent = _DesktopBrowserParent(
+        _BrowserBrain(calls), _desktop_browser_registry(), tmp_path, rules
+    )
+    runtime = DesktopRuntime(parent)
+    try:
+        return runtime.run("browser task")
+    finally:
+        runtime.close()
+
+
+def test_desktop_runtime_click_with_snapshot_is_unverified(tmp_path: Path) -> None:
+    outcome = _run_desktop_browser(
+        tmp_path,
+        [
+            ToolCall(
+                id="click-1",
+                name="desktop_browser",
+                arguments={"operation": "click", "selector": "#publish"},
+            ),
+            ToolCall(
+                id="snap-1",
+                name="desktop_browser",
+                arguments={"operation": "snapshot", "page_id": PAGE},
+            ),
+        ],
+        [_allow_rule("click", "#publish", "external_side_effect")],
+    )
+
+    # Desktop gate (re-observation) проходит, но канонический outcome —
+    # UNVERIFIED: snapshot доказывает факт наблюдения, а не результат
+    # клика. Не DONE и не FAILED_VERIFIER.
+    assert outcome.verification.ok
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.terminal_reason is TerminalReason.COMPLETED
+    assert outcome.canonical_outcome.ui_label == "UNVERIFIED"
+    assert outcome.canonical_outcome.is_full_done is False
+
+
+def test_desktop_runtime_self_verified_browser_run_is_done(tmp_path: Path) -> None:
+    outcome = _run_desktop_browser(
+        tmp_path,
+        [
+            ToolCall(
+                id="nav-1",
+                name="desktop_browser",
+                arguments={"operation": "navigate", "url": "https://example.test/"},
+            ),
+            ToolCall(
+                id="input-1",
+                name="desktop_browser",
+                arguments={"operation": "input", "selector": "#name", "value": "x"},
+            ),
+        ],
+        [_allow_rule("input", "#name", "local_mutation")],
+    )
+
+    assert outcome.verification.ok
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.ui_label == "DONE"
+    assert outcome.canonical_outcome.is_full_done is True
+
+
+def test_desktop_runtime_click_without_observation_gate_exhaustion_is_unverified(
+    tmp_path: Path,
+) -> None:
+    # Модель кликает и пытается завершить без re-observation: final_gate
+    # отклоняет финальный ответ до исчерпания итераций. Отсутствие
+    # подтверждения не должно подменяться ошибкой выполнения:
+    # канонический outcome — UNVERIFIED (COMPLETED), а не FAILED.
+    outcome = _run_desktop_browser(
+        tmp_path,
+        [
+            ToolCall(
+                id="click-1",
+                name="desktop_browser",
+                arguments={"operation": "click", "selector": "#publish"},
+            ),
+        ],
+        [_allow_rule("click", "#publish", "external_side_effect")],
+    )
+
+    assert outcome.loop_result.error is not None
+    assert not outcome.verification.ok
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.terminal_reason is TerminalReason.COMPLETED
+    assert outcome.canonical_outcome.ui_label == "UNVERIFIED"
+    assert outcome.canonical_outcome.is_full_done is False
+
+
+def test_desktop_runtime_click_without_allow_rule_requires_approval(tmp_path: Path) -> None:
+    parent = _DesktopBrowserParent(
+        _BrowserBrain(
+            [
+                ToolCall(
+                    id="click-1",
+                    name="desktop_browser",
+                    arguments={"operation": "click", "selector": "#publish"},
+                )
+            ]
+        ),
+        _desktop_browser_registry(),
+        tmp_path,
+        [],
+    )
+    runtime = DesktopRuntime(parent)
+    try:
+        with pytest.raises(ApprovalRequired):
+            runtime.run("browser task")
+    finally:
+        runtime.close()
+
+
+def test_sandbox_gateway_cannot_call_desktop_browser() -> None:
+    registry = _desktop_browser_registry()
+    sandbox_policy = RunPolicy(mode="auto", execution_target="sandbox")
+    desktop_policy = RunPolicy(mode="desktop", execution_target="desktop")
+
+    sandbox_specs = {spec.name for spec in registry.list_tool_specs(policy=sandbox_policy)}
+    desktop_specs = {spec.name for spec in registry.list_tool_specs(policy=desktop_policy)}
+    assert "desktop_browser" not in sandbox_specs
+    assert "desktop_browser" in desktop_specs
+
+    gateway = ToolGateway(registry, run_policy=sandbox_policy)
+    result = gateway.call(ToolRequest("desktop_browser", {"operation": "snapshot"}))
+    assert not result.ok
+    assert "EXECUTION_TARGET_BLOCK" in (result.error or "")

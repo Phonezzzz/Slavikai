@@ -17,6 +17,7 @@ from core.approval_policy import ApprovalRequired
 from core.decision.handler import DecisionContext
 from core.decision.memory_save import build_memory_save_packet
 from core.mwv.models import StopReasonCode
+from core.run_outcome import TerminalReason
 from core.skills.index import SkillMatchDecision
 from core.tool_loop import AgentToolLoop, AgentToolLoopResult, ToolLoopExecutionError
 from core.user_auth import UserAuthRequest, UserAuthRequired
@@ -768,10 +769,22 @@ class AgentRoutingMixin:
 
     def _project_desktop_outcome(self, outcome: DesktopRunOutcome) -> str:
         self.last_plan_summary = "Desktop использовал native tool loop для host execution."
+        canonical = outcome.canonical_outcome
         self.last_execution_summary = (
             f"tool_calls={len(outcome.loop_result.tool_calls)}, "
             f"iterations={outcome.loop_result.iterations}, "
             f"verification={outcome.verification.status.value}"
+            + (f", canonical={canonical.ui_label}" if canonical is not None else "")
+        )
+        # E02-T06: канонический COMPLETED (включая UNVERIFIED —
+        # выполненный, но неподтверждённый результат) не является
+        # VERIFIER_FAILED; отсутствие подтверждения не подменяется
+        # ошибкой выполнения.
+        stop_reason_code = (
+            None
+            if (canonical is not None and canonical.terminal_reason is TerminalReason.COMPLETED)
+            or (outcome.verification.ok and outcome.loop_result.error is None)
+            else StopReasonCode.VERIFIER_FAILED
         )
         response = self._append_report_block(
             outcome.text,
@@ -780,11 +793,7 @@ class AgentRoutingMixin:
             attempts=(1, 1),
             verifier=outcome.verification,
             next_steps=[],
-            stop_reason_code=(
-                None
-                if outcome.verification.ok and outcome.loop_result.error is None
-                else StopReasonCode.VERIFIER_FAILED
-            ),
+            stop_reason_code=stop_reason_code,
             plan_summary=self.last_plan_summary,
             execution_summary=self.last_execution_summary,
         )
