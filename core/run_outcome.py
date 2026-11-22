@@ -326,6 +326,48 @@ class RunOutcome:
             text += f" (accepted by {self.accepted_by})"
         return text
 
+    def report_verification_result(self, *, duration_seconds: float = 0.0) -> VerificationResult:
+        """User-facing verifier status derived from the canonical outcome.
+
+        The report shape is the legacy MWV ``VerificationResult``; the
+        status is a pure projection of this outcome, never of a separate
+        gate result: PASSED ("ok") only for full DONE, FAILED when the
+        canonical verification failed, ERROR otherwise — absence of
+        confirmation is never reported as ok (E02-T06: a completed but
+        unconfirmed browser result must not surface as Verifier OK).
+        """
+        if self.is_full_done:
+            status = VerificationStatus.PASSED
+        elif self.verification.outcome is VerificationOutcome.FAILED:
+            status = VerificationStatus.FAILED
+        else:
+            status = VerificationStatus.ERROR
+        detail = "; ".join(
+            f"{check.name}: {check.detail}" if check.detail else check.name
+            for check in self.verification.checks
+        )
+        return VerificationResult(
+            status=status,
+            command=[],
+            exit_code=(
+                0
+                if status is VerificationStatus.PASSED
+                else 1
+                if status is VerificationStatus.FAILED
+                else None
+            ),
+            stdout="",
+            stderr="" if status is VerificationStatus.PASSED else detail,
+            duration_seconds=duration_seconds,
+            error=(
+                None
+                if status is VerificationStatus.PASSED
+                else detail or self.verification.outcome.value
+            ),
+            excerpt=detail or None,
+            verifier_profile="canonical_outcome",
+        )
+
 
 def outcome_from_mwv(
     work_status: WorkStatus,

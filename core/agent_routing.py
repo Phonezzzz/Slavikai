@@ -770,10 +770,28 @@ class AgentRoutingMixin:
     def _project_desktop_outcome(self, outcome: DesktopRunOutcome) -> str:
         self.last_plan_summary = "Desktop использовал native tool loop для host execution."
         canonical = outcome.canonical_outcome
+        # E02-T06: пользовательский текст, статус верификатора и сводка
+        # проверки выводятся из канонического RunOutcome, а не из
+        # отдельного desktop gate результата. COMPLETED — факт остановки
+        # прогона; DONE и публикацию успеха определяет только RunOutcome.
+        # COMPLETED + UNVERIFIED: действие выполнено, результат не
+        # подтверждён — без «Готово», без Verifier OK и без final_success.
+        # Фактическая причина ошибки или отмены сохраняется в тексте
+        # DesktopRuntime и здесь не переписывается.
+        text = outcome.text
+        report_verifier = outcome.verification
+        verification_label = outcome.verification.status.value
+        if canonical is not None:
+            report_verifier = canonical.report_verification_result(
+                duration_seconds=outcome.verification.duration_seconds
+            )
+            verification_label = canonical.verification.outcome.value
+            if canonical.ui_label == "UNVERIFIED":
+                text = "Действие выполнено, результат не подтверждён"
         self.last_execution_summary = (
             f"tool_calls={len(outcome.loop_result.tool_calls)}, "
             f"iterations={outcome.loop_result.iterations}, "
-            f"verification={outcome.verification.status.value}"
+            f"verification={verification_label}"
             + (f", canonical={canonical.ui_label}" if canonical is not None else "")
         )
         # E02-T06: канонический COMPLETED (включая UNVERIFIED —
@@ -787,11 +805,11 @@ class AgentRoutingMixin:
             else StopReasonCode.VERIFIER_FAILED
         )
         response = self._append_report_block(
-            outcome.text,
+            text,
             route="desktop",
             trace_id=None,
             attempts=(1, 1),
-            verifier=outcome.verification,
+            verifier=report_verifier,
             next_steps=[],
             stop_reason_code=stop_reason_code,
             plan_summary=self.last_plan_summary,

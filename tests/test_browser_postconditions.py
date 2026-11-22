@@ -15,21 +15,30 @@ UNVERIFIED, а self-verified операции (navigate/input/select/download)
 
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
 
 import pytest
 
+from core.agent import Agent
+from core.agent_response import ResponseProduced
 from core.approval_policy import ApprovalContext, ApprovalRequired
 from core.auto_preset import (
     AutoPresetRunner,
     _browser_postcondition_result,
     _canonical_verification,
 )
-from core.desktop_policy import DesktopApprovalRule, DesktopApprovalScope, DesktopPolicyRuntime
+from core.desktop_policy import (
+    DesktopApprovalRule,
+    DesktopApprovalScope,
+    DesktopPolicyRuntime,
+    DesktopPolicyStore,
+)
 from core.desktop_runtime import DesktopExecutionControl, DesktopRuntime
 from core.desktop_security import DesktopPathSecurity
 from core.managed_workspace import ManagedWorkspace, WorkspaceAccess
-from core.mwv.models import VerificationResult, VerificationStatus
+from core.mwv.models import MWV_REPORT_PREFIX, VerificationResult, VerificationStatus
 from core.mwv.verifier_runtime import VerifierRuntime, desktop_last_state_change_succeeded
 from core.response_preferences import ResponsePreferences
 from core.run_contract import RunPolicy
@@ -37,9 +46,11 @@ from core.run_outcome import TerminalReason, VerificationOutcome, outcome_from_l
 from core.tool_gateway import ToolGateway
 from core.tool_loop import AgentToolLoopResult, ExecutedToolCall
 from llm.brain_base import Brain
+from llm.stream_model import TextDelta
 from llm.types import LLMResult, LLMUsage, ToolCall
+from server.http.handlers.ui_chat import _iterate_stream_in_thread
 from shared.auto_models import AutoRunStatus
-from shared.models import JSONValue, ToolRequest, ToolResult
+from shared.models import JSONValue, LLMMessage, ToolRequest, ToolResult
 from tests.test_canonical_loop_e2e import _E2EAgent
 from tools.tool_registry import ToolRegistry
 from tools.workspace_tools import workspace_root_context
@@ -814,3 +825,207 @@ def test_desktop_runtime_failed_click_then_unconfirmed_click_is_unverified(
     assert outcome.canonical_outcome.terminal_reason is TerminalReason.COMPLETED
     assert outcome.canonical_outcome.ui_label == "UNVERIFIED"
     assert outcome.canonical_outcome.is_full_done is False
+
+
+# --- Пользовательский ответ Desktop из канонического outcome ---------------
+# Регрессия аудита на d7d5982: click -> snapshot давал canonical
+# UNVERIFIED, но пользователю уходили «Готово» и verifier status ok из
+# desktop gate результата. Проекция _project_desktop_outcome обязана
+# выводить текст, статус верификатора и сводку проверки из
+# canonical_outcome во всех путях: обычный ответ, streaming (первый
+# TextDelta) и resume после approval сходятся в _finalize_desktop_response.
+
+
+class _DesktopBrowserAgent(Agent):
+    """Полный Agent с fake desktop_browser для проекционных регрессий."""
+
+    def __init__(self, home: Path, calls: list[ToolCall], handler=None) -> None:  # noqa: ANN001
+        super().__init__(
+            brain=_BrowserBrain(calls),
+            desktop_home=home,
+            desktop_policy_store=DesktopPolicyStore(home / ".config/slavik/policy.json"),
+        )
+        self.tool_registry.register(
+            "desktop_browser",
+            handler or _fake_browser_handler,
+            enabled=True,
+            capability="exec",
+            risk_classes=["network", "external_side_effect"],
+            execution_targets={"desktop"},
+            description="Fake browser tool for projection tests",
+            parameters_schema={
+                "type": "object",
+                "properties": {"operation": {"type": "string"}},
+            },
+        )
+
+
+def _split_user_response(text: str) -> tuple[str, dict]:
+    marker = text.rfind(MWV_REPORT_PREFIX)
+    assert marker >= 0, "MWV report block missing"
+    report = json.loads(text[marker + len(MWV_REPORT_PREFIX) :])
+    return text[:marker].rstrip(), report
+
+
+def _run_desktop_agent_response(tmp_path, monkeypatch, calls, entry, rules, handler=None):  # noqa: ANN001, ANN202
+    monkeypatch.chdir(tmp_path)
+    agent = _DesktopBrowserAgent(tmp_path, calls, handler=handler)
+    agent.set_session_context("session", set())
+    agent.set_runtime_state(
+        mode="desktop", active_plan=None, active_task=None, enforce_plan_guard=False
+    )
+    first_delta = None
+    try:
+        if entry == "resume":
+            paused = agent.respond([LLMMessage(role="user", content="browser task")])
+            assert paused.runtime_result is None
+            identity = agent.last_approval_resume_payload["continuation_id"]
+            agent.set_desktop_policy_context(rules, "local")
+            response = agent.resume_chat_approval(identity)
+        elif entry == "stream":
+            agent.set_desktop_policy_context(rules, "local")
+
+            async def consume():  # noqa: ANN202
+                return [
+                    event
+                    async for event in _iterate_stream_in_thread(
+                        agent.respond_stream([LLMMessage(role="user", content="browser task")]),
+                        asyncio.Event(),
+                    )
+                ]
+
+            events = asyncio.run(consume())
+            deltas = [event for event in events if isinstance(event, TextDelta)]
+            assert deltas, "streaming must emit a TextDelta"
+            first_delta = deltas[0].text
+            produced = [event.response for event in events if isinstance(event, ResponseProduced)]
+            assert len(produced) == 1
+            response = produced[0]
+        else:
+            agent.set_desktop_policy_context(rules, "local")
+            response = agent.respond([LLMMessage(role="user", content="browser task")])
+        return response, first_delta
+    finally:
+        agent.close()
+
+
+def _click_call() -> ToolCall:
+    return ToolCall(
+        id="click-1",
+        name="desktop_browser",
+        arguments={"operation": "click", "selector": "#publish"},
+    )
+
+
+def _snapshot_call() -> ToolCall:
+    return ToolCall(
+        id="snap-1",
+        name="desktop_browser",
+        arguments={"operation": "snapshot", "page_id": PAGE},
+    )
+
+
+@pytest.mark.parametrize("entry", ["sync", "stream", "resume"])
+def test_desktop_user_response_unverified_click_is_not_success(
+    tmp_path,
+    monkeypatch,
+    entry,  # noqa: ANN001
+) -> None:
+    # Действие выполнено, результат не подтверждён: пользователь видит
+    # UNVERIFIED-текст и не-ok статус верификатора, а не «Готово» +
+    # Verifier OK из desktop gate. Desktop gate при этом PASSED.
+    response, first_delta = _run_desktop_agent_response(
+        tmp_path,
+        monkeypatch,
+        [_click_call(), _snapshot_call()],
+        entry,
+        [_allow_rule("click", "#publish", "external_side_effect")],
+    )
+
+    outcome = response.runtime_result
+    assert outcome.verification.ok  # desktop gate (re-observation) проходит
+    canonical = outcome.canonical_outcome
+    assert canonical is not None
+    assert canonical.ui_label == "UNVERIFIED"
+    assert canonical.is_full_done is False
+
+    user_text, report = _split_user_response(response.text)
+    assert user_text == "Действие выполнено, результат не подтверждён"
+    assert report["verifier"]["status"] != "ok"
+    assert "canonical=UNVERIFIED" in report["execution_summary"]
+    assert "verification=passed" not in report["execution_summary"]
+    if first_delta is not None:
+        delta_text, delta_report = _split_user_response(first_delta)
+        assert delta_text == "Действие выполнено, результат не подтверждён"
+        assert delta_report["verifier"]["status"] != "ok"
+
+
+@pytest.mark.parametrize("entry", ["sync", "resume"])
+def test_desktop_user_response_failed_click_keeps_original_error(
+    tmp_path,
+    monkeypatch,
+    entry,  # noqa: ANN001
+) -> None:
+    # Действие завершилось реальной ошибкой: FAILED с исходной причиной
+    # в пользовательском тексте, статус верификатора — fail.
+    response, _ = _run_desktop_agent_response(
+        tmp_path,
+        monkeypatch,
+        [_click_call()],
+        entry,
+        [_allow_rule("click", "#publish", "external_side_effect")],
+        handler=_failing_click_handler,
+    )
+
+    outcome = response.runtime_result
+    canonical = outcome.canonical_outcome
+    assert canonical is not None
+    assert canonical.ui_label == "FAILED"
+
+    user_text, report = _split_user_response(response.text)
+    assert "locator timeout" in user_text
+    assert report["verifier"]["status"] == "fail"
+    assert "canonical=FAILED" in report["execution_summary"]
+
+
+@pytest.mark.parametrize("entry", ["sync", "stream"])
+def test_desktop_user_response_confirmed_run_is_done(
+    tmp_path,
+    monkeypatch,
+    entry,  # noqa: ANN001
+) -> None:
+    # Ожидаемый результат подтверждён (self-verified navigate + input):
+    # DONE, текст модели сохраняется, статус верификатора — ok.
+    response, first_delta = _run_desktop_agent_response(
+        tmp_path,
+        monkeypatch,
+        [
+            ToolCall(
+                id="nav-1",
+                name="desktop_browser",
+                arguments={"operation": "navigate", "url": "https://example.test/"},
+            ),
+            ToolCall(
+                id="input-1",
+                name="desktop_browser",
+                arguments={"operation": "input", "selector": "#name", "value": "x"},
+            ),
+        ],
+        entry,
+        [_allow_rule("input", "#name", "local_mutation")],
+    )
+
+    outcome = response.runtime_result
+    canonical = outcome.canonical_outcome
+    assert canonical is not None
+    assert canonical.ui_label == "DONE"
+    assert canonical.is_full_done is True
+
+    user_text, report = _split_user_response(response.text)
+    assert user_text == "Готово"
+    assert report["verifier"]["status"] == "ok"
+    assert "canonical=DONE" in report["execution_summary"]
+    if first_delta is not None:
+        delta_text, delta_report = _split_user_response(first_delta)
+        assert delta_text == "Готово"
+        assert delta_report["verifier"]["status"] == "ok"
