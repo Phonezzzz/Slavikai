@@ -12,7 +12,7 @@ from typing import Protocol, TypeVar
 
 from core.approval_policy import ApprovalRequired
 from core.mwv.models import VerificationResult, VerificationStatus
-from core.mwv.verifier_runtime import VerifierRuntime
+from core.mwv.verifier_runtime import VerifierRuntime, desktop_last_state_change_succeeded
 from core.response_preferences import ResponsePreferences, compose_response_preferences
 from core.run_contract import RunBudget
 from core.run_outcome import (
@@ -594,9 +594,27 @@ class DesktopRuntime:
         подтверждения ошибкой выполнения: работа выполнена, результат
         не подтверждён — деривация идёт как по чистому финишу и даёт
         UNVERIFIED, а не FAILED.
+
+        Нормализация ограничена фактическими результатами вызовов:
+        она применяется только когда последнее state-changing действие
+        завершилось успешно (``desktop_last_state_change_succeeded``).
+        Если выполнение завершилось отказом (последнее действие вернуло
+        ошибку и не исправлено последующим успешным), loop error
+        сохраняется и канонический outcome — FAILED с исходной ошибкой,
+        а не UNVERIFIED.
         """
         effective = loop_result
-        if loop_result.error is not None and gate_errors and loop_result.error == gate_errors[-1]:
+        if (
+            loop_result.error is not None
+            and gate_errors
+            and loop_result.error == gate_errors[-1]
+            and desktop_last_state_change_succeeded(
+                [
+                    (item.call.name, dict(item.call.arguments), item.result)
+                    for item in loop_result.tool_calls
+                ]
+            )
+        ):
             effective = replace(loop_result, error=None)
         return outcome_from_loop_result(
             effective,

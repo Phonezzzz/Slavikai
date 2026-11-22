@@ -246,6 +246,25 @@ def _desktop_call_changes_state(name: str, args: dict[str, JSONValue]) -> bool:
     return False
 
 
+def desktop_last_state_change_succeeded(
+    calls: Sequence[tuple[str, dict[str, JSONValue], ToolResult]],
+) -> bool:
+    """Последнее state-changing действие завершилось успешно.
+
+    Критерий канонической деривации desktop-run (E02-T06): исчерпание
+    final_gate нормализуется в UNVERIFIED только когда работа реально
+    выполнена, но не подтверждена. Если последнее state-changing
+    действие вернуло ошибку и не исправлено последующим успешным
+    действием, выполнение завершилось отказом — исходная ошибка и
+    FAILED сохраняются. Ошибка, исправленная последующими успешными
+    действиями, run не проваливает.
+    """
+    change_attempts = [
+        result for name, args, result in calls if _desktop_call_changes_state(name, args)
+    ]
+    return bool(change_attempts) and change_attempts[-1].ok
+
+
 def _has_path_check(
     verifications: Sequence[tuple[dict[str, JSONValue], ToolResult]],
     *,

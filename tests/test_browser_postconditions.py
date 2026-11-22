@@ -30,7 +30,7 @@ from core.desktop_runtime import DesktopExecutionControl, DesktopRuntime
 from core.desktop_security import DesktopPathSecurity
 from core.managed_workspace import ManagedWorkspace, WorkspaceAccess
 from core.mwv.models import VerificationResult, VerificationStatus
-from core.mwv.verifier_runtime import VerifierRuntime
+from core.mwv.verifier_runtime import VerifierRuntime, desktop_last_state_change_succeeded
 from core.response_preferences import ResponsePreferences
 from core.run_contract import RunPolicy
 from core.run_outcome import TerminalReason, VerificationOutcome, outcome_from_loop_result
@@ -135,6 +135,24 @@ def _loop_result(
         ],
         iterations=1,
     )
+
+
+# --- критерий отказа выполнения (rework round 2) --------------------------
+
+
+def test_last_state_change_succeeded_requires_successful_last_change() -> None:
+    failed_click = _call(
+        "click", {}, ok=False, error="locator timeout", args={"selector": "#publish"}
+    )
+    assert desktop_last_state_change_succeeded([failed_click]) is False
+    assert desktop_last_state_change_succeeded([_click()]) is True
+    # Ошибка, исправленная последующим успешным действием, не отказ.
+    assert desktop_last_state_change_succeeded([failed_click, _click()]) is True
+    # Успешное действие, за которым следует отказ, — выполнение завершилось отказом.
+    assert desktop_last_state_change_succeeded([_navigate(), failed_click]) is False
+    # Нет state-changing действий — нормализовать нечего.
+    assert desktop_last_state_change_succeeded([_snapshot()]) is False
+    assert desktop_last_state_change_succeeded([]) is False
 
 
 # --- find(total=0): desktop gate semantics -------------------------------
@@ -361,6 +379,28 @@ def _fake_browser_handler(request: ToolRequest) -> ToolResult:
     return ToolResult.failure(f"unexpected operation {operation}")
 
 
+def _failing_click_handler(request: ToolRequest) -> ToolResult:
+    operation = str(request.args.get("operation") or "snapshot")
+    if operation == "click":
+        return ToolResult.failure("locator timeout")
+    return _fake_browser_handler(request)
+
+
+def _flaky_click_handler():  # noqa: ANN202
+    """Первый click падает с locator timeout, последующие — как обычно."""
+    state = {"clicks": 0}
+
+    def handler(request: ToolRequest) -> ToolResult:
+        operation = str(request.args.get("operation") or "snapshot")
+        if operation == "click":
+            state["clicks"] += 1
+            if state["clicks"] == 1:
+                return ToolResult.failure("locator timeout")
+        return _fake_browser_handler(request)
+
+    return handler
+
+
 def _allow_rule(action: str, target: str, risk_class: str) -> DesktopApprovalRule:
     return DesktopApprovalRule.create(
         effect="allow",
@@ -523,11 +563,11 @@ class _DesktopBrowserParent:
         )
 
 
-def _desktop_browser_registry() -> ToolRegistry:
+def _desktop_browser_registry_with(handler) -> ToolRegistry:  # noqa: ANN001
     registry = ToolRegistry()
     registry.register(
         "desktop_browser",
-        _fake_browser_handler,
+        handler,
         description="Fake browser tool for postcondition tests",
         parameters_schema={"type": "object", "properties": {"operation": {"type": "string"}}},
         capability="exec",
@@ -537,10 +577,15 @@ def _desktop_browser_registry() -> ToolRegistry:
     return registry
 
 
-def _run_desktop_browser(tmp_path: Path, calls: list[ToolCall], rules):  # noqa: ANN001, ANN202
-    parent = _DesktopBrowserParent(
-        _BrowserBrain(calls), _desktop_browser_registry(), tmp_path, rules
+def _desktop_browser_registry() -> ToolRegistry:
+    return _desktop_browser_registry_with(_fake_browser_handler)
+
+
+def _run_desktop_browser(tmp_path: Path, calls: list[ToolCall], rules, handler=None):  # noqa: ANN001, ANN202
+    registry = (
+        _desktop_browser_registry() if handler is None else _desktop_browser_registry_with(handler)
     )
+    parent = _DesktopBrowserParent(_BrowserBrain(calls), registry, tmp_path, rules)
     runtime = DesktopRuntime(parent)
     try:
         return runtime.run("browser task")
@@ -664,3 +709,108 @@ def test_sandbox_gateway_cannot_call_desktop_browser() -> None:
     result = gateway.call(ToolRequest("desktop_browser", {"operation": "snapshot"}))
     assert not result.ok
     assert "EXECUTION_TARGET_BLOCK" in (result.error or "")
+
+
+# --- rework round 2: отказ выполнения vs неподтверждённый успех -----------
+
+
+def test_desktop_runtime_locator_timeout_is_failed_with_original_error(
+    tmp_path: Path,
+) -> None:
+    # Единственный browser-вызов возвращает ToolResult.failure, модель
+    # пытается завершить до исчерпания correction loop. Реальная ошибка
+    # не должна стираться нормализацией gate-exhaustion: канонический
+    # outcome — FAILED с исходной ошибкой, а не completed + UNVERIFIED.
+    outcome = _run_desktop_browser(
+        tmp_path,
+        [
+            ToolCall(
+                id="click-1",
+                name="desktop_browser",
+                arguments={"operation": "click", "selector": "#publish"},
+            ),
+        ],
+        [_allow_rule("click", "#publish", "external_side_effect")],
+        handler=_failing_click_handler,
+    )
+
+    assert outcome.loop_result.error == "locator timeout"
+    assert not outcome.verification.ok
+    assert "locator timeout" in outcome.text
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.terminal_reason is TerminalReason.FAILED
+    assert outcome.canonical_outcome.ui_label == "FAILED"
+    assert outcome.canonical_outcome.is_full_done is False
+    # Исходная ошибка сохранена в каноническом outcome.
+    assert outcome.canonical_outcome.verification.checks[0].detail == "locator timeout"
+
+
+def test_desktop_runtime_failed_click_then_successful_correction_is_done(
+    tmp_path: Path,
+) -> None:
+    # Ошибочное действие, после которого агент успешно исправил ситуацию
+    # (self-verified navigate + input), не превращает весь run в FAILED.
+    outcome = _run_desktop_browser(
+        tmp_path,
+        [
+            ToolCall(
+                id="click-1",
+                name="desktop_browser",
+                arguments={"operation": "click", "selector": "#publish"},
+            ),
+            ToolCall(
+                id="nav-1",
+                name="desktop_browser",
+                arguments={"operation": "navigate", "url": "https://example.test/"},
+            ),
+            ToolCall(
+                id="input-1",
+                name="desktop_browser",
+                arguments={"operation": "input", "selector": "#name", "value": "x"},
+            ),
+        ],
+        [
+            _allow_rule("click", "#publish", "external_side_effect"),
+            _allow_rule("input", "#name", "local_mutation"),
+        ],
+        handler=_failing_click_handler,
+    )
+
+    assert outcome.verification.ok
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.terminal_reason is TerminalReason.COMPLETED
+    assert outcome.canonical_outcome.ui_label == "DONE"
+    assert outcome.canonical_outcome.is_full_done is True
+
+
+def test_desktop_runtime_failed_click_then_unconfirmed_click_is_unverified(
+    tmp_path: Path,
+) -> None:
+    # Первый click падает, второй проходит, но без re-observation:
+    # final_gate исчерпывается. Последнее действие успешно, результат
+    # не подтверждён — UNVERIFIED (COMPLETED), а не FAILED по первой
+    # ошибке и не DONE.
+    outcome = _run_desktop_browser(
+        tmp_path,
+        [
+            ToolCall(
+                id="click-1",
+                name="desktop_browser",
+                arguments={"operation": "click", "selector": "#publish"},
+            ),
+            ToolCall(
+                id="click-2",
+                name="desktop_browser",
+                arguments={"operation": "click", "selector": "#publish"},
+            ),
+        ],
+        [_allow_rule("click", "#publish", "external_side_effect")],
+        handler=_flaky_click_handler(),
+    )
+
+    assert outcome.loop_result.error is not None
+    assert not outcome.verification.ok
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.terminal_reason is TerminalReason.COMPLETED
+    assert outcome.canonical_outcome.ui_label == "UNVERIFIED"
+    assert outcome.canonical_outcome.is_full_done is False
