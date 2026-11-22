@@ -530,10 +530,11 @@ class _FakeLocator:
     def __init__(self) -> None:
         self.filled: list[str] = []
         self.selected: list[str] = []
-        # URL документа элемента для evaluate(ownerDocument.URL); None —
-        # документ страницы (page._fresh_url). raise_on_evaluate — сбой
+        # Security origin документа элемента для evaluate(location.origin);
+        # None — документ страницы (page._fresh_url). "null" — opaque
+        # origin (sandbox без allow-same-origin). raise_on_evaluate — сбой
         # протокольного чтения origin.
-        self.document_url: str | None = None
+        self.document_origin: str | None = None
         self.raise_on_evaluate = False
         self.page: _FakePage | None = None
 
@@ -544,8 +545,8 @@ class _FakeLocator:
     def evaluate(self, expression: str, timeout: float | None = None) -> str | None:
         if self.raise_on_evaluate:
             raise RuntimeError("evaluate failed")
-        if self.document_url is not None:
-            return self.document_url
+        if self.document_origin is not None:
+            return self.document_origin
         return self.page._fresh_url if self.page is not None else None
 
     def fill(self, value: str, timeout: int | None = None) -> None:
@@ -658,7 +659,7 @@ def test_backend_rejects_edit_in_cross_origin_iframe(tmp_path: Path) -> None:
         cached_url="https://example.test/form",
         fresh_url="https://example.test/form",
     )
-    page.locator.document_url = "https://other.test/frame"
+    page.locator.document_origin = "https://other.test"
     backend = _backend_with_page(tmp_path, page)
     request = ToolRequest(
         "desktop_browser",
@@ -676,7 +677,7 @@ def test_backend_rejects_edit_in_cross_origin_iframe(tmp_path: Path) -> None:
     assert page.locator.filled == []
 
     # Поле в документе того же origin по гранту работает как прежде.
-    page.locator.document_url = "https://example.test/frame"
+    page.locator.document_origin = "https://example.test"
     result = backend.handle(request)
     assert result.ok
     assert page.locator.filled == ["x"]
@@ -687,7 +688,7 @@ def test_backend_rejects_select_in_cross_origin_iframe(tmp_path: Path) -> None:
         cached_url="https://example.test/form",
         fresh_url="https://example.test/form",
     )
-    page.locator.document_url = "https://other.test/frame"
+    page.locator.document_origin = "https://other.test"
     backend = _backend_with_page(tmp_path, page)
     request = ToolRequest(
         "desktop_browser",
@@ -715,4 +716,58 @@ def test_backend_element_origin_check_is_fail_closed(tmp_path: Path) -> None:
     )
     result = backend.handle(request)
     assert not result.ok
+    assert page.locator.filled == []
+
+
+# --- Rework round 3 (finding Codex P2 по PR #187) ---
+
+
+def test_backend_allows_edit_in_srcdoc_iframe_with_inherited_origin(tmp_path: Path) -> None:
+    # P2: iframe без src/с srcdoc наследует origin родителя, хотя URL его
+    # документа — about:blank/about:srcdoc. location.origin документа
+    # элемента равен origin верхней страницы — ввод по гранту проходит.
+    page = _FakePage(
+        cached_url="https://example.test/form",
+        fresh_url="https://example.test/form",
+    )
+    page.locator.document_origin = ORIGIN
+    backend = _backend_with_page(tmp_path, page)
+    request = ToolRequest(
+        "desktop_browser",
+        {
+            "operation": "input",
+            "selector_type": "css",
+            "selector": "iframe >> internal:control=enter-frame >> input",
+            "value": "x",
+        },
+        expected_browser_origin=ORIGIN,
+    )
+    result = backend.handle(request)
+    assert result.ok
+    assert page.locator.filled == ["x"]
+
+
+def test_backend_rejects_edit_in_opaque_origin_iframe(tmp_path: Path) -> None:
+    # Sandbox без allow-same-origin: location.origin документа элемента —
+    # строка "null" (opaque origin). Грант верхней страницы такой ввод не
+    # покрывает — fail-closed, как и для cross-origin iframe.
+    page = _FakePage(
+        cached_url="https://example.test/form",
+        fresh_url="https://example.test/form",
+    )
+    page.locator.document_origin = "null"
+    backend = _backend_with_page(tmp_path, page)
+    request = ToolRequest(
+        "desktop_browser",
+        {
+            "operation": "input",
+            "selector_type": "css",
+            "selector": "iframe >> internal:control=enter-frame >> input",
+            "value": "x",
+        },
+        expected_browser_origin=ORIGIN,
+    )
+    result = backend.handle(request)
+    assert not result.ok
+    assert "different origin" in (result.error or "")
     assert page.locator.filled == []

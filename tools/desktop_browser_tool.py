@@ -867,22 +867,30 @@ class PlaywrightBrowserBackend:
         переходом во фрейм (``iframe >> internal:control=enter-frame``)
         может выбрать поле внутри iframe другого origin — проверка URL
         страницы такой ввод не ловит. Origin читается протокольным
-        evaluate на самом элементе (``el.ownerDocument.URL``)
-        непосредственно перед fill/select_option; ошибка чтения или
-        несовпадение с origin policy-решения — fail-closed: действие не
-        выполняется, policy переоценивается.
+        evaluate на самом элементе (``location.origin`` документа
+        элемента) непосредственно перед fill/select_option.
+        ``location.origin`` учитывает наследование: iframe без ``src``
+        или с ``srcdoc`` наследует origin родителя, хотя его URL —
+        ``about:blank``/``about:srcdoc``; opaque origin (sandbox без
+        ``allow-same-origin``) даёт строку ``"null"`` и не совпадает ни
+        с каким грантом. Ошибка чтения или несовпадение с origin
+        policy-решения — fail-closed: действие не выполняется, policy
+        переоценивается.
         """
         expected = request.expected_browser_origin
         if expected is None:
             return None
         try:
-            document_url = locator.evaluate(
-                "(el) => (el.ownerDocument ? el.ownerDocument.URL : null)",
+            document_origin = locator.evaluate(
+                "(el) => (el.ownerDocument && el.ownerDocument.defaultView "
+                "? el.ownerDocument.defaultView.location.origin : null)",
                 timeout=_timeout_ms(request),
             )
         except Exception:  # noqa: BLE001 - проверка origin не должна ронять handle
-            document_url = None
-        actual = browser_origin_of_url(document_url if isinstance(document_url, str) else None)
+            document_origin = None
+        actual = browser_origin_of_url(
+            document_origin if isinstance(document_origin, str) else None
+        )
         if actual == expected:
             return None
         return ToolResult.failure(
