@@ -561,6 +561,14 @@ class _FakeLocator:
         return self.filled[-1] if self.filled else ""
 
 
+class _FakeJSHandle:
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def json_value(self) -> str:
+        return self._value
+
+
 class _FakePage:
     """Страница с устаревшим кешем Page.url и свежим href документа."""
 
@@ -569,10 +577,21 @@ class _FakePage:
         self._fresh_url = fresh_url
         self.locator = _FakeLocator()
         self.locator.page = self
+        # busy=True — JS страницы блокирует основной поток: evaluate
+        # висел бы неограниченно, wait_for_function падает по timeout.
+        self.busy = False
+        self.wait_for_function_timeouts: list[float | None] = []
 
     def evaluate(self, expression: str) -> str:
         assert expression == "window.location.href"
         return self._fresh_url
+
+    def wait_for_function(self, expression: str, timeout: float | None = None) -> _FakeJSHandle:
+        assert expression == "() => window.location.href"
+        self.wait_for_function_timeouts.append(timeout)
+        if self.busy:
+            raise TimeoutError("Page.wait_for_function: Timeout exceeded.")
+        return _FakeJSHandle(self._fresh_url)
 
     def is_closed(self) -> bool:
         return False
@@ -771,3 +790,89 @@ def test_backend_rejects_edit_in_opaque_origin_iframe(tmp_path: Path) -> None:
     assert not result.ok
     assert "different origin" in (result.error or "")
     assert page.locator.filled == []
+
+
+# --- Rework round 4 (finding Codex P2 по PR #187) ---
+
+
+def test_page_url_fails_closed_on_busy_page(tmp_path: Path) -> None:
+    # P2: JS страницы блокирует основной поток — чтение свежего URL
+    # ограничено timeout и по истечении даёт None (fail-closed),
+    # а не висит и не падает обратно на устаревший кеш Page.url.
+    from tools.desktop_browser_tool import FRESH_URL_TIMEOUT_MS
+
+    page = _FakePage(
+        cached_url="https://example.test/form",
+        fresh_url="https://example.test/form",
+    )
+    page.busy = True
+    backend = _backend_with_page(tmp_path, page)
+    assert backend.page_url() is None
+    assert page.wait_for_function_timeouts == [FRESH_URL_TIMEOUT_MS]
+
+
+def test_backend_rejects_edit_on_busy_page(tmp_path: Path) -> None:
+    # P2: на зависшей странице перепроверка origin перед fill не может
+    # подтвердить документ — ввод не выполняется.
+    page = _FakePage(
+        cached_url="https://example.test/form",
+        fresh_url="https://example.test/form",
+    )
+    page.busy = True
+    backend = _backend_with_page(tmp_path, page)
+    request = ToolRequest(
+        "desktop_browser",
+        {"operation": "input", "selector": "#name", "value": "x"},
+        expected_browser_origin=ORIGIN,
+    )
+    result = backend.handle(request)
+    assert not result.ok
+    assert page.locator.filled == []
+
+
+def test_decide_request_skips_origin_provider_for_recovery_ops(tmp_path: Path) -> None:
+    # P2: операции восстановления не зависят от ответа JS текущей
+    # страницы: провайдер origin для них не вызывается, поэтому
+    # закрытие и навигация зависшей страницы не блокируются.
+    calls: list[str | None] = []
+
+    def provider(page_id: str | None) -> str:
+        calls.append(page_id)
+        return ORIGIN
+
+    context = ApprovalContext(
+        safe_mode=True,
+        session_id="desktop-session",
+        approved_categories=set(),
+        execution_target="desktop",
+        desktop_policy=DesktopPolicyRuntime(),
+        desktop_security=_security(tmp_path),
+        run_id=RUN_ID,
+        browser_origin=provider,
+    )
+    navigate, _ = decide_request(
+        context=context,
+        request=ToolRequest(
+            "desktop_browser",
+            {"operation": "navigate", "url": "https://example.test/"},
+        ),
+    )
+    close, _ = decide_request(
+        context=context,
+        request=ToolRequest("desktop_browser", {"operation": "close"}),
+    )
+    close_tab, _ = decide_request(
+        context=context,
+        request=ToolRequest("desktop_browser", {"operation": "close_tab"}),
+    )
+    assert calls == []
+    assert navigate.status == "allow"
+    assert close.status == "allow"
+    # close_tab — external_side_effect: дефолтный ask сохраняется,
+    # но решение не требует ответа JS страницы.
+    assert close_tab.status == "require_approval"
+
+    # Для input/select провайдер по-прежнему вызывается.
+    decision, _ = decide_request(context=context, request=_input_request())
+    assert calls == [None]
+    assert decision.status == "require_approval"

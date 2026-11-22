@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Literal
 
 from core.desktop_policy import (
+    BROWSER_EDITING_ACTIONS,
     DesktopAction,
     DesktopApprovalScope,
     DesktopPolicyRuntime,
@@ -237,8 +238,18 @@ def decide_request(
         page_id_hint = (
             page_id_raw.strip() if isinstance(page_id_raw, str) and page_id_raw.strip() else None
         )
+        # Провайдер origin синхронизируется с браузером протокольным
+        # вызовом и нужен только операциям редактирования (грант и
+        # expected_browser_origin существуют только для input/select).
+        # Остальные операции — включая восстановление (close,
+        # close_tab, navigate) — не должны зависеть от ответа JS
+        # текущей страницы: зависшая страница не блокирует своё
+        # закрытие или навигацию ожиданием evaluate.
+        needs_origin = any(action.action in BROWSER_EDITING_ACTIONS for action in actions)
         trusted_origin = (
-            context.browser_origin(page_id_hint) if context.browser_origin is not None else None
+            context.browser_origin(page_id_hint)
+            if needs_origin and context.browser_origin is not None
+            else None
         )
         actions = [
             replace(action, origin=trusted_origin, run_id=context.run_id) for action in actions

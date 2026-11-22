@@ -42,6 +42,16 @@ MAX_BROWSER_FIND_RESULTS = 50
 MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
 SENSITIVE_VALUE_MASK = "[redacted]"
 
+# E02-T09 rework round 4: ожидание свежего URL ограничено.
+# ``Page.evaluate`` в Playwright Python не имеет timeout: если JS
+# страницы блокирует основной поток (бесконечный цикл), evaluate
+# ждёт неограниченно и держит единственный Desktop executor при
+# удержанном host lease, а отмена такой вызов не прерывает.
+# ``wait_for_function`` с timeout прерывается драйвером даже на
+# зависшей странице; по истечении — None (fail-closed, без
+# fallback на устаревший кеш ``Page.url``).
+FRESH_URL_TIMEOUT_MS = 3_000
+
 # E02-T04: Playwright aria_snapshot печатает value текстовых полей, включая
 # type=password (проверено на Chromium 2026-11-19). Перед снимком значения
 # чувствительных полей временно подменяются маской и сразу восстанавливаются:
@@ -830,12 +840,23 @@ class PlaywrightBrowserBackend:
         обработчиком события навигации; само чтение свойства события не
         обрабатывает. Если страница перешла на другой origin во время
         ожидания модели или approval, кеш отдаёт устаревший адрес.
-        ``evaluate`` синхронизирует состояние с браузером и возвращает
-        href фактического документа. Ошибка (навигация в процессе,
-        закрытая страница) — None: fail-closed, без fallback на кеш.
+        Синхронизация с браузером возвращает href фактического
+        документа. Ожидание ограничено ``FRESH_URL_TIMEOUT_MS``:
+        ``Page.evaluate`` в Playwright Python не имеет timeout и на
+        странице с заблокированным основным потоком ждал бы
+        неограниченно, поэтому используется ``wait_for_function`` —
+        его timeout прерывается драйвером независимо от JS страницы
+        (проверено на Playwright 1.62: evaluate на busy-loop странице
+        висит, wait_for_function падает по TimeoutError). Ошибка или
+        истечение timeout (зависший JS, навигация в процессе, закрытая
+        страница) — None: fail-closed, без fallback на кеш.
         """
         try:
-            href = page.evaluate("window.location.href")
+            handle = page.wait_for_function(
+                "() => window.location.href",
+                timeout=FRESH_URL_TIMEOUT_MS,
+            )
+            href = handle.json_value()
         except Exception:  # noqa: BLE001 - policy-провайдер не должен ронять decide
             return None
         return href if isinstance(href, str) and href else None
