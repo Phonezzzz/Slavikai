@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 import pytest
+from playwright.sync_api import Error as PlaywrightError
 
 from core.approval_policy import ApprovalContext, build_approval_request, decide_request
 from core.browser_service import BrowserProfile, BrowserService, browser_origin_of_url
@@ -279,6 +280,72 @@ def test_concrete_ask_inside_grant_still_asks(tmp_path: Path) -> None:
     assert other.status == "allow"
 
 
+def test_operation_scoped_ask_inside_grant_still_asks(tmp_path: Path) -> None:
+    # P2: explicit ask на все input сайта (origin_pattern без
+    # target_pattern) уже гранта по операциям — грант на
+    # input+select его не перекрывает. Select этот ask не
+    # покрывает — проходит по гранту.
+    ask = DesktopApprovalRule.create(
+        effect="ask",
+        source="session",
+        scope=DesktopApprovalScope(
+            tool="desktop_browser",
+            action="input",
+            target_pattern=None,
+            risk_class="local_mutation",
+            origin_pattern=ORIGIN,
+        ),
+    )
+    context = _context(tmp_path, rules=[_grant_rule(), ask])
+
+    decision, _ = decide_request(context=context, request=_input_request("#name"))
+    assert decision.status == "require_approval"
+    assert decision.reason == "explicit_ask"
+    assert decision.policy_rule_id == ask.rule_id
+
+    select, _ = decide_request(
+        context=context,
+        request=ToolRequest(
+            "desktop_browser",
+            {"operation": "select", "selector": "#country", "value": "LT"},
+        ),
+    )
+    assert select.status == "allow"
+
+
+def test_exact_ask_confirmation_bound_to_origin_and_run(tmp_path: Path) -> None:
+    # P2: точное подтверждение explicit ask сохраняет origin и run:
+    # тот же selector на другом сайте и в новом запуске спрашивает
+    # снова, а не разрешается по старому подтверждению.
+    rules = [_card_ask_rule()]
+    decision, scope = decide_request(
+        context=_context(tmp_path, rules=rules),
+        request=_input_request("#card"),
+    )
+    assert decision.status == "require_approval"
+    assert scope is not None
+    approved = DesktopApprovalRule.create(effect="allow", source="session", scope=scope)
+    resumed_rules = [*rules, approved]
+
+    same, _ = decide_request(
+        context=_context(tmp_path, rules=resumed_rules),
+        request=_input_request("#card"),
+    )
+    assert same.status == "allow"
+
+    other_origin, _ = decide_request(
+        context=_context(tmp_path, rules=resumed_rules, origin="https://other.test"),
+        request=_input_request("#card"),
+    )
+    assert other_origin.status == "require_approval"
+
+    new_run, _ = decide_request(
+        context=_context(tmp_path, rules=resumed_rules, run_id="run-2"),
+        request=_input_request("#card"),
+    )
+    assert new_run.status == "require_approval"
+
+
 def test_new_run_does_not_inherit_grant(tmp_path: Path) -> None:
     rules = [_grant_rule()]
     same_run, _ = decide_request(
@@ -504,7 +571,11 @@ def test_explicit_ask_approval_passes_confirmed_action(
     assert decision.reason == "explicit_ask"
     assert scope is not None
     assert scope.target_pattern == "#card"
-    assert scope.origin_pattern is None
+    # Точное подтверждение сохраняет доверенные origin и run:
+    # legacy scope без них разрешал бы тот же selector на другом
+    # сайте и в следующих запусках.
+    assert scope.origin_pattern == ORIGIN
+    assert scope.run_id == RUN_ID
 
     # Пользователь подтвердил: правило создаётся из возвращённого scope.
     approved = DesktopApprovalRule.create(effect="allow", source=source, scope=scope)  # type: ignore[arg-type]
@@ -538,12 +609,17 @@ class _FakeLocator:
         # (заблокированный основной поток фрейма или init-скрипт не
         # отработал); owner_frame_none — элемент в cross-origin iframe,
         # выбранном page-level селектором (owner_frame не резолвится);
-        # raise_on_element_handle — элемент не разрешился.
+        # raise_on_element_handle — элемент не разрешился;
+        # detached_after_check — документ сменился между проверкой
+        # origin и мутацией: проверенный ElementHandle detached,
+        # fill/select на нём падает, повторного разрешения селектора
+        # быть не должно.
         self.document_origin: str | None = None
         self.raise_on_origin_read = False
         self.origin_read_timeout = False
         self.owner_frame_none = False
         self.raise_on_element_handle = False
+        self.detached_after_check = False
         self.page: _FakePage | None = None
 
     def __call__(self, selector: str) -> _FakeLocator:
@@ -575,6 +651,22 @@ class _FakeElementHandle:
         if self._locator.owner_frame_none:
             return None
         return _FakeFrame(self._locator)
+
+    def _check_attached(self) -> None:
+        if self._locator.detached_after_check:
+            raise PlaywrightError("Element is not attached to the DOM")
+
+    def fill(self, value: str, timeout: int | None = None) -> None:
+        self._check_attached()
+        self._locator.fill(value, timeout=timeout)
+
+    def select_option(self, value: str | None = None, timeout: int | None = None) -> list[str]:
+        self._check_attached()
+        return self._locator.select_option(value=value, timeout=timeout)
+
+    def input_value(self, timeout: int | None = None) -> str:
+        self._check_attached()
+        return self._locator.input_value(timeout=timeout)
 
 
 class _FakeFrame:
@@ -891,6 +983,43 @@ def test_backend_rejects_edit_when_element_handle_fails(tmp_path: Path) -> None:
     result = backend.handle(request)
     assert not result.ok
     assert page.locator.filled == []
+
+
+def test_backend_edit_bound_to_verified_element_document(tmp_path: Path) -> None:
+    # P1: мутация выполняется на проверенном ElementHandle, а не
+    # через locator с повторным разрешением селектора. Документ
+    # сменился между проверкой origin и вводом (iframe навигировался
+    # на другой origin) — handle detached, ввод не выполняется и
+    # locator не используется как fallback.
+    page = _FakePage(
+        cached_url="https://example.test/form",
+        fresh_url="https://example.test/form",
+    )
+    page.locator.detached_after_check = True
+    backend = _backend_with_page(tmp_path, page)
+    request = ToolRequest(
+        "desktop_browser",
+        {"operation": "input", "selector": "#name", "value": "x"},
+        expected_browser_origin=ORIGIN,
+    )
+    with pytest.raises(PlaywrightError):
+        backend.handle(request)
+    assert page.locator.filled == []
+
+    select_request = ToolRequest(
+        "desktop_browser",
+        {"operation": "select", "selector": "#country", "value": "LT"},
+        expected_browser_origin=ORIGIN,
+    )
+    with pytest.raises(PlaywrightError):
+        backend.handle(select_request)
+    assert page.locator.selected == []
+
+    # Документ не менялся — ввод по гранту работает как прежде.
+    page.locator.detached_after_check = False
+    result = backend.handle(request)
+    assert result.ok
+    assert page.locator.filled == ["x"]
 
 
 def test_persistent_allow_checks_all_covered_actions(tmp_path: Path) -> None:

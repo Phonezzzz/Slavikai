@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from playwright.sync_api import (
     Browser,
     BrowserContext,
+    ElementHandle,
     Locator,
     Page,
     Playwright,
@@ -401,11 +402,19 @@ class PlaywrightBrowserBackend:
                 return origin_failure
             value = _required_string(request, "value", allow_empty=True)
             locator = _locator(page, request)
-            element_failure = self._element_origin_failure(locator, request)
+            handle, element_failure = self._verified_element_handle(locator, request)
             if element_failure is not None:
                 return element_failure
-            locator.fill(value, timeout=_timeout_ms(request))
-            verified = locator.input_value(timeout=_timeout_ms(request)) == value
+            if handle is not None:
+                # Мутация привязана к проверенному элементу: handle.fill
+                # не разрешает селектор заново, смена документа между
+                # проверкой и вводом даёт detached-ошибку, а не ввод в
+                # чужой документ по старому гранту.
+                handle.fill(value, timeout=_timeout_ms(request))
+                verified = handle.input_value(timeout=_timeout_ms(request)) == value
+            else:
+                locator.fill(value, timeout=_timeout_ms(request))
+                verified = locator.input_value(timeout=_timeout_ms(request)) == value
             if not verified:
                 return ToolResult.failure("Browser input verification failed.")
             return ToolResult.success(
@@ -426,13 +435,21 @@ class PlaywrightBrowserBackend:
                 return origin_failure
             value = _required_string(request, "value")
             locator = _locator(page, request)
-            element_failure = self._element_origin_failure(locator, request)
+            handle, element_failure = self._verified_element_handle(locator, request)
             if element_failure is not None:
                 return element_failure
-            selected = locator.select_option(
-                value=value,
-                timeout=_timeout_ms(request),
-            )
+            if handle is not None:
+                # Как и fill: выбор выполняется на проверенном элементе,
+                # без повторного разрешения селектора в новом документе.
+                selected = handle.select_option(
+                    value=value,
+                    timeout=_timeout_ms(request),
+                )
+            else:
+                selected = locator.select_option(
+                    value=value,
+                    timeout=_timeout_ms(request),
+                )
             verified = value in selected
             if not verified:
                 return ToolResult.failure("Browser select verification failed.")
@@ -904,8 +921,10 @@ class PlaywrightBrowserBackend:
             "the edit was not executed and policy must be re-evaluated."
         )
 
-    def _element_origin_failure(self, locator: Locator, request: ToolRequest) -> ToolResult | None:
-        """Проверка origin документа фактически выбранного элемента.
+    def _verified_element_handle(
+        self, locator: Locator, request: ToolRequest
+    ) -> tuple[ElementHandle | None, ToolResult | None]:
+        """Элемент, проверенный на origin документа, для input/select.
 
         Грант привязан к origin верхнего документа, но css-селектор с
         переходом во фрейм (``iframe >> internal:control=enter-frame``)
@@ -915,24 +934,17 @@ class PlaywrightBrowserBackend:
         (``owner_frame``), а origin документа читается из значения,
         запечатанного init-скриптом контекста при создании документа
         (см. ``_DOCUMENT_ORIGIN_INIT_SCRIPT``) — скрипты страницы не
-        могут его подменить. Несовпадение с origin policy-решения или
-        ошибка чтения — fail-closed: действие не выполняется, policy
-        переоценивается.
-        """
-        expected = request.expected_browser_origin
-        if expected is None:
-            return None
-        actual = self._element_document_origin(locator, request)
-        if actual == expected:
-            return None
-        return ToolResult.failure(
-            "Browser target element is in a document with a different origin "
-            f"(expected {expected}, actual {actual or 'unknown'}); "
-            "the edit was not executed and policy must be re-evaluated."
-        )
+        могут его подменить.
 
-    def _element_document_origin(self, locator: Locator, request: ToolRequest) -> str | None:
-        """Origin документа элемента из доверенных источников.
+        Возвращается сам проверенный ``ElementHandle``: мутация
+        (fill/select_option) выполняется на нём, а не через locator.
+        ``locator.fill()`` заново разрешает селектор с авто-retry,
+        пока ждёт готовности поля: если same-origin iframe за это
+        время навигируется на другой origin, locator заполнил бы уже
+        чужой документ по старому гранту. Handle привязан к
+        конкретному элементу конкретного документа: смена документа
+        делает его detached, и мутация падает ошибкой вместо ввода
+        в чужой документ.
 
         ``owner_frame`` резолвится серверной стороной Playwright по
         дереву фреймов браузера, без исполнения JS страницы. Для
@@ -947,22 +959,38 @@ class PlaywrightBrowserBackend:
         строку ``"null"``, которая не совпадает ни с каким грантом.
         Чтение через ``wait_for_function`` ограничено
         ``FRESH_URL_TIMEOUT_MS``: на фрейме с заблокированным основным
-        потоком падает по timeout драйвера, а не висит. Любая ошибка —
-        None (fail-closed).
+        потоком падает по timeout драйвера, а не висит.
+
+        Несовпадение с origin policy-решения или ошибка чтения —
+        fail-closed: действие не выполняется, policy переоценивается.
+        Без ``expected_browser_origin`` (legacy-путь без гранта)
+        возвращается ``(None, None)`` — исполнение через locator,
+        как прежде.
         """
+        expected = request.expected_browser_origin
+        if expected is None:
+            return None, None
+        handle: ElementHandle | None = None
+        actual: str | None = None
         try:
             handle = locator.element_handle(timeout=_timeout_ms(request))
             frame = handle.owner_frame()
-            if frame is None:
-                return None
-            origin_handle = frame.wait_for_function(
-                f"() => window.{_DOCUMENT_ORIGIN_PROPERTY}",
-                timeout=FRESH_URL_TIMEOUT_MS,
-            )
-            value = origin_handle.json_value()
+            if frame is not None:
+                origin_handle = frame.wait_for_function(
+                    f"() => window.{_DOCUMENT_ORIGIN_PROPERTY}",
+                    timeout=FRESH_URL_TIMEOUT_MS,
+                )
+                value = origin_handle.json_value()
+                actual = browser_origin_of_url(value if isinstance(value, str) else None)
         except Exception:  # noqa: BLE001 - проверка origin не должна ронять handle
-            return None
-        return browser_origin_of_url(value if isinstance(value, str) else None)
+            actual = None
+        if actual == expected:
+            return handle, None
+        return None, ToolResult.failure(
+            "Browser target element is in a document with a different origin "
+            f"(expected {expected}, actual {actual or 'unknown'}); "
+            "the edit was not executed and policy must be re-evaluated."
+        )
 
     def page_url(self, page_id: str | None = None) -> str | None:
         """URL целевой страницы для провайдера origin (E02-T09).

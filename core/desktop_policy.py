@@ -263,6 +263,37 @@ class DesktopPolicyResolution:
     consumed_rule_id: str | None = None
 
 
+def _covered_actions(scope: DesktopApprovalScope) -> set[str]:
+    """Операции, реально покрываемые scope по семантике ``matches()``."""
+    if scope.actions is not None:
+        return set(scope.actions)
+    return {scope.action}
+
+
+def _ask_narrower_than_grant(
+    ask_scope: DesktopApprovalScope, grant_scope: DesktopApprovalScope
+) -> bool:
+    """Конкретный ask уже широкого origin-гранта хотя бы в одном измерении.
+
+    Грант — правило наименьшей специфичности: explicit ask сохраняет
+    приоритет, если сужает грант по target (конкретный selector), по
+    операциям (например, ask только на ``input`` при гранте на
+    ``input``+``select``) или по risk/command-ограничениям, которых
+    у гранта нет. Ask той же широты, что и грант, его не перехватывает.
+    """
+    if ask_scope.target_pattern is not None and grant_scope.target_pattern is None:
+        return True
+    if _covered_actions(ask_scope) < _covered_actions(grant_scope):
+        return True
+    if ask_scope.risk_class is not None and grant_scope.risk_class is None:
+        return True
+    if ask_scope.command_class is not None and grant_scope.command_class is None:
+        return True
+    if ask_scope.command_exact is not None and grant_scope.command_exact is None:
+        return True
+    return False
+
+
 class DesktopPolicyRuntime:
     """Immutable policy snapshot with single-use rule consumption for one agent run."""
 
@@ -293,16 +324,20 @@ class DesktopPolicyRuntime:
                     and selected.scope.target_pattern is None
                 ):
                     # E02-T09: широкий origin-грант — правило наименьшей
-                    # специфичности. Конкретный explicit ask на selector
-                    # продолжает спрашивать внутри гранта. Исключение
-                    # scoped только для гранта: глобальный порядок
-                    # allow > ask для остальных правил не меняется.
-                    # Точное allow на selector (подтверждённое действие)
-                    # грантом не является и проходит.
+                    # специфичности. Конкретный explicit ask продолжает
+                    # спрашивать внутри гранта: не только ask на
+                    # selector, но и более узкие operation/risk scopes
+                    # (например, ask на все input сайта при гранте на
+                    # input+select). Исключение scoped только для
+                    # гранта: глобальный порядок allow > ask для
+                    # остальных правил не меняется. Точное allow на
+                    # selector (подтверждённое действие) грантом не
+                    # является и проходит.
                     concrete_asks = [
                         rule
                         for rule in matching
-                        if rule.effect == "ask" and rule.scope.target_pattern is not None
+                        if rule.effect == "ask"
+                        and _ask_narrower_than_grant(rule.scope, selected.scope)
                     ]
                     if concrete_asks:
                         ask_selected = max(concrete_asks, key=lambda item: item.scope.specificity)
@@ -545,6 +580,29 @@ def exact_scope_for_action(action: DesktopAction, *, exact: bool = False) -> Des
             execution_target=action.execution_target,
             origin_pattern=action.origin,
             actions=BROWSER_EDITING_ACTIONS,
+            run_id=action.run_id,
+        )
+    if (
+        exact
+        and action.tool == "desktop_browser"
+        and action.action in BROWSER_EDITING_ACTIONS
+        and action.origin is not None
+        and action.target is not None
+    ):
+        # Точное подтверждение explicit ask: сужаем до selector, но
+        # сохраняем доверенные origin и run identity. Legacy scope
+        # без них разрешал бы тот же selector на другом сайте, а при
+        # approve_session — и в следующих запусках, вопреки
+        # approval-промпту («сайт X, только текущий запуск»).
+        return DesktopApprovalScope(
+            tool=action.tool,
+            action=action.action,
+            target_pattern=action.target,
+            command_class=action.command_class,
+            command_exact=action.command,
+            risk_class=action.risk_class,
+            execution_target=action.execution_target,
+            origin_pattern=action.origin,
             run_id=action.run_id,
         )
     return DesktopApprovalScope(
