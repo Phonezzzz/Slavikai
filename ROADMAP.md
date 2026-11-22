@@ -413,20 +413,20 @@ Final outcome
 
 ## Critical path and ordered epics
 
-**Программа: 64 тикета, строго последовательно**, один тикет = одна ветка = один PR. Список пересматривается по подтверждённым фактам после эпиков: sunk cost не является основанием сохранять механизм.
+**Программа: 65 тикетов, строго последовательно**, один тикет = одна ветка = один PR. Список пересматривается по подтверждённым фактам после эпиков: sunk cost не является основанием сохранять механизм.
 
 | Epic | Tickets | Статус |
 |---|---:|---|
 | E00 — baseline/docs | 3 | E00-T01 DONE; E00-T02 DONE; E00-T03 DONE |
 | E01 — canonical execution | 9 | E01 T01–T09 DONE (PR #163, main 0f894c6) |
-| E02 — persistent browser | 9 | T01 DONE (PR #166); T02 DONE (PR #167); T03 DONE (PR #180, main f2e94ba); T04 DONE (PR #181, main 30bd0da); T05 DONE (PR #182, main b2a4257); T06 PARTIAL (PR #183, main dd207de); T09 добавлен, T10 черновик |
+| E02 — persistent browser | 10 | T01 DONE (PR #166); T02 DONE (PR #167); T03 DONE (PR #180, main f2e94ba); T04 DONE (PR #181, main 30bd0da); T05 DONE (PR #182, main b2a4257); T06 PARTIAL (PR #183, main dd207de); T07 DONE (PR #186, main 20af69c); T09 DONE (PR #187, main 421314c); T10 IN_REVIEW |
 | E03 — Host Bridge / Desktop Commander | 11 | READY после E02 |
 | E04 — workspace/executor | 6 | T03 slice DONE (PR #164, main 7affb3f); остальное NEEDS_REFINEMENT |
 | E05 — verification/recovery | 7 | NEEDS_REFINEMENT |
 | E06 — modes/policy/UI | 6 | NEEDS_REFINEMENT |
 | E07 — memory/context | 5 | NEEDS_REFINEMENT |
 | E08 — cleanup/operations | 8 | NEEDS_REFINEMENT |
-| **Всего** | **64** | **32 READY, 32 предварительный, 0 заблокировано** |
+| **Всего** | **65** | **33 READY, 32 предварительный, 0 заблокировано** |
 
 **E04–E08 — не исполнимые ticket specs до refinement.** Перед соответствующим эпиком Muse доводит каждый до полного шаблона: ЧТО, ЗАЧЕМ, проверенный code touchpoint/unknown, зависимости, scope, steps, delete-vs-wrap, positive/negative/E2E acceptance, postconditions, разрешения/запреты, evidence, `make check`, CI и независимый Codex review. До этого в `STATE.md` фиксируется `BLOCKED: ROADMAP_REFINEMENT`, в том числе E07-T04 и однострочные E08.
 
@@ -1155,7 +1155,7 @@ upload → external/write
 
 #### E02-T09 — scoped browser editing authorization
 
-**Статус:** IN_REVIEW (ветка `pr-e02-t09-scoped-editing-auth`). Тикет внесён в ROADMAP 2026-11-22 (черновик принят владельцем 2026-11-22). Место: после E02-T05, реализация до E02-T08, чтобы E2E покрыл и editing scope. E02-T06/T07 не блокирует и ими не блокируется.
+**Статус:** DONE (PR #187 MERGED 2026-11-22, main `421314c`). Тикет внесён в ROADMAP 2026-11-22 (черновик принят владельцем 2026-11-22). Место: после E02-T05, реализация до E02-T08, чтобы E2E покрыл и editing scope. E02-T06/T07 не блокирует и ими не блокируется.
 
 **ЧТО.** Editing-грант на `input`/`select` по origin через существующие ToolGateway, DesktopPolicy и decision flow. Без второго policy engine, без route-interception, без approval на каждое поле.
 **Что сделано.** Editing-грант живёт в существующем `DesktopPolicyRuntime` как `DesktopApprovalScope` с `origin_pattern` (точный origin, не wildcard), `actions=("input", "select")` и `run_id`; `DesktopAction` несёт доверенные `origin` и `run_id`. Origin при решении берётся только из фактической страницы через `BrowserService.current_origin` (по `page.url` живой страницы, без создания сессии), никогда из аргументов модели; без живой страницы грант не матчится и не предлагается. Дефолт `local_mutation` остаётся ask (`browser_edit_requires_scope`). Решение allow несёт `expected_browser_origin` через gateway в `ToolRequest`, и `DesktopBrowserTool` непосредственно перед исполнением input/select перепроверяет фактический origin — расхождение (redirect, смена вкладки) → отказ исполнения и переоценка policy. Грант привязан к run identity чата (`desktop_run_id`, переносится через approval-паузу и resume того же run; новый run грант не наследует); persistent editing-гранты отклоняются при валидации правил. Конкретные deny/ask поверх гранта: deny всегда первым, а конкретный ask (target/risk/operation scope) бьёт origin-грант в `resolve()` — специфичность только для origin-гранта, глобальный порядок allow/ask не изменён. Второй policy engine не создан; submit/destructive click грантом не покрываются (отдельные checks как прежде). Claim `runtime.browser.session_service` version 6 → 7.
@@ -1187,6 +1187,28 @@ upload → external/write
 **РАЗРЕШЕНИЯ.** Можно менять: `DesktopApprovalScope`/`DesktopAction` (поля origin, обратно-совместимая сериализация), `ApprovalContext` (провайдер origin + run identity), разрешение в `DesktopPolicyRuntime` (специфичность editing-гранта), `BrowserService` (провайдер `current_origin`), browser tool (предисолнительная перепроверка origin), decision flow (создание гранта с привязкой к run), текст промпта approval для input/select. Нельзя: второй policy engine или параллельная система разрешений; route-interception; persistent editing-гранты; доверие origin из аргументов модели; изменение таблицы классификации эффектов (E02-T05 завершён); трогать миграцию старых правил из E02-T05. RunPolicy в desktop approval не участвует (факт аудита) — привязка к run делается через ApprovalContext, а не через RunPolicy.
 
 **Зависимости.** E02-T05 merged: таблица эффектов, дефолт ask для `local_mutation`, миграция старых запретов. BrowserService (E02-T01/T02): сессии и persistent profile — источник провайдера origin. Decision flow approve_session (существует) и перечитывание правил на resume (E02-T04).
+
+#### E02-T10 — structured browser postcondition contract (browser_state)
+
+**Статус:** IN_REVIEW (ветка `pr-e02-t10-browser-state`). Тикет внесён в ROADMAP 2026-11-22 (контракт B утверждён владельцем 2026-11-22 с двумя поправками; черновик — `~/workspace/slavikai-e02-t06/postcondition-contract-ticket.md`). Место: после E02-T06, до E02-T08 (шаги 6–7 E2E опираются на контракт). Зависимость — влитый PR #183 (E02-T06 срез, main `dd207de`): `verify_browser_postconditions` уже вызывается в штатном DesktopRuntime.
+
+**ЧТО.** Структурированный контракт ожидаемого postcondition для `click`/`submit` через существующий `VerifierRuntime` и canonical outcome. Без второго verifier, без `expected_text` с автоматическим `verified=True` (вариант A отклонён владельцем 22.11: совпадение произвольного текста не доказывает достижение конкретного состояния, а отсутствие текста после успешного клика не должно превращать выполненную операцию в tool failure).
+
+**Что сделано.** `click`/`submit` может объявить `browser_state` в аргументах до исполнения: `entity_id` (идентичность записи), селектор статуса (тот же словарь, что у tool) и `expect{kind, before?, after}`. Tool внутри того же вызова захватывает состояние сущности до и после действия и кладёт в `result.data["browser_state"]` только факты: для `text` — факты точного сравнения с объявленным ожиданием (`before_matches_after`, `after_matches_after`, `before_matches_expected_before`), сырые строки и хэши не эмитируются (result.data целиком уходит модели); для `count` — числа `before_count`/`after_count`. `VerifierRuntime.verify_browser_postconditions` выносит вердикт (`_browser_state_confirms`): подтверждено ⟺ after совпал с ожидаемым, before с ним не совпадал и (если объявлен) совпал с `expect.before`; `call.id` в verifier не передаётся — привязка к действию по построению (один вызов = один захват), approval привязан к точному JSON аргументов, resume исполняет тот же ToolCall. Claim `runtime.browser.session_service` version 7 → 8.
+
+**Решения владельца для v1 (2026-11-22).** kind — только `text` (изменение статуса записи; точное равенство, обрезанный текст не доказательство) и `count` (только появление конкретной сущности 0→1 по заранее известному ID). `expect.before` необязателен; фактическое наблюдение «до» обязательно; уже совпадало с `expect.after` → UNVERIFIED. Для `text` селектор статуса разрешается внутри единственного элемента с `entity_id`; для `count` наблюдается наличие самого ID. Строгая маскировка: текстовый захват на странице ручного входа не собирается (fail-closed); `value`/`attribute` в v1 нет. Опрос «после» — в пределах общего таймаута вызова с учётом отмены, без повторного click/submit; истечение срока после успешного действия → UNVERIFIED. Другая вкладка вне v1: только исходная вкладка и документ (непрерывность — токен `performance.timeOrigin`); навигация на другой документ → UNVERIFIED. `verified=True` для click/submit не используется: tool — свидетель, VerifierRuntime — судья, RunOutcome определяет публикацию.
+
+**Tests.** `tests/test_browser_postconditions.py`: unit-вердикты verifier (text/count подтверждено; уже было; Y вместо X; неоднозначность; без объявления; битое объявление), захват в backend на фейковой странице (опрос, отмена, таймаут, строгая маскировка, навигация, сырые строки не в result.data), DesktopRuntime через штатные registry/gateway (click и submit → DONE + final_success; неподтверждено → UNVERIFIED), обязательный тест через штатный Desktop после approval/resume (X изменилась → DONE + final_success). Opt-in real-browser E2E `tests/test_browser_state_e2e.py`: страница заказов, асинхронное изменение статуса X, клик по Y, уже оплаченный X, создание сущности, submit формы, навигация. Мутации (4) убиты: убрать before!=after; подтверждать без объявления; захват по странице вместо entity; сырая строка в фактах.
+
+**ЗАЧЕМ.** Главный инвариант владельца: DONE только при подтверждённом результате. E02-T06 закрыл негатив (click без подтверждения → UNVERIFIED), но позитивный DONE для click/submit был недостижим. Этот тикет даёт модели способ объявить ожидаемое состояние до действия, а verifier'у — сопоставить его с фактическим захватом той же сущности, не превращая эвристику по тексту в доказательство. С merge этого PR закрывается полный acceptance E02-T06 (штатный тест click/submit повторно читает новое состояние той же сущности и публикует DONE с final_success).
+
+**Acceptance.** Через штатный Desktop после approval/resume: изменился статус X → DONE и final_success (click и submit). Изменилась только Y, X уже была в ожидаемом состоянии или наблюдение неоднозначно → UNVERIFIED.
+
+**Negative.** Без объявления → UNVERIFIED (поведение E02-T06 не ослабляется); snapshot/find после click без объявления → UNVERIFIED; неоднозначная идентичность (count != 1) → UNVERIFIED; навигация на другой документ → UNVERIFIED; реальная ошибка исполнения click/submit → failure, не UNVERIFIED.
+
+**РАЗРЕШЕНИЯ.** Можно менять: аргументы click/submit в `desktop_browser` (поле `browser_state`), `VerifierRuntime.verify_browser_postconditions`, описание tool, тесты. Нельзя: второй verifier или отдельный механизм DONE; `expected_text` с автоматическим `verified=True`; превращать неподтверждённый postcondition в tool failure; ослаблять семантику B из E02-T06; менять desktop gate семантику re-observation.
+
+**Зависимости.** E02-T06 merged (семантика B, `verify_browser_postconditions`, шов в канонической деривации и в DesktopRuntime). E02-T08 шаги 6–7 для click/submit зависят от этого тикета.
 
 ### Epic E03 — Owner Host Bridge / Desktop Commander
 

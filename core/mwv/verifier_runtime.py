@@ -120,6 +120,65 @@ def _browser_observation_confirms(args: dict[str, JSONValue], result: ToolResult
     return operation in {"read", "snapshot", "wait"}
 
 
+def _browser_state_confirms(args: dict[str, JSONValue], result: ToolResult) -> bool:
+    """E02-T10: объявленное ``browser_state`` подтверждено захватом tool.
+
+    Tool — свидетель: внутри вызова ``click``/``submit`` он захватывает
+    факты состояния сущности ``entity_id`` до и после действия и кладёт
+    их в ``result.data["browser_state"]`` (для ``text`` — только факты
+    точного сравнения с объявленным ожиданием, без сырых строк; для
+    ``count`` — числа). Verifier — судья: подтверждение только при
+    точном совпадении объявления и фактов и при доказанном изменении
+    (``before`` не совпадал с ``expect.after``). Всё остальное —
+    неподтверждено (UNVERIFIED в канонической деривации), не failure.
+    """
+    declaration = args.get("browser_state")
+    if not isinstance(declaration, dict):
+        return False
+    entity_id = declaration.get("entity_id")
+    expect = declaration.get("expect")
+    if not isinstance(entity_id, str) or not entity_id or not isinstance(expect, dict):
+        return False
+    kind = expect.get("kind")
+    after = expect.get("after")
+    before_declared = "before" in expect
+    before = expect.get("before")
+    facts = result.data.get("browser_state")
+    if not isinstance(facts, dict):
+        return False
+    if facts.get("entity_id") != entity_id or facts.get("kind") != kind:
+        return False
+    if kind == "text":
+        if not isinstance(after, str):
+            return False
+        if before_declared and not isinstance(before, str):
+            return False
+        if facts.get("after_matches_after") is not True:
+            return False
+        if facts.get("before_matches_after") is not False:
+            return False
+        if before_declared and facts.get("before_matches_expected_before") is not True:
+            return False
+        return True
+    if kind == "count":
+        if not isinstance(after, int) or isinstance(after, bool) or after != 1:
+            return False
+        if before_declared and (not isinstance(before, int) or isinstance(before, bool)):
+            return False
+        before_count = facts.get("before_count")
+        after_count = facts.get("after_count")
+        if not isinstance(before_count, int) or isinstance(before_count, bool):
+            return False
+        if not isinstance(after_count, int) or isinstance(after_count, bool):
+            return False
+        if before_count != 0 or after_count != after:
+            return False
+        if before_declared and before_count != before:
+            return False
+        return True
+    return False
+
+
 def _desktop_change_is_verified(
     name: str,
     args: dict[str, JSONValue],
@@ -360,14 +419,16 @@ class VerifierRuntime:
         - ``click``/``submit`` без self-verification НЕ подтверждаются
           фактом повторной observation: snapshot/read доказывают факт
           наблюдения, find — факт наличия элемента, но не достижение
-          целевого состояния конкретного действия. Ожидаемое
-          postcondition, связанное с результатом действия, существующими
-          механизмами не выражается (нет контракта ожидаемого
-          состояния) — поэтому click/submit остаются неподтверждёнными
-          (FAILED -> UNVERIFIED в канонической деривации), пока такой
-          контракт не появится. Если будущий контракт будет ставить
-          ``verified=True`` на результате click/submit, это правило
-          пропустит его без изменений.
+          целевого состояния конкретного действия.
+        - ``click``/``submit`` с объявленным ``browser_state`` (E02-T10,
+          контракт B): tool внутри того же вызова захватывает факты
+          состояния сущности ``entity_id`` до и после действия;
+          подтверждение — только по ``_browser_state_confirms``
+          (точное совпадение объявления и фактов + доказанное
+          изменение). Tool не ставит ``verified=True`` для
+          click/submit; без объявления или без захвата click/submit
+          остаются неподтверждёнными (FAILED -> UNVERIFIED в
+          канонической деривации).
         - setup-операции без self-verification (open/new_tab пустой
           вкладки) подтверждаются последующей observation той же
           страницы — как в desktop-семантике.
@@ -400,6 +461,8 @@ class VerifierRuntime:
                 continue
             operation = args.get("operation")
             if operation in {"click", "submit"}:
+                if _browser_state_confirms(args, result):
+                    continue
                 return _desktop_observation_result(
                     status=VerificationStatus.FAILED,
                     reason=f"browser_postcondition_unconfirmed:{operation}",

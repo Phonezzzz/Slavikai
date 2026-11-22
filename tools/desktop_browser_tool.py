@@ -53,6 +53,12 @@ SENSITIVE_VALUE_MASK = "[redacted]"
 # fallback на устаревший кеш ``Page.url``).
 FRESH_URL_TIMEOUT_MS = 3_000
 
+# E02-T10: захват browser_state вокруг click/submit. Опрос состояния
+# после действия идёт в пределах общего таймаута вызова; одно чтение
+# ограничено, чтобы зависший JS страницы не держал executor.
+BROWSER_STATE_POLL_MS = 100
+BROWSER_STATE_READ_TIMEOUT_MS = 2_000
+
 # E02-T09 rework round 5: origin документа элемента нельзя читать
 # evaluate в main world страницы — скрипт cross-origin iframe может
 # подменить ``ownerDocument``/``window.origin`` через
@@ -383,18 +389,33 @@ class PlaywrightBrowserBackend:
         if operation == "click":
             page_id, page = self._page(request)
             before_url = page.url
-            _locator(page, request).click(timeout=_timeout_ms(request))
-            page.wait_for_timeout(50)
-            return ToolResult.success(
-                {
-                    "output": "Browser element clicked; inspect resulting page state.",
-                    "operation": operation,
-                    "page_id": page_id,
-                    "before_url": before_url,
-                    "url": page.url,
-                    "requires_followup_observation": True,
-                }
+            declaration = _browser_state_declaration(request)
+            deadline = time.monotonic() + _timeout_ms(request) / 1000
+            capture = (
+                self._begin_browser_state_capture(page_id, page, declaration, deadline=deadline)
+                if declaration is not None
+                else None
             )
+            click_timeout = _timeout_ms(request)
+            if declaration is not None:
+                click_timeout = max(1.0, (deadline - time.monotonic()) * 1000)
+            _locator(page, request).click(timeout=click_timeout)
+            page.wait_for_timeout(50)
+            data: dict[str, JSONValue] = {
+                "output": "Browser element clicked; inspect resulting page state.",
+                "operation": operation,
+                "page_id": page_id,
+                "before_url": before_url,
+                "url": page.url,
+                "requires_followup_observation": True,
+            }
+            if declaration is not None and capture is not None:
+                facts = self._finish_browser_state_capture(
+                    page, declaration, capture[0], capture[1], deadline=deadline
+                )
+                if facts is not None:
+                    data["browser_state"] = facts
+            return ToolResult.success(data)
         if operation == "input":
             page_id, page = self._page(request)
             origin_failure = self._origin_recheck_failure(page, request)
@@ -466,18 +487,33 @@ class PlaywrightBrowserBackend:
         if operation == "submit":
             page_id, page = self._page(request)
             before_url = page.url
-            _locator(page, request).press("Enter", timeout=_timeout_ms(request))
-            page.wait_for_timeout(50)
-            return ToolResult.success(
-                {
-                    "output": "Browser form submitted; inspect resulting page state.",
-                    "operation": operation,
-                    "page_id": page_id,
-                    "before_url": before_url,
-                    "url": page.url,
-                    "requires_followup_observation": True,
-                }
+            declaration = _browser_state_declaration(request)
+            deadline = time.monotonic() + _timeout_ms(request) / 1000
+            capture = (
+                self._begin_browser_state_capture(page_id, page, declaration, deadline=deadline)
+                if declaration is not None
+                else None
             )
+            submit_timeout = _timeout_ms(request)
+            if declaration is not None:
+                submit_timeout = max(1.0, (deadline - time.monotonic()) * 1000)
+            _locator(page, request).press("Enter", timeout=submit_timeout)
+            page.wait_for_timeout(50)
+            data = {
+                "output": "Browser form submitted; inspect resulting page state.",
+                "operation": operation,
+                "page_id": page_id,
+                "before_url": before_url,
+                "url": page.url,
+                "requires_followup_observation": True,
+            }
+            if declaration is not None and capture is not None:
+                facts = self._finish_browser_state_capture(
+                    page, declaration, capture[0], capture[1], deadline=deadline
+                )
+                if facts is not None:
+                    data["browser_state"] = facts
+            return ToolResult.success(data)
         if operation == "wait":
             page_id, page = self._page(request)
             locator = _locator(page, request)
@@ -992,6 +1028,172 @@ class PlaywrightBrowserBackend:
             "the edit was not executed and policy must be re-evaluated."
         )
 
+    def _document_token(self, page: Page) -> float | None:
+        """Токен непрерывности документа (``performance.timeOrigin``).
+
+        Меняется при навигации на новый документ и не меняется при
+        same-document изменениях URL (pushState/hash). Читается через
+        ``wait_for_function`` с timeout драйвера: на зависшей странице
+        — None (fail-closed), а не неограниченное ожидание evaluate.
+        """
+        try:
+            handle = page.wait_for_function(
+                "() => performance.timeOrigin",
+                timeout=FRESH_URL_TIMEOUT_MS,
+            )
+            value = handle.json_value()
+        except Exception:  # noqa: BLE001 - захват не должен ронять действие
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value)
+
+    def _entity_locator(self, page: Page, entity_id: str) -> Locator:
+        escaped = entity_id.replace("\\", "\\\\").replace('"', '\\"')
+        return page.locator(f'[id="{escaped}"]')
+
+    def _read_entity_text(
+        self, page: Page, declaration: dict[str, JSONValue], *, timeout_ms: float
+    ) -> str | None:
+        """Текст статуса внутри единственного элемента ``entity_id``.
+
+        Идентичность записи — сам ID: селектор статуса разрешается
+        внутри элемента с этим ID, а не по странице (селектор с одним
+        совпадением после перерисовки может указывать на другую
+        запись). Неоднозначность (``count != 1`` на любом уровне) или
+        ошибка чтения — None: захват недоступен, не догадка.
+        """
+        try:
+            entity = self._entity_locator(page, str(declaration["entity_id"]))
+            if entity.count() != 1:
+                return None
+            index = declaration.get("index")
+            name = declaration.get("name")
+            status = _build_locator(
+                entity,
+                selector_type=str(declaration["selector_type"]),
+                selector=str(declaration["selector"]),
+                name=name if isinstance(name, str) else None,
+                exact=declaration.get("exact") is True,
+                index=index if isinstance(index, int) and not isinstance(index, bool) else None,
+            )
+            if status.count() != 1:
+                return None
+            return status.inner_text(timeout=timeout_ms)
+        except Exception:  # noqa: BLE001 - захват не должен ронять действие
+            return None
+
+    def _read_entity_count(self, page: Page, declaration: dict[str, JSONValue]) -> int | None:
+        try:
+            return self._entity_locator(page, str(declaration["entity_id"])).count()
+        except Exception:  # noqa: BLE001 - захват не должен ронять действие
+            return None
+
+    def _begin_browser_state_capture(
+        self,
+        page_id: str,
+        page: Page,
+        declaration: dict[str, JSONValue],
+        *,
+        deadline: float,
+    ) -> tuple[str | int, float] | None:
+        """Захват «до» и токена документа перед click/submit (E02-T10).
+
+        None — захват недоступен (неоднозначная идентичность, строгая
+        маскировка для text, ошибка чтения): действие выполняется как
+        обычно, но фактов не будет и результат останется
+        неподтверждённым (UNVERIFIED), а не failure.
+        """
+        expect = declaration.get("expect")
+        if not isinstance(expect, dict):
+            return None
+        if expect.get("kind") == "text" and page_id in self._strict_masking_pages:
+            # Страница ручного входа в строгом режиме: её содержимое
+            # может держать секреты в обычных полях, текстовое
+            # доказательство на ней не собирается (fail-closed).
+            return None
+        token = self._document_token(page)
+        if token is None:
+            return None
+        if expect.get("kind") == "text":
+            before = self._read_entity_text(
+                page, declaration, timeout_ms=_read_timeout_ms(deadline)
+            )
+            if before is None:
+                return None
+            return before, token
+        before_count = self._read_entity_count(page, declaration)
+        if before_count is None:
+            return None
+        return before_count, token
+
+    def _finish_browser_state_capture(
+        self,
+        page: Page,
+        declaration: dict[str, JSONValue],
+        before: str | int,
+        token: float,
+        *,
+        deadline: float,
+    ) -> dict[str, JSONValue] | None:
+        """Опрос «после» и факты сравнения для verifier (E02-T10).
+
+        Опрос — в пределах общего таймаута вызова и с учётом отмены;
+        повторного click/submit нет. Навигация на другой документ
+        (токен изменился или не читается) ломает непрерывность
+        наблюдения: фактов нет, результат неподтверждён. Для text в
+        результат идут только факты точного сравнения с объявленным
+        ожиданием — сырые строки не покидают tool (result.data целиком
+        уходит модели).
+        """
+        expect = declaration.get("expect")
+        if not isinstance(expect, dict):
+            return None
+        kind = expect.get("kind")
+        after_expected = expect.get("after")
+        matched = False
+        observed = False
+        last_after: str | int | None = None
+        while True:
+            if kind == "text":
+                value = self._read_entity_text(
+                    page, declaration, timeout_ms=_read_timeout_ms(deadline)
+                )
+                if value is not None:
+                    observed = True
+                    last_after = value
+                    matched = value == after_expected
+            else:
+                count = self._read_entity_count(page, declaration)
+                if count is not None:
+                    observed = True
+                    last_after = count
+                    matched = count == after_expected
+            if matched or self._cancelled() or time.monotonic() >= deadline:
+                break
+            remaining_ms = (deadline - time.monotonic()) * 1000
+            page.wait_for_timeout(max(0.0, min(float(BROWSER_STATE_POLL_MS), remaining_ms)))
+        if not observed:
+            return None
+        if self._document_token(page) != token:
+            return None
+        if kind == "text":
+            facts: dict[str, JSONValue] = {
+                "kind": "text",
+                "entity_id": declaration["entity_id"],
+                "before_matches_after": before == after_expected,
+                "after_matches_after": matched,
+            }
+            if "before" in expect:
+                facts["before_matches_expected_before"] = before == expect["before"]
+            return facts
+        return {
+            "kind": "count",
+            "entity_id": declaration["entity_id"],
+            "before_count": before if isinstance(before, int) else None,
+            "after_count": last_after if isinstance(last_after, int) else None,
+        }
+
     def page_url(self, page_id: str | None = None) -> str | None:
         """URL целевой страницы для провайдера origin (E02-T09).
 
@@ -1041,31 +1243,130 @@ class PlaywrightBrowserBackend:
         return items
 
 
+def _build_locator(
+    scope: Page | Locator,
+    *,
+    selector_type: str,
+    selector: str,
+    name: str | None,
+    exact: bool,
+    index: int | None,
+) -> Locator:
+    if selector_type == "role":
+        locator = scope.get_by_role(selector, name=name, exact=exact)  # type: ignore[arg-type]
+    elif selector_type == "label":
+        locator = scope.get_by_label(selector, exact=exact)
+    elif selector_type == "text":
+        locator = scope.get_by_text(selector, exact=exact)
+    elif selector_type == "placeholder":
+        locator = scope.get_by_placeholder(selector, exact=exact)
+    elif selector_type == "test_id":
+        locator = scope.get_by_test_id(selector)
+    elif selector_type == "css":
+        locator = scope.locator(selector)
+    else:
+        raise ValueError("selector_type must be role|label|text|placeholder|test_id|css")
+    if index is not None:
+        if index < 0:
+            raise ValueError("index must be non-negative")
+        locator = locator.nth(index)
+    return locator
+
+
 def _locator(page: Page, request: ToolRequest) -> Locator:
     selector_type = _optional_string(request, "selector_type") or "role"
     selector = _required_string(request, "selector")
     exact = request.args.get("exact") is True
-    if selector_type == "role":
-        name = _optional_string(request, "name")
-        locator = page.get_by_role(selector, name=name, exact=exact)  # type: ignore[arg-type]
-    elif selector_type == "label":
-        locator = page.get_by_label(selector, exact=exact)
-    elif selector_type == "text":
-        locator = page.get_by_text(selector, exact=exact)
-    elif selector_type == "placeholder":
-        locator = page.get_by_placeholder(selector, exact=exact)
-    elif selector_type == "test_id":
-        locator = page.get_by_test_id(selector)
-    elif selector_type == "css":
-        locator = page.locator(selector)
-    else:
-        raise ValueError("selector_type must be role|label|text|placeholder|test_id|css")
+    name = _optional_string(request, "name")
     index_raw = request.args.get("index")
-    if isinstance(index_raw, int) and not isinstance(index_raw, bool):
-        if index_raw < 0:
-            raise ValueError("index must be non-negative")
-        locator = locator.nth(index_raw)
-    return locator
+    index = index_raw if isinstance(index_raw, int) and not isinstance(index_raw, bool) else None
+    return _build_locator(
+        page,
+        selector_type=selector_type,
+        selector=selector,
+        name=name,
+        exact=exact,
+        index=index,
+    )
+
+
+_BROWSER_STATE_KINDS = {"text", "count"}
+_BROWSER_STATE_SELECTOR_TYPES = {"role", "label", "text", "placeholder", "test_id", "css"}
+
+
+def _browser_state_declaration(request: ToolRequest) -> dict[str, JSONValue] | None:
+    """Валидированное объявление ``browser_state`` (E02-T10) или None.
+
+    Невалидное объявление действие не блокирует: захвата не будет, и
+    click/submit останется неподтверждённым (UNVERIFIED), как без
+    объявления. Схема tool ограничивает форму для модели; здесь —
+    fail-closed проверка фактических аргументов (gateway схему не
+    валидирует).
+    """
+    raw = request.args.get("browser_state")
+    if not isinstance(raw, dict):
+        return None
+    entity_id = raw.get("entity_id")
+    expect_raw = raw.get("expect")
+    if not isinstance(entity_id, str) or not entity_id.strip():
+        return None
+    if not isinstance(expect_raw, dict):
+        return None
+    kind = expect_raw.get("kind")
+    if not isinstance(kind, str) or kind not in _BROWSER_STATE_KINDS:
+        return None
+    after = expect_raw.get("after")
+    before = expect_raw.get("before")
+    expect: dict[str, JSONValue] = {"kind": kind, "after": after}
+    if kind == "text":
+        if not isinstance(after, str):
+            return None
+        if before is not None:
+            if not isinstance(before, str):
+                return None
+            expect["before"] = before
+        selector_type = raw.get("selector_type") or "role"
+        if not isinstance(selector_type, str) or selector_type not in _BROWSER_STATE_SELECTOR_TYPES:
+            return None
+        selector = raw.get("selector")
+        if not isinstance(selector, str) or not selector.strip():
+            return None
+        name = raw.get("name")
+        if name is not None and not isinstance(name, str):
+            return None
+        index = raw.get("index")
+        if index is not None and (
+            not isinstance(index, int) or isinstance(index, bool) or index < 0
+        ):
+            return None
+        return {
+            "entity_id": entity_id,
+            "selector_type": selector_type,
+            "selector": selector,
+            "name": name,
+            "exact": raw.get("exact") is True,
+            "index": index,
+            "expect": expect,
+        }
+    # kind == "count": только появление конкретной сущности 0 -> 1.
+    if not isinstance(after, int) or isinstance(after, bool) or after != 1:
+        return None
+    if before is not None:
+        if not isinstance(before, int) or isinstance(before, bool):
+            return None
+        expect["before"] = before
+    return {"entity_id": entity_id, "expect": expect}
+
+
+def _read_timeout_ms(deadline: float) -> float:
+    """Timeout одного чтения захвата browser_state.
+
+    Остаток общего бюджета вызова, но не ниже 250 мс и не выше
+    ``BROWSER_STATE_READ_TIMEOUT_MS``: timeout=0 у Playwright означает
+    «без ограничения», его отдавать нельзя.
+    """
+    remaining = (deadline - time.monotonic()) * 1000
+    return max(250.0, min(float(BROWSER_STATE_READ_TIMEOUT_MS), remaining))
 
 
 def _operation(request: ToolRequest, *, default: str) -> str:

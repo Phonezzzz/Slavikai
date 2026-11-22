@@ -516,7 +516,14 @@ TOOL_METADATA: dict[str, ToolMetadata] = {
             "the same browser profile reopens in a visible window on the user's PC, the run "
             "pauses until the user returns control, and the result is a fresh page snapshot. "
             "Returned control is not proof of login: inspect the snapshot before continuing. "
-            "Never ask the user for a password or code in chat."
+            "Never ask the user for a password or code in chat. "
+            "For click/submit you may declare browser_state {entity_id, selector_type, "
+            "selector, name, exact, index, expect{kind: text|count, before?, after}}: the "
+            "tool captures the entity state before and after inside the same call, and the "
+            "run is DONE only if the declared change is confirmed (text: the status element "
+            "inside the single element with that id becomes exactly expect.after and was not "
+            "already so; count: the entity appears 0 -> 1). Without a confirmed declaration "
+            "a click/submit stays UNVERIFIED."
         ),
         parameters_schema=_schema(
             {
@@ -560,6 +567,39 @@ TOOL_METADATA: dict[str, ToolMetadata] = {
                 "headless": {"type": "boolean"},
                 "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                "browser_state": {
+                    "type": "object",
+                    "description": (
+                        "Declared postcondition for click/submit (E02-T10): the state of "
+                        "the single element with id=entity_id, captured before/after "
+                        "inside the same call. kind=text compares the exact inner_text "
+                        "of the selector element inside the entity; kind=count observes "
+                        "the entity itself appearing (0 -> 1)."
+                    ),
+                    "properties": {
+                        "entity_id": {"type": "string"},
+                        "selector_type": {
+                            "type": "string",
+                            "enum": ["role", "label", "text", "placeholder", "test_id", "css"],
+                        },
+                        "selector": {"type": "string"},
+                        "name": {"type": "string"},
+                        "index": {"type": "integer", "minimum": 0},
+                        "exact": {"type": "boolean"},
+                        "expect": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"type": "string", "enum": ["text", "count"]},
+                                "before": {"type": ["string", "integer"]},
+                                "after": {"type": ["string", "integer"]},
+                            },
+                            "required": ["kind", "after"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "required": ["entity_id", "expect"],
+                    "additionalProperties": False,
+                },
             },
             required=["operation"],
         ),

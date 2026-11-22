@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,7 @@ from server.http.handlers.ui_chat import _iterate_stream_in_thread
 from shared.auto_models import AutoRunStatus
 from shared.models import JSONValue, LLMMessage, ToolRequest, ToolResult
 from tests.test_canonical_loop_e2e import _E2EAgent
+from tools.desktop_browser_tool import PlaywrightBrowserBackend
 from tools.tool_registry import ToolRegistry
 from tools.workspace_tools import ReadFileTool, workspace_root_context
 
@@ -238,9 +240,10 @@ def test_self_verified_browser_changes_are_confirmed() -> None:
 
 
 def test_self_verified_click_is_confirmed() -> None:
-    # Шов для будущего контракта ожидаемого postcondition: если tool
-    # сам подтвердил результат (verified=True), каноническая проверка
-    # его пропускает без изменений.
+    # Общий шов self-verified операций: если результат несёт
+    # verified=True, каноническая проверка его пропускает. Tool для
+    # click/submit verified=True не ставит (E02-T10: подтверждение —
+    # только через объявленное browser_state и захват фактов).
     result = VerifierRuntime().verify_browser_postconditions([_click(verified=True)])
 
     assert result is not None
@@ -1469,3 +1472,669 @@ def test_loop_state_changing_unknown_descriptor_fails_closed() -> None:
         ],
     )
     assert _loop_state_changing(read_result, registry) is False
+
+
+# --- E02-T10: контракт browser_state (вариант B, решение владельца) ------
+# click/submit объявляет ожидаемое состояние сущности entity_id до
+# исполнения; tool внутри того же вызова захватывает факты «до/после»,
+# VerifierRuntime выносит вердикт. Подтверждено ⟺ after совпал с
+# ожидаемым и before с ним не совпадал (и совпал с expect.before, если
+# объявлен). Сырые строки в result.data не попадают.
+
+
+def _text_declaration(**overrides: object) -> dict[str, JSONValue]:
+    declaration: dict[str, JSONValue] = {
+        "entity_id": "order-X",
+        "selector_type": "css",
+        "selector": ".status",
+        "expect": {"kind": "text", "before": "Черновик", "after": "Оплачено"},
+    }
+    declaration.update(overrides)  # type: ignore[arg-type]
+    return declaration
+
+
+def _text_facts(**overrides: object) -> dict[str, JSONValue]:
+    facts: dict[str, JSONValue] = {
+        "kind": "text",
+        "entity_id": "order-X",
+        "before_matches_after": False,
+        "after_matches_after": True,
+        "before_matches_expected_before": True,
+    }
+    facts.update(overrides)  # type: ignore[arg-type]
+    return facts
+
+
+def _declared_call(
+    operation: str,
+    declaration: dict[str, JSONValue] | None,
+    facts: dict[str, JSONValue] | None,
+) -> tuple[str, dict[str, JSONValue], ToolResult]:
+    args: dict[str, JSONValue] = {"selector_type": "css", "selector": "#pay-x"}
+    if declaration is not None:
+        args["browser_state"] = declaration
+    data: dict[str, JSONValue] = {
+        "page_id": PAGE,
+        "requires_followup_observation": True,
+        "before_url": "https://example.test/orders",
+        "url": "https://example.test/orders",
+    }
+    if facts is not None:
+        data["browser_state"] = facts
+    return _call(operation, data, args=args)
+
+
+def test_browser_state_text_confirmed_is_done() -> None:
+    call = _declared_call("click", _text_declaration(), _text_facts())
+
+    result = VerifierRuntime().verify_browser_postconditions([call])
+    assert result is not None
+    assert result.status == VerificationStatus.PASSED
+
+    loop_result = _loop_result([call])
+    browser = _browser_postcondition_result(loop_result)
+    assert browser is not None and browser.status == VerificationStatus.PASSED
+    verification = _canonical_verification(None, browser)
+    assert verification is not None
+    outcome = outcome_from_loop_result(loop_result, state_changing=True, verification=verification)
+    assert outcome.ui_label == "DONE"
+    assert outcome.is_full_done is True
+    assert outcome.communication_class == "final_success"
+
+
+def test_browser_state_submit_confirmed_is_passed() -> None:
+    call = _declared_call("submit", _text_declaration(), _text_facts())
+
+    result = VerifierRuntime().verify_browser_postconditions([call])
+
+    assert result is not None
+    assert result.status == VerificationStatus.PASSED
+
+
+def test_browser_state_after_not_matched_is_unconfirmed() -> None:
+    # Изменилась другая запись (Y) или статус X не изменился: захват по
+    # entity_id не совпал с ожидаемым after.
+    call = _declared_call("click", _text_declaration(), _text_facts(after_matches_after=False))
+
+    result = VerifierRuntime().verify_browser_postconditions([call])
+
+    assert result is not None
+    assert result.status == VerificationStatus.FAILED
+    assert result.error == "browser_postcondition_unconfirmed:click"
+
+
+def test_browser_state_already_in_expected_state_is_unconfirmed() -> None:
+    # X уже была «Оплачено» до действия: нет доказательства, что
+    # изменение вызвало именно это действие.
+    call = _declared_call("click", _text_declaration(), _text_facts(before_matches_after=True))
+
+    result = VerifierRuntime().verify_browser_postconditions([call])
+
+    assert result is not None
+    assert result.status == VerificationStatus.FAILED
+    assert result.error == "browser_postcondition_unconfirmed:click"
+
+
+def test_browser_state_declared_before_mismatch_is_unconfirmed() -> None:
+    call = _declared_call(
+        "click",
+        _text_declaration(),
+        _text_facts(before_matches_expected_before=False),
+    )
+
+    result = VerifierRuntime().verify_browser_postconditions([call])
+
+    assert result is not None
+    assert result.status == VerificationStatus.FAILED
+
+
+def test_browser_state_without_declared_before_confirms() -> None:
+    declaration = _text_declaration()
+    declaration["expect"] = {"kind": "text", "after": "Оплачено"}
+    facts = _text_facts()
+    del facts["before_matches_expected_before"]
+    call = _declared_call("click", declaration, facts)
+
+    result = VerifierRuntime().verify_browser_postconditions([call])
+
+    assert result is not None
+    assert result.status == VerificationStatus.PASSED
+
+
+def test_browser_state_count_creation_confirmed() -> None:
+    declaration: dict[str, JSONValue] = {
+        "entity_id": "order-Z",
+        "expect": {"kind": "count", "after": 1},
+    }
+    facts: dict[str, JSONValue] = {
+        "kind": "count",
+        "entity_id": "order-Z",
+        "before_count": 0,
+        "after_count": 1,
+    }
+    call = _declared_call("click", declaration, facts)
+
+    result = VerifierRuntime().verify_browser_postconditions([call])
+
+    assert result is not None
+    assert result.status == VerificationStatus.PASSED
+
+
+def test_browser_state_count_existing_entity_is_unconfirmed() -> None:
+    declaration: dict[str, JSONValue] = {
+        "entity_id": "order-Z",
+        "expect": {"kind": "count", "after": 1},
+    }
+    facts: dict[str, JSONValue] = {
+        "kind": "count",
+        "entity_id": "order-Z",
+        "before_count": 1,
+        "after_count": 1,
+    }
+    call = _declared_call("click", declaration, facts)
+
+    result = VerifierRuntime().verify_browser_postconditions([call])
+
+    assert result is not None
+    assert result.status == VerificationStatus.FAILED
+
+
+def test_browser_state_count_not_created_is_unconfirmed() -> None:
+    declaration: dict[str, JSONValue] = {
+        "entity_id": "order-Z",
+        "expect": {"kind": "count", "after": 1},
+    }
+    facts: dict[str, JSONValue] = {
+        "kind": "count",
+        "entity_id": "order-Z",
+        "before_count": 0,
+        "after_count": 0,
+    }
+    call = _declared_call("click", declaration, facts)
+
+    result = VerifierRuntime().verify_browser_postconditions([call])
+
+    assert result is not None
+    assert result.status == VerificationStatus.FAILED
+
+
+def test_browser_state_declaration_without_capture_is_unconfirmed() -> None:
+    call = _declared_call("click", _text_declaration(), None)
+
+    result = VerifierRuntime().verify_browser_postconditions([call])
+
+    assert result is not None
+    assert result.status == VerificationStatus.FAILED
+    assert result.error == "browser_postcondition_unconfirmed:click"
+
+
+def test_browser_state_capture_for_other_entity_is_unconfirmed() -> None:
+    call = _declared_call("click", _text_declaration(), _text_facts(entity_id="order-Y"))
+
+    result = VerifierRuntime().verify_browser_postconditions([call])
+
+    assert result is not None
+    assert result.status == VerificationStatus.FAILED
+
+
+def test_browser_state_malformed_declaration_is_unconfirmed() -> None:
+    verifier = VerifierRuntime()
+
+    bad_kind = _text_declaration()
+    bad_kind["expect"] = {"kind": "value", "after": "x"}
+    result = verifier.verify_browser_postconditions(
+        [_declared_call("click", bad_kind, _text_facts())]
+    )
+    assert result is not None
+    assert result.status == VerificationStatus.FAILED
+
+    not_a_dict = _call(
+        "click",
+        {"page_id": PAGE, "browser_state": _text_facts()},
+        args={"selector": "#pay-x", "browser_state": "order-X"},
+    )
+    result = verifier.verify_browser_postconditions([not_a_dict])
+    assert result is not None
+    assert result.status == VerificationStatus.FAILED
+
+
+# --- E02-T10: захват фактов в PlaywrightBrowserBackend (фейковая страница) -
+
+
+class _StateFakeLocator:
+    """Locator фейковой страницы записей для захвата browser_state."""
+
+    def __init__(self, page: _StateFakePage, *, entity_id: str | None, selector: str) -> None:
+        self._page = page
+        self._entity_id = entity_id
+        self._selector = selector
+
+    def count(self) -> int:
+        if self._entity_id is not None:
+            if self._entity_id in self._page.duplicate_ids:
+                return 2
+            return 1 if self._entity_id in self._page.records else 0
+        return 1
+
+    def locator(self, selector: str) -> _StateFakeLocator:
+        return _StateFakeLocator(self._page, entity_id=self._entity_id, selector=selector)
+
+    def inner_text(self, timeout: float | None = None) -> str:
+        del timeout
+        assert self._entity_id is not None
+        return self._page.records[self._entity_id]
+
+    def click(self, timeout: float | None = None) -> None:
+        del timeout
+        self._page.apply_action(self._selector)
+
+    def press(self, key: str, timeout: float | None = None) -> None:
+        del key, timeout
+        self._page.apply_action(self._selector)
+
+
+class _StateFakeJSHandle:
+    def __init__(self, value: float) -> None:
+        self._value = value
+
+    def json_value(self) -> float:
+        return self._value
+
+
+class _StateFakePage:
+    """Страница со списком записей: entity_id -> текст статуса.
+
+    Действие по селектору применяет отложенную мутацию через заданное
+    число опросов (wait_for_timeout), как асинхронное обновление
+    реальной страницы.
+    """
+
+    def __init__(self, records: dict[str, str]) -> None:
+        self.url = "https://example.test/orders"
+        self.records = dict(records)
+        self.duplicate_ids: set[str] = set()
+        self.time_origin = 1000.0
+        self.busy = False
+        self.cancelled_flag = False
+        self._effects: dict[str, tuple[int, object]] = {}
+        self._pending: list[list[object]] = []
+
+    def on_action(self, selector: str, *, after_polls: int, effect) -> None:  # noqa: ANN001
+        self._effects[selector] = (after_polls, effect)
+
+    def apply_action(self, selector: str) -> None:
+        scheduled = self._effects.get(selector)
+        if scheduled is not None:
+            self._pending.append([scheduled[0], scheduled[1]])
+
+    def locator(self, selector: str) -> _StateFakeLocator:
+        if selector.startswith('[id="') and selector.endswith('"]'):
+            entity_id = selector[len('[id="') : -2].replace('\\"', '"').replace("\\\\", "\\")
+            return _StateFakeLocator(self, entity_id=entity_id, selector=selector)
+        return _StateFakeLocator(self, entity_id=None, selector=selector)
+
+    def get_by_role(self, *args: object, **kwargs: object) -> _StateFakeLocator:
+        del args, kwargs
+        return _StateFakeLocator(self, entity_id=None, selector="role")
+
+    def get_by_label(self, *args: object, **kwargs: object) -> _StateFakeLocator:
+        del args, kwargs
+        return _StateFakeLocator(self, entity_id=None, selector="label")
+
+    def get_by_text(self, *args: object, **kwargs: object) -> _StateFakeLocator:
+        del args, kwargs
+        return _StateFakeLocator(self, entity_id=None, selector="text")
+
+    def get_by_placeholder(self, *args: object, **kwargs: object) -> _StateFakeLocator:
+        del args, kwargs
+        return _StateFakeLocator(self, entity_id=None, selector="placeholder")
+
+    def get_by_test_id(self, *args: object, **kwargs: object) -> _StateFakeLocator:
+        del args, kwargs
+        return _StateFakeLocator(self, entity_id=None, selector="test_id")
+
+    def wait_for_function(
+        self, expression: str, timeout: float | None = None
+    ) -> _StateFakeJSHandle:
+        del timeout
+        assert "performance.timeOrigin" in expression
+        if self.busy:
+            raise TimeoutError("Page.wait_for_function: Timeout exceeded.")
+        return _StateFakeJSHandle(self.time_origin)
+
+    def wait_for_timeout(self, timeout: float) -> None:
+        del timeout
+        time.sleep(0.005)
+        still_pending: list[list[object]] = []
+        for item in self._pending:
+            remaining = int(item[0]) - 1  # type: ignore[arg-type]
+            if remaining <= 0:
+                effect = item[1]
+                effect(self)  # type: ignore[operator]
+            else:
+                still_pending.append([remaining, item[1]])
+        self._pending = still_pending
+
+    def is_closed(self) -> bool:
+        return False
+
+
+def _state_backend(tmp_path: Path, page: _StateFakePage, *, cancelled=None):  # noqa: ANN001, ANN202
+    backend = PlaywrightBrowserBackend(
+        DesktopPathSecurity(
+            home=tmp_path,
+            policy_store_path=tmp_path / ".run" / "desktop-approvals.json",
+        ),
+        cancelled=cancelled or (lambda: False),
+    )
+    backend._browser = object()  # type: ignore[assignment]
+    backend._context = object()  # type: ignore[assignment]
+    backend._pages[PAGE] = page  # type: ignore[assignment]
+    backend._active_page_id = PAGE
+    return backend
+
+
+def _state_args(operation: str = "click", **expect_overrides: object) -> dict[str, JSONValue]:
+    expect: dict[str, JSONValue] = {"kind": "text", "before": "Черновик", "after": "Оплачено"}
+    expect.update(expect_overrides)  # type: ignore[arg-type]
+    return {
+        "operation": operation,
+        "selector_type": "css",
+        "selector": "#pay-x",
+        "browser_state": {
+            "entity_id": "order-X",
+            "selector_type": "css",
+            "selector": ".status",
+            "expect": expect,
+        },
+    }
+
+
+def test_backend_click_captures_confirmed_text_change(tmp_path: Path) -> None:
+    page = _StateFakePage({"order-X": "Черновик", "order-Y": "Черновик"})
+    page.on_action(
+        "#pay-x",
+        after_polls=2,
+        effect=lambda p: p.records.update({"order-X": "Оплачено"}),
+    )
+    backend = _state_backend(tmp_path, page)
+
+    result = backend.handle(ToolRequest("desktop_browser", _state_args()))
+
+    assert result.ok, result.data
+    assert result.data["browser_state"] == {
+        "kind": "text",
+        "entity_id": "order-X",
+        "before_matches_after": False,
+        "after_matches_after": True,
+        "before_matches_expected_before": True,
+    }
+    # Сырые наблюдённые строки в result.data не попадают: только факты.
+    assert "Оплачено" not in json.dumps(result.data, ensure_ascii=False)
+
+
+def test_backend_click_changing_other_record_is_not_confirmed(tmp_path: Path) -> None:
+    page = _StateFakePage({"order-X": "Черновик", "order-Y": "Черновик"})
+    page.on_action(
+        "#pay-x",
+        after_polls=1,
+        effect=lambda p: p.records.update({"order-Y": "Оплачено"}),
+    )
+    backend = _state_backend(tmp_path, page)
+    args = _state_args()
+    args["timeout_seconds"] = 1
+
+    result = backend.handle(ToolRequest("desktop_browser", args))
+
+    assert result.ok, result.data
+    facts = result.data["browser_state"]
+    assert isinstance(facts, dict)
+    assert facts["after_matches_after"] is False
+
+
+def test_backend_click_already_in_expected_state(tmp_path: Path) -> None:
+    page = _StateFakePage({"order-X": "Оплачено"})
+    backend = _state_backend(tmp_path, page)
+
+    result = backend.handle(ToolRequest("desktop_browser", _state_args()))
+
+    assert result.ok, result.data
+    facts = result.data["browser_state"]
+    assert isinstance(facts, dict)
+    assert facts["before_matches_after"] is True
+    assert facts["after_matches_after"] is True
+
+
+def test_backend_submit_captures_confirmed_text_change(tmp_path: Path) -> None:
+    page = _StateFakePage({"order-X": "Черновик"})
+    page.on_action(
+        "#pay-x",
+        after_polls=1,
+        effect=lambda p: p.records.update({"order-X": "Оплачено"}),
+    )
+    backend = _state_backend(tmp_path, page)
+
+    result = backend.handle(ToolRequest("desktop_browser", _state_args("submit")))
+
+    assert result.ok, result.data
+    facts = result.data["browser_state"]
+    assert isinstance(facts, dict)
+    assert facts["after_matches_after"] is True
+
+
+def test_backend_count_captures_entity_creation(tmp_path: Path) -> None:
+    page = _StateFakePage({"order-X": "Черновик"})
+    page.on_action(
+        "#pay-x",
+        after_polls=1,
+        effect=lambda p: p.records.update({"order-Z": "Новая"}),
+    )
+    backend = _state_backend(tmp_path, page)
+    args = _state_args()
+    args["browser_state"] = {"entity_id": "order-Z", "expect": {"kind": "count", "after": 1}}
+
+    result = backend.handle(ToolRequest("desktop_browser", args))
+
+    assert result.ok, result.data
+    assert result.data["browser_state"] == {
+        "kind": "count",
+        "entity_id": "order-Z",
+        "before_count": 0,
+        "after_count": 1,
+    }
+
+
+def test_backend_ambiguous_entity_is_not_captured(tmp_path: Path) -> None:
+    page = _StateFakePage({"order-X": "Черновик"})
+    page.duplicate_ids = {"order-X"}
+    backend = _state_backend(tmp_path, page)
+
+    result = backend.handle(ToolRequest("desktop_browser", _state_args()))
+
+    assert result.ok, result.data
+    assert "browser_state" not in result.data
+
+
+def test_backend_strict_masking_page_skips_text_capture(tmp_path: Path) -> None:
+    page = _StateFakePage({"order-X": "Черновик"})
+    page.on_action(
+        "#pay-x",
+        after_polls=1,
+        effect=lambda p: p.records.update({"order-X": "Оплачено", "order-Z": "Новая"}),
+    )
+    backend = _state_backend(tmp_path, page)
+    backend._strict_masking_pages.add(PAGE)
+
+    text_result = backend.handle(ToolRequest("desktop_browser", _state_args()))
+    assert text_result.ok, text_result.data
+    assert "browser_state" not in text_result.data
+
+    count_args = _state_args()
+    count_args["browser_state"] = {"entity_id": "order-Z", "expect": {"kind": "count", "after": 1}}
+    page.records.pop("order-Z")
+    count_result = backend.handle(ToolRequest("desktop_browser", count_args))
+    assert count_result.ok, count_result.data
+    facts = count_result.data["browser_state"]
+    assert isinstance(facts, dict)
+    assert facts["after_count"] == 1
+
+
+def test_backend_navigation_breaks_continuity(tmp_path: Path) -> None:
+    def navigate(p: _StateFakePage) -> None:
+        p.records.update({"order-X": "Оплачено"})
+        p.time_origin += 1.0
+
+    page = _StateFakePage({"order-X": "Черновик"})
+    page.on_action("#pay-x", after_polls=1, effect=navigate)
+    backend = _state_backend(tmp_path, page)
+
+    result = backend.handle(ToolRequest("desktop_browser", _state_args()))
+
+    assert result.ok, result.data
+    assert "browser_state" not in result.data
+
+
+def test_backend_invalid_declaration_executes_without_capture(tmp_path: Path) -> None:
+    page = _StateFakePage({"order-X": "Черновик"})
+    backend = _state_backend(tmp_path, page)
+    args = _state_args()
+    args["browser_state"] = {
+        "entity_id": "order-X",
+        "selector_type": "css",
+        "selector": ".status",
+        "expect": {"kind": "value", "after": "x"},
+    }
+
+    result = backend.handle(ToolRequest("desktop_browser", args))
+
+    assert result.ok, result.data
+    assert "browser_state" not in result.data
+
+
+def test_backend_cancel_during_poll_stops_without_match(tmp_path: Path) -> None:
+    page = _StateFakePage({"order-X": "Черновик"})
+    page.on_action(
+        "#pay-x",
+        after_polls=1,
+        effect=lambda p: setattr(p, "cancelled_flag", True),
+    )
+    backend = _state_backend(tmp_path, page, cancelled=lambda: page.cancelled_flag)
+
+    result = backend.handle(ToolRequest("desktop_browser", _state_args()))
+
+    assert result.ok, result.data
+    facts = result.data["browser_state"]
+    assert isinstance(facts, dict)
+    assert facts["after_matches_after"] is False
+
+
+# --- E02-T10: DesktopRuntime с фейковым handler (факты захвата) -----------
+
+
+def _browser_state_handler(facts: dict[str, JSONValue] | None):  # noqa: ANN202
+    def handler(request: ToolRequest) -> ToolResult:
+        operation = str(request.args.get("operation") or "snapshot")
+        if operation in {"click", "submit"}:
+            data: dict[str, JSONValue] = {
+                "operation": operation,
+                "page_id": PAGE,
+                "before_url": "https://example.test/orders",
+                "url": "https://example.test/orders",
+                "requires_followup_observation": True,
+            }
+            if facts is not None:
+                data["browser_state"] = facts
+            return ToolResult.success(data)
+        return _fake_browser_handler(request)
+
+    return handler
+
+
+def _state_click_call() -> ToolCall:
+    return ToolCall(
+        id="click-1",
+        name="desktop_browser",
+        arguments={
+            "operation": "click",
+            "selector_type": "css",
+            "selector": "#pay-x",
+            "browser_state": _text_declaration(),
+        },
+    )
+
+
+def test_desktop_runtime_click_with_confirmed_browser_state_is_done(tmp_path: Path) -> None:
+    outcome = _run_desktop_browser(
+        tmp_path,
+        [_state_click_call(), _snapshot_call()],
+        [_allow_rule("click", "#pay-x", "external_side_effect")],
+        handler=_browser_state_handler(_text_facts()),
+    )
+
+    assert outcome.verification.ok
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.ui_label == "DONE"
+    assert outcome.canonical_outcome.is_full_done is True
+    assert outcome.canonical_outcome.communication_class == "final_success"
+
+
+def test_desktop_runtime_submit_with_confirmed_browser_state_is_done(tmp_path: Path) -> None:
+    submit_call = ToolCall(
+        id="submit-1",
+        name="desktop_browser",
+        arguments={
+            "operation": "submit",
+            "selector_type": "css",
+            "selector": "#pay-x",
+            "browser_state": _text_declaration(),
+        },
+    )
+    outcome = _run_desktop_browser(
+        tmp_path,
+        [submit_call, _snapshot_call()],
+        [_allow_rule("submit", "#pay-x", "external_side_effect")],
+        handler=_browser_state_handler(_text_facts()),
+    )
+
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.ui_label == "DONE"
+    assert outcome.canonical_outcome.is_full_done is True
+    assert outcome.canonical_outcome.communication_class == "final_success"
+
+
+def test_desktop_runtime_click_with_unconfirmed_browser_state_is_unverified(
+    tmp_path: Path,
+) -> None:
+    outcome = _run_desktop_browser(
+        tmp_path,
+        [_state_click_call(), _snapshot_call()],
+        [_allow_rule("click", "#pay-x", "external_side_effect")],
+        handler=_browser_state_handler(_text_facts(after_matches_after=False)),
+    )
+
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.ui_label == "UNVERIFIED"
+    assert outcome.canonical_outcome.is_full_done is False
+    assert outcome.canonical_outcome.communication_class is None
+
+
+def test_desktop_user_response_browser_state_done_after_resume(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    # Критерий приёмки E02-T10: объявление переживает approval-паузу и
+    # resume; изменился статус X -> DONE и final_success.
+    response, _first_delta = _run_desktop_agent_response(
+        tmp_path,
+        monkeypatch,
+        [_state_click_call(), _snapshot_call()],
+        "resume",
+        [_allow_rule("click", "#pay-x", "external_side_effect")],
+        handler=_browser_state_handler(_text_facts()),
+    )
+
+    outcome = response.runtime_result
+    canonical = outcome.canonical_outcome
+    assert canonical is not None
+    assert canonical.ui_label == "DONE"
+    assert canonical.is_full_done is True
+    assert canonical.communication_class == "final_success"
+    _user_text, report = _split_user_response(response.text)
+    assert report["verifier"]["status"] == "ok"
