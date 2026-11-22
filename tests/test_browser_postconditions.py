@@ -28,6 +28,7 @@ from core.auto_preset import (
     AutoPresetRunner,
     _browser_postcondition_result,
     _canonical_verification,
+    _loop_state_changing,
 )
 from core.desktop_policy import (
     DesktopApprovalRule,
@@ -53,7 +54,7 @@ from shared.auto_models import AutoRunStatus
 from shared.models import JSONValue, LLMMessage, ToolRequest, ToolResult
 from tests.test_canonical_loop_e2e import _E2EAgent
 from tools.tool_registry import ToolRegistry
-from tools.workspace_tools import workspace_root_context
+from tools.workspace_tools import ReadFileTool, workspace_root_context
 
 PAGE = "page-1"
 
@@ -1368,3 +1369,103 @@ def test_desktop_user_response_unverified_launch_successful_cleanup_no_warning(
     assert user_text == "Действие выполнено, результат не подтверждён"
     assert "desktop_cleanup_failed" not in response.text
     assert report["verifier"]["status"] != "ok"
+
+
+class _CapturingE2EAgent(_E2EAgent):
+    """_E2EAgent (sandbox gateway) с записью kwargs report-блока."""
+
+    def __init__(self, brain, registry, workspace):  # noqa: ANN001
+        super().__init__(brain, registry, workspace)
+        self.report_kwargs_history: list[dict] = []
+
+    def _append_report_block(self, text: str, **kwargs):  # noqa: ANN003, ANN202
+        self.report_kwargs_history.append(kwargs)
+        return text
+
+
+class _ReadOnlyBrain(Brain):
+    """Fixture модели: один workspace_read, затем содержательный ответ."""
+
+    supports_native_tools = True
+
+    def __init__(self, call: ToolCall, answer: str) -> None:
+        self._call = call
+        self._answer = answer
+        self._used = False
+
+    def generate(self, messages, config=None, tools=None):  # noqa: ANN001
+        del messages, config, tools
+        if not self._used:
+            self._used = True
+            return LLMResult(usage=LLMUsage(0, 0, 0), text="", tool_calls=[self._call])
+        return LLMResult(usage=LLMUsage(0, 0, 0), text=self._answer)
+
+
+def test_auto_user_response_read_only_run_keeps_answer(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    # P2 (#185 round 1): успешный read-only прогон (настоящий ReadFileTool,
+    # capability="read") не должен получать UNVERIFIED и терять ответ модели.
+    workspace = ManagedWorkspace.create(tmp_path, principal_id="test-principal")
+    (workspace.root / "note.md").write_text("встреча в 15:00", encoding="utf-8")
+    registry = ToolRegistry()
+    registry.register(
+        "workspace_read",
+        ReadFileTool().handle,
+        description="Read a workspace file",
+        parameters_schema={
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+        },
+        capability="read",
+    )
+    monkeypatch.chdir(workspace.root)
+    brain = _ReadOnlyBrain(
+        ToolCall(id="read-1", name="workspace_read", arguments={"path": "note.md"}),
+        "В документе указано: встреча в 15:00",
+    )
+    agent = _CapturingE2EAgent(brain, registry, workspace)
+    with workspace_root_context(workspace.root):
+        outcome = AutoPresetRunner(agent, workspace_root=workspace.root).run("read note")
+
+    canonical = outcome.canonical_outcome
+    assert canonical is not None
+    assert canonical.ui_label == "DONE"
+    assert canonical.state_changing is False
+    assert "В документе указано: встреча в 15:00" in outcome.text
+    assert "Действие выполнено, результат не подтверждён" not in outcome.text
+    report = agent.report_kwargs_history[-1]
+    assert report["verifier"].ok
+
+
+def test_loop_state_changing_unknown_descriptor_fails_closed() -> None:
+    # Неизвестный инструмент считается изменяющим состояние (fail-closed,
+    # как в plan_execute): UNVERIFIED для него не ослабляется.
+    registry = ToolRegistry()
+    loop_result = AgentToolLoopResult(
+        text="",
+        messages=[],
+        tool_calls=[
+            ExecutedToolCall(
+                call=ToolCall(id="x-1", name="unknown_tool", arguments={}),
+                result=ToolResult.success({}),
+            )
+        ],
+    )
+    assert _loop_state_changing(loop_result, registry) is True
+    registry.register(
+        "workspace_read",
+        ReadFileTool().handle,
+        description="Read a workspace file",
+        parameters_schema={"type": "object", "properties": {}},
+        capability="read",
+    )
+    read_result = AgentToolLoopResult(
+        text="",
+        messages=[],
+        tool_calls=[
+            ExecutedToolCall(
+                call=ToolCall(id="r-1", name="workspace_read", arguments={"path": "a.md"}),
+                result=ToolResult.success({}),
+            )
+        ],
+    )
+    assert _loop_state_changing(read_result, registry) is False

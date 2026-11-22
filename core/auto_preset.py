@@ -99,6 +99,7 @@ from shared.auto_models import (
 from shared.models import JSONValue, LLMMessage
 from shared.tool_capture import CaptureBinding, ToolCaptureFault
 from shared.workspace_binding import WorkspaceBinding
+from tools.tool_registry import ToolRegistry
 from tools.workspace_tools import WORKSPACE_ROOT, get_workspace_root
 
 if TYPE_CHECKING:
@@ -696,7 +697,7 @@ class AutoPresetRunner:
             browser_verification = _browser_postcondition_result(loop_result)
             canonical = outcome_from_loop_result(
                 loop_result,
-                state_changing=bool(loop_result.tool_calls),
+                state_changing=_loop_state_changing(loop_result, self.parent.tool_registry),
                 verification=_canonical_verification(verification, browser_verification),
             )
             if canonical.terminal_reason is not TerminalReason.COMPLETED:
@@ -1175,6 +1176,21 @@ def _browser_postcondition_result(
         (item.call.name, dict(item.call.arguments), item.result) for item in loop_result.tool_calls
     ]
     return VerifierRuntime().verify_browser_postconditions(calls)
+
+
+def _loop_state_changing(loop_result: AgentToolLoopResult, registry: ToolRegistry) -> bool:
+    """True when any executed call may have changed state.
+
+    Read-only tools (descriptor capability "read", e.g. workspace_read /
+    workspace_list) do not change state: a successful read-only run keeps
+    its informational answer instead of becoming UNVERIFIED. An unknown
+    descriptor fails closed to state-changing (same rule as plan_execute).
+    """
+    for executed in loop_result.tool_calls:
+        descriptor = registry.get_descriptor(executed.call.name)
+        if descriptor is None or descriptor.capability != "read":
+            return True
+    return False
 
 
 def _canonical_verification(
