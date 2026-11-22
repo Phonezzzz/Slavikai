@@ -148,20 +148,32 @@ def test_reading_profile_page_needs_no_approval(tmp_path: Path) -> None:
     assert _decide(tmp_path, {"operation": "read", "selector": "main"}) == "allow"
 
 
-def test_typing_is_local_mutation_allowed_by_default(tmp_path: Path) -> None:
+def test_typing_requires_approval_by_default(tmp_path: Path) -> None:
+    # Safe default restored (owner verdict on the scoped-authorization
+    # audit): input/select are local_mutation, but page handlers can
+    # send requests on edit without any submit (real-browser test in
+    # test_browser_input_external_effect.py), so typing asks by
+    # default until scoped editing authorization lands (E02-T09).
     assert (
-        _decide(tmp_path, {"operation": "input", "selector": "#name", "value": "draft"}) == "allow"
+        _decide(tmp_path, {"operation": "input", "selector": "#name", "value": "draft"})
+        == "require_approval"
     )
-    assert _decide(tmp_path, {"operation": "select", "selector": "#kind", "value": "a"}) == "allow"
+    assert (
+        _decide(tmp_path, {"operation": "select", "selector": "#kind", "value": "a"})
+        == "require_approval"
+    )
 
 
 def test_explicit_rules_still_govern_typing(tmp_path: Path) -> None:
     deny = _rule(effect="deny", action="input", target="#name", risk_class="local_mutation")
     ask = _rule(effect="ask", action="input", target="#name", risk_class="local_mutation")
+    allow = _rule(effect="allow", action="input", target="#name", risk_class="local_mutation")
     args = {"operation": "input", "selector": "#name", "value": "draft"}
 
     assert _decide(tmp_path, args, rules=[deny]) == "block"
     assert _decide(tmp_path, args, rules=[ask]) == "require_approval"
+    # An explicit allow rule still overrides the safe ask default.
+    assert _decide(tmp_path, args, rules=[allow]) == "allow"
 
 
 def test_submit_and_click_require_approval(tmp_path: Path) -> None:

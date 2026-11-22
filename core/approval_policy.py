@@ -352,6 +352,12 @@ def _desktop_default(
         "ui_interaction",
     }:
         return "ask", f"desktop_risk_requires_approval:{action.risk_class}"
+    if action.risk_class == "local_mutation":
+        # Browser draft edits (input/select) can trigger page handlers
+        # (autosave/fetch) without an explicit submit — proven by the
+        # real-browser test in E02-T05. The safe default stays ask until
+        # scoped editing authorization lands (E02-T09).
+        return "ask", "browser_edit_requires_scope"
     if action.command_class in {"privilege_escalation", "disk_boot", "shell_indirection"}:
         return "deny", f"command_denied:{action.command_class}"
     if action.command_class in {
