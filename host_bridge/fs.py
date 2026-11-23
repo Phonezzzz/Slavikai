@@ -1775,6 +1775,11 @@ class HostFsService:
                 os.close(fd)
             current_lexical = target.root.path.joinpath(*parts) if parts else target.root.path
             for name, st in entries:
+                # Same bounded-operations rule as the scan: checking
+                # each collected entry classifies it (and, for a
+                # move, its future destination path), so cancellation
+                # must stop this loop too, not only the scandir.
+                token.check()
                 lexical = current_lexical / name
                 self._require_normal(lexical, mutation=True)
                 probe = _Target(
@@ -2133,6 +2138,13 @@ class HostFsService:
             finally:
                 os.close(fd)
             for name, st in scanned:
+                # The scan above is bounded, but processing the
+                # collected entries must be cancellable too: each
+                # _classify resolves the path and reads mount
+                # topology, so a deadline firing after scandir must
+                # not leave the worker classifying the whole
+                # directory (ADR-0013 §7 bounded operations).
+                token.check()
                 rel_path = f"{rel}/{name}" if rel else name
                 lexical = target.lexical / rel_path
                 if self._classify(lexical, mutation=False) != "normal":

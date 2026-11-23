@@ -2067,6 +2067,85 @@ def test_subtree_scan_bounded_inside_scandir(
     assert (work_root / "tree" / "f000.txt").exists()
 
 
+def test_search_cancel_stops_processing_scanned_entries(
+    registry: RootsRegistry, tmp_path: Path, work_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # P2 (thirteenth review): the scandir loop checked the cancel
+    # token, but the loop processing the collected `scanned` entries
+    # did not — a deadline firing after the scan left the worker
+    # classifying every collected entry (path resolution + mount
+    # topology reads) and returning a result after request_timeout.
+    for i in range(100):
+        _seed(work_root, f"many/f{i:03d}.txt", "x")
+    service = HostFsService(registry, trash_root=tmp_path / "Trash")
+    token = CancelToken()
+    classified: list[Path] = []
+    real_classify = HostFsService._classify
+
+    def cancelling_classify(
+        self: HostFsService, lexical: Path, *, mutation: bool, includes_descendants: bool = False
+    ) -> str:
+        if lexical.parent.name == "many":
+            classified.append(lexical)
+            token.cancel()
+        return real_classify(
+            self, lexical, mutation=mutation, includes_descendants=includes_descendants
+        )
+
+    monkeypatch.setattr(HostFsService, "_classify", cancelling_classify)
+    with pytest.raises(RequestTimeoutError):
+        service.handle(
+            BridgeRequest(
+                version=1,
+                request_id="proc1",
+                capability="host.fs.search",
+                params={"root_id": "work", "query": "f", "path": "many"},
+            ),
+            token,
+        )
+    assert len(classified) == 1
+
+
+def test_subtree_cancel_stops_processing_scanned_entries(
+    registry: RootsRegistry, tmp_path: Path, work_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # P2 (thirteenth review, analogous path): _check_subtree checked
+    # the token inside scandir but not in the loop processing the
+    # collected entries, so a cancelled move/delete kept classifying
+    # the whole directory after request_timeout.
+    for i in range(100):
+        _seed(work_root, f"tree/f{i:03d}.txt", "x")
+    service = HostFsService(registry, trash_root=tmp_path / "Trash")
+    token = CancelToken()
+    classified: list[Path] = []
+    real_classify = HostFsService._classify
+
+    def cancelling_classify(
+        self: HostFsService, lexical: Path, *, mutation: bool, includes_descendants: bool = False
+    ) -> str:
+        if lexical.parent.name == "tree":
+            classified.append(lexical)
+            token.cancel()
+        return real_classify(
+            self, lexical, mutation=mutation, includes_descendants=includes_descendants
+        )
+
+    monkeypatch.setattr(HostFsService, "_classify", cancelling_classify)
+    with pytest.raises(RequestTimeoutError):
+        service.handle(
+            BridgeRequest(
+                version=1,
+                request_id="proc2",
+                capability="host.fs.move",
+                params={"root_id": "work", "path": "tree", "dest_path": "tree2"},
+            ),
+            token,
+        )
+    assert len(classified) == 1
+    assert (work_root / "tree" / "f000.txt").exists()
+    assert not (work_root / "tree2").exists()
+
+
 def test_link_publish_finishes_session_despite_cleanup_failure(
     bridge: Path, work_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
