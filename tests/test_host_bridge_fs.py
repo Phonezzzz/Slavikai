@@ -571,16 +571,16 @@ def test_delete_metadata_rollback_on_failure(
     bridge: Path, work_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _seed(work_root, "stuck.txt", "stay")
-    real_rename = os.rename
+    real_noreplace = fs_module._rename_noreplace
 
-    def failing_rename(*args: object, **kwargs: object) -> None:
+    def failing_noreplace(*args: object, **kwargs: object) -> None:
         raise OSError(errno.EIO, "simulated rename failure")
 
-    monkeypatch.setattr(os, "rename", failing_rename)
+    monkeypatch.setattr(fs_module, "_rename_noreplace", failing_noreplace)
     try:
         assert _fs_error(bridge, "host.fs.delete", root_id="work", path="stuck.txt") == "io_error"
     finally:
-        monkeypatch.setattr(os, "rename", real_rename)
+        monkeypatch.setattr(fs_module, "_rename_noreplace", real_noreplace)
     assert (work_root / "stuck.txt").exists()
     info_dir = tmp_path / "Trash" / "info"
     assert not info_dir.exists() or list(info_dir.iterdir()) == []
@@ -949,13 +949,14 @@ def test_subtree_walk_bounded_fds(registry: RootsRegistry, tmp_path: Path, work_
 def test_patch_preserves_mode(bridge: Path, work_root: Path) -> None:
     # P2: patch publishes a new inode; the original permission bits
     # must be carried over (0755 executable must not become 0600).
-    script = _seed(work_root, "script.sh", "echo old\n")
-    script.chmod(0o755)
     patch = "@@ -1,1 +1,1 @@\n-echo old\n+echo new\n"
-    done = _fs(bridge, "host.fs.patch", root_id="work", path="script.sh", patch=patch)
-    assert done["applied"] is True
-    assert script.read_text(encoding="utf-8") == "echo new\n"
-    assert stat.S_IMODE(script.stat().st_mode) == 0o755
+    for mode in (0o755, 0o644, 0o700, 0o640):
+        script = _seed(work_root, f"script-{mode:o}.sh", "echo old\n")
+        script.chmod(mode)
+        done = _fs(bridge, "host.fs.patch", root_id="work", path=script.name, patch=patch)
+        assert done["applied"] is True
+        assert script.read_text(encoding="utf-8") == "echo new\n"
+        assert stat.S_IMODE(script.stat().st_mode) == mode
 
 
 def test_list_long_names_frame_budget_with_cursor(bridge: Path, work_root: Path) -> None:
@@ -983,3 +984,272 @@ def test_list_long_names_frame_budget_with_cursor(bridge: Path, work_root: Path)
     else:
         raise AssertionError("pagination did not terminate")
     assert collected == names
+
+
+# --- second Codex review on E03-T04 (c018b57 findings) ---
+
+
+def test_root_inside_checkout_write_excluded(tmp_path: Path, home: Path) -> None:
+    # P1: a root configured INSIDE another SlavikAI checkout must not
+    # become a write path into that clone: checkout detection walks
+    # ancestors of the root, not only from the root down. Reads stay
+    # allowed (ADR-0013 §9 write-exclusion, not root rejection).
+    clone = home / "Project" / "clone"
+    (clone / "host_bridge").mkdir(parents=True)
+    (clone / "host_bridge" / "daemon.py").write_text("ORIGINAL", encoding="utf-8")
+    (clone / "docs").mkdir()
+    (clone / "docs" / "runtime_contract_claims.json").write_text("{}", encoding="utf-8")
+    inner_registry = RootsRegistry(
+        roots=(Root(id="inner", path=(clone / "host_bridge").resolve(), mode="rw"),),
+        write_excluded=(),
+        home=home.resolve(),
+        config_path=None,
+        socket_dir=None,
+    )
+    service = HostFsService(inner_registry, trash_root=tmp_path / "Trash")
+    socket_path = tmp_path / "slavikai" / "host-bridge.sock"
+    daemon = HostBridgeDaemon(socket_path, fs_service=service)
+    thread = _start_daemon(daemon)
+    try:
+        assert (
+            _fs_error(
+                socket_path,
+                "host.fs.write",
+                root_id="inner",
+                path="daemon.py",
+                mode="overwrite",
+                content="tampered",
+                commit=True,
+            )
+            == "write_excluded"
+        )
+        assert (
+            _fs_error(
+                socket_path,
+                "host.fs.write",
+                root_id="inner",
+                path="new.txt",
+                content="x",
+                commit=True,
+            )
+            == "write_excluded"
+        )
+        read = _fs(socket_path, "host.fs.read", root_id="inner", path="daemon.py")
+        assert read["content"] == "ORIGINAL"
+    finally:
+        daemon.shutdown()
+        thread.join(timeout=2.0)
+    assert (clone / "host_bridge" / "daemon.py").read_text(encoding="utf-8") == "ORIGINAL"
+
+
+def test_read_and_patch_fifo_not_a_file_without_hanging(
+    service: HostFsService, work_root: Path
+) -> None:
+    # P2: opening a FIFO without a writer must not block the worker
+    # past the deadline; O_NONBLOCK + fstat type check refuses typed.
+    os.mkfifo(work_root / "pipe")
+    outcomes: dict[str, object] = {}
+
+    def run(capability: str, params: dict[str, object], key: str) -> None:
+        try:
+            service.handle(
+                BridgeRequest(version=1, request_id=key, capability=capability, params=params),
+                CancelToken(),
+            )
+            outcomes[key] = "ok"
+        except Exception as exc:  # noqa: BLE001 - test probe records the typed code
+            outcomes[key] = getattr(exc, "code", repr(exc))
+
+    threads = [
+        threading.Thread(
+            target=run,
+            args=("host.fs.read", {"root_id": "work", "path": "pipe"}, "read"),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=run,
+            args=(
+                "host.fs.patch",
+                {"root_id": "work", "path": "pipe", "patch": "@@ -1,1 +1,1 @@\n-a\n+b\n"},
+                "patch",
+            ),
+            daemon=True,
+        ),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5.0)
+    assert not any(thread.is_alive() for thread in threads), "FIFO open blocked the worker"
+    assert outcomes == {"read": "not_a_file", "patch": "not_a_file"}
+
+
+def test_read_and_patch_final_component_bind_mount_refused(
+    registry: RootsRegistry, tmp_path: Path, work_root: Path
+) -> None:
+    # P2: a regular file bind-mounted directly onto a file inside the
+    # root must be refused: the mount check covers the final
+    # component, not only parent directories.
+    target = _seed(work_root, "bound.txt", "outside-content")
+    mounted = target.resolve()
+    service = HostFsService(
+        registry,
+        trash_root=tmp_path / "Trash",
+        mount_bindings_fn=lambda: [(mounted, mounted)],
+    )
+    cases: tuple[tuple[str, dict[str, object]], ...] = (
+        ("host.fs.read", {"root_id": "work", "path": "bound.txt"}),
+        (
+            "host.fs.patch",
+            {"root_id": "work", "path": "bound.txt", "patch": "@@ -1,1 +1,1 @@\n-a\n+b\n"},
+        ),
+    )
+    for capability, params in cases:
+        with pytest.raises(Exception) as excinfo:
+            service.handle(
+                BridgeRequest(version=1, request_id="bm", capability=capability, params=params),
+                CancelToken(),
+            )
+        assert getattr(excinfo.value, "code", None) == "path_outside_root"
+    assert target.read_text(encoding="utf-8") == "outside-content"
+
+
+def test_write_session_chunk_commit_serialized(
+    bridge: Path, work_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # P2: chunk and commit on one write_id are serialized: a delayed
+    # pwrite must never land after commit published the inode.
+    begin = _fs(bridge, "host.fs.write", root_id="work", path="race.txt", content="old")
+    write_id = begin["write_id"]
+    real_pwrite = os.pwrite
+    pwrite_started = threading.Event()
+
+    def slow_pwrite(fd: int, data: bytes, offset: int) -> int:
+        if data == b"NEW":
+            pwrite_started.set()
+            time.sleep(0.5)
+        return real_pwrite(fd, data, offset)
+
+    monkeypatch.setattr(os, "pwrite", slow_pwrite)
+    chunk_outcome: dict[str, object] = {}
+
+    def chunk() -> None:
+        try:
+            chunk_outcome["result"] = _fs(
+                bridge,
+                "host.fs.write",
+                root_id="work",
+                path="race.txt",
+                content="NEW",
+                offset=0,
+                write_id=write_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - test probe records the typed code
+            chunk_outcome["error"] = getattr(exc, "code", repr(exc))
+
+    thread = threading.Thread(target=chunk, daemon=True)
+    thread.start()
+    assert pwrite_started.wait(timeout=5.0)
+    committed = _fs(
+        bridge,
+        "host.fs.write",
+        root_id="work",
+        path="race.txt",
+        content="",
+        offset=3,
+        write_id=write_id,
+        commit=True,
+    )
+    assert committed["committed"] is True
+    at_commit = (work_root / "race.txt").read_text(encoding="utf-8")
+    thread.join(timeout=5.0)
+    assert not thread.is_alive()
+    # No post-publish mutation: the content seen when commit returned
+    # is the final content, and the serialized chunk landed first.
+    assert (work_root / "race.txt").read_text(encoding="utf-8") == at_commit == "NEW"
+    assert "result" in chunk_outcome
+
+
+def test_delete_trash_name_collision_preserves_existing(
+    bridge: Path, work_root: Path, tmp_path: Path
+) -> None:
+    # P2: an orphaned Trash/files entry without .trashinfo must not be
+    # destroyed by a later delete of a same-named file; the publish is
+    # atomic no-replace and picks another name on collision.
+    files_dir = tmp_path / "Trash" / "files"
+    files_dir.mkdir(parents=True)
+    (files_dir / "a.txt").write_text("previous", encoding="utf-8")
+    _seed(work_root, "a.txt", "new")
+    result = _fs(bridge, "host.fs.delete", root_id="work", path="a.txt")
+    assert result["recoverable"] is True
+    trash_name = str(result["trash_name"])
+    assert trash_name != "a.txt"
+    assert (files_dir / "a.txt").read_text(encoding="utf-8") == "previous"
+    assert (files_dir / trash_name).read_text(encoding="utf-8") == "new"
+    assert (tmp_path / "Trash" / "info" / f"{trash_name}.trashinfo").exists()
+    assert not (work_root / "a.txt").exists()
+
+
+def test_write_and_patch_long_names(bridge: Path, work_root: Path) -> None:
+    # P2: staging names must not embed the target name: a valid
+    # 220-byte file name plus a 41-byte suffix exceeded NAME_MAX and
+    # made write/patch fail with ENAMETOOLONG.
+    name = "a" * 216 + ".txt"
+    assert len(name.encode()) == 220
+    _fs(bridge, "host.fs.write", root_id="work", path=name, content="echo old\n", commit=True)
+    assert (work_root / name).read_text(encoding="utf-8") == "echo old\n"
+    patch = "@@ -1,1 +1,1 @@\n-echo old\n+echo new\n"
+    done = _fs(bridge, "host.fs.patch", root_id="work", path=name, patch=patch)
+    assert done["applied"] is True
+    assert (work_root / name).read_text(encoding="utf-8") == "echo new\n"
+
+
+def test_delete_timeout_during_trashinfo_create_keeps_source(
+    tmp_path: Path,
+    registry: RootsRegistry,
+    work_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # P1 (strengthened): cancellation while the .trashinfo is being
+    # CREATED (not only written) must also keep the source in place
+    # after the abandoned worker finishes.
+    _seed(work_root, "keep2.txt", "stay")
+    real_open = os.open
+
+    def slow_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if isinstance(path, str) and path.endswith(".trashinfo"):
+            time.sleep(0.6)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", slow_open)
+    service = HostFsService(registry, trash_root=tmp_path / "Trash")
+    socket_path = tmp_path / "slavikai" / "host-bridge.sock"
+    daemon = HostBridgeDaemon(
+        socket_path,
+        fs_service=service,
+        capability_deadlines={"host.fs.delete": 0.3},
+    )
+    thread = _start_daemon(daemon)
+    try:
+        with pytest.raises(client.BridgeClientError) as excinfo:
+            client.call(
+                socket_path,
+                "host.fs.delete",
+                params={"root_id": "work", "path": "keep2.txt"},
+            )
+        assert excinfo.value.code == "request_timeout"
+        time.sleep(1.0)  # let the abandoned worker finish creating metadata
+        assert (work_root / "keep2.txt").read_text(encoding="utf-8") == "stay"
+        info_dir = tmp_path / "Trash" / "info"
+        files_dir = tmp_path / "Trash" / "files"
+        assert not info_dir.exists() or list(info_dir.iterdir()) == []
+        assert not files_dir.exists() or list(files_dir.iterdir()) == []
+    finally:
+        daemon.shutdown()
+        thread.join(timeout=2.0)

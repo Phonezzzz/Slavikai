@@ -38,7 +38,9 @@ Trust-model points enforced here (ADR-0013 §5, §9, §10, §11):
   either advances the byte offset or fails with a typed error.
 - **Chunked atomic writes.** ``create``/``overwrite`` write chunks to
   a temp file in the target directory (idempotent per offset via
-  ``pwrite``) and publish with a single commit: ``os.link`` for
+  ``pwrite``, serialized per session under a lock so a delayed
+  chunk can never mutate an already-published inode) and publish
+  with a single commit: ``os.link`` for
   ``create`` (atomic absence check, no exists()+replace race),
   ``os.rename`` for ``overwrite``. Unfinished writes are size-capped
   and expire after a TTL. The staging file's identity
@@ -74,7 +76,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Final
@@ -128,7 +130,18 @@ BUILTIN_WORKSPACE_ID: Final[str] = "workspace"
 
 _ROOT_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9_-]{1,64}$")
 _DRIVE_RE: Final[re.Pattern[str]] = re.compile(r"^[a-zA-Z]:")
-_TEMP_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^\..+\.hb-[0-9a-f]{32}\.tmp$")
+_TEMP_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^\.(?:.*\.)?hb-[0-9a-f]{32}\.tmp$")
+
+
+def _staging_name() -> str:
+    """Short unique staging name.
+
+    The target name is deliberately not embedded: with
+    NAME_MAX=255 a long target name plus a suffix would exceed
+    the limit and make valid files unwritable (ENAMETOOLONG).
+    """
+    return f".hb-{uuid.uuid4().hex}.tmp"
+
 
 _DIR_OPEN_FLAGS: Final[int] = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
@@ -492,6 +505,10 @@ class _WriteSession:
     # name with a symlink or another file cannot redirect the write.
     temp_dev: int = 0
     temp_ino: int = 0
+    # Serializes chunk/commit/abort for this session so a delayed
+    # pwrite can never land after commit published the inode.
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    finished: bool = False
 
 
 def _type_name(mode: int) -> str:
@@ -609,12 +626,20 @@ class HostFsService:
         for prefix in (*self._registry.write_excluded, *self._builtin_excluded):
             if lexical == prefix or lexical.is_relative_to(prefix):
                 raise FsError("write_excluded", f"path is write-excluded: {target.display}")
-        # Structural checkout detection: any ancestor directory of the
-        # target (from the root down) that looks like a SlavikAI
-        # checkout write-excludes its whole subtree, even when the
-        # config forgot to list it (owner correction 2026-11-23).
+        # Structural checkout detection: any directory on the path
+        # from the filesystem root down to the target that looks like
+        # a SlavikAI checkout write-excludes its whole subtree, even
+        # when the config forgot to list it (owner correction
+        # 2026-11-23). Ancestors of the root are checked too: a root
+        # configured inside another checkout (e.g.
+        # ~/Project/clone/host_bridge) must not become a write path
+        # into that clone. Per ADR-0013 §9 checkouts are
+        # write-excluded even inside an allowed root, so the root is
+        # excluded for mutations here rather than rejected at load
+        # time (reads stay allowed).
+        candidates = list(reversed(target.root.path.parents))
         current = target.root.path
-        candidates = [current]
+        candidates.append(current)
         for part in target.parts:
             current = current / part
             candidates.append(current)
@@ -901,9 +926,16 @@ class HostFsService:
         length = _int_param(
             params, "length", default=MAX_FS_CHUNK_BYTES, minimum=1, maximum=MAX_FS_CHUNK_BYTES
         )
+        if target.lexical in self._mount_points():
+            raise FsError("path_outside_root", "nested mount traversal is forbidden in v1")
         pfd, name = self._open_parent(target)
         try:
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=pfd)
+            # O_NONBLOCK: opening a FIFO without a writer must not
+            # block the worker past the deadline; the fstat type
+            # check below refuses non-regular files typed.
+            fd = os.open(
+                name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=pfd
+            )
         finally:
             os.close(pfd)
         try:
@@ -977,7 +1009,19 @@ class HostFsService:
             ]
             sessions = [self._sessions.pop(wid) for wid in expired]
         for session in sessions:
-            self._discard_session_temp(session)
+            # Never discard a staging file out from under an
+            # in-flight chunk/commit; a busy session stays
+            # registered and is retried on the next sweep.
+            if not session.lock.acquire(blocking=False):
+                with self._sessions_lock:
+                    self._sessions.setdefault(session.write_id, session)
+                continue
+            try:
+                if not session.finished:
+                    session.finished = True
+                    self._discard_session_temp(session)
+            finally:
+                session.lock.release()
 
     def _discard_session_temp(self, session: _WriteSession) -> None:
         root = self._registry.by_id(session.root_id)
@@ -1015,7 +1059,9 @@ class HostFsService:
         ``st_dev``+``st_ino`` identity refuses any other replacement:
         the write can only ever touch the file this session created.
         """
-        fd = os.open(session.temp_name, flags | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+        fd = os.open(
+            session.temp_name, flags | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd
+        )
         try:
             st = os.fstat(fd)
             if not stat_mod.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != (
@@ -1085,7 +1131,14 @@ class HostFsService:
                 session = self._sessions.pop(write_id, None)
             if session is None:
                 raise _invalid_params("unknown write_id")
-            self._discard_session_temp(session)
+            # Serialize with any in-flight chunk/commit on this
+            # session: the staging file is discarded only once no
+            # other request can still write or publish it.
+            with session.lock:
+                if session.finished:
+                    raise _invalid_params("write_id already finished")
+                session.finished = True
+                self._discard_session_temp(session)
             return {
                 "root_id": target.root.id,
                 "path": target.display,
@@ -1103,7 +1156,7 @@ class HostFsService:
                 root_id=target.root.id,
                 dir_parts=target.parts[:-1],
                 target_name=target.parts[-1],
-                temp_name=f".{target.parts[-1]}.hb-{uuid.uuid4().hex}.tmp",
+                temp_name=_staging_name(),
                 mode=str(mode),
                 last_touch=self._clock(),
             )
@@ -1143,74 +1196,84 @@ class HostFsService:
             ):
                 raise _invalid_params("write_id does not match root_id/path")
 
-        fd = self._open_dirs(target.root, session.dir_parts)
-        try:
-            if data:
-                if offset > session.size:
+        # Serialize chunk/commit on this session: a delayed
+        # pwrite must never land after commit published the
+        # inode, and two commits must not race the same staging
+        # file. State is re-checked under the lock: an abort or
+        # expiry that won the race makes this request fail typed
+        # instead of touching a discarded staging file.
+        with session.lock:
+            if session.finished:
+                raise _invalid_params("unknown write_id")
+            fd = self._open_dirs(target.root, session.dir_parts)
+            try:
+                if data:
+                    if offset > session.size:
+                        raise _invalid_params("offset leaves a gap in the write session")
+                    if offset + len(data) > MAX_WRITE_BYTES:
+                        raise FsError("content_too_large", "write session exceeds size limit")
+                    tfd = self._open_staging(fd, session, os.O_WRONLY)
+                    try:
+                        os.pwrite(tfd, data, offset)
+                    finally:
+                        os.close(tfd)
+                    session.size = max(session.size, offset + len(data))
+                    session.last_touch = self._clock()
+                elif offset > session.size:
                     raise _invalid_params("offset leaves a gap in the write session")
-                if offset + len(data) > MAX_WRITE_BYTES:
-                    raise FsError("content_too_large", "write session exceeds size limit")
-                tfd = self._open_staging(fd, session, os.O_WRONLY)
+                if not commit:
+                    return {
+                        "root_id": target.root.id,
+                        "path": target.display,
+                        "size": session.size,
+                        "bytes_written": len(data),
+                        "write_id": write_id,
+                    }
+                # Commit: fsync the temp, then the cancellation gate, then
+                # exactly one publish syscall. After the gate passes, a
+                # lost response means outcome-unknown (documented); the
+                # publish itself is atomic either way.
+                tfd = self._open_staging(fd, session, os.O_RDONLY)
                 try:
-                    os.pwrite(tfd, data, offset)
+                    os.fsync(tfd)
                 finally:
                     os.close(tfd)
-                session.size = max(session.size, offset + len(data))
-                session.last_touch = self._clock()
-            elif offset > session.size:
-                raise _invalid_params("offset leaves a gap in the write session")
-            if not commit:
+                if self._commit_hook is not None:
+                    self._commit_hook()
+                token.check()
+                # The publish syscalls address the staging file by name;
+                # re-verify its identity immediately before publishing so
+                # a swapped-in symlink/file is never published.
+                self._verify_staging_name(fd, session)
+                if session.mode == "create":
+                    # linkat fails with EEXIST if the target appeared:
+                    # absence is verified atomically, no exists()+replace race.
+                    try:
+                        os.link(
+                            session.temp_name,
+                            session.target_name,
+                            src_dir_fd=fd,
+                            dst_dir_fd=fd,
+                        )
+                    except FileExistsError as exc:
+                        raise FsError(
+                            "already_exists", f"target already exists: {target.display}"
+                        ) from exc
+                    os.unlink(session.temp_name, dir_fd=fd)
+                else:
+                    os.rename(session.temp_name, session.target_name, src_dir_fd=fd, dst_dir_fd=fd)
+                session.finished = True
+                with self._sessions_lock:
+                    self._sessions.pop(write_id, None)
                 return {
                     "root_id": target.root.id,
                     "path": target.display,
                     "size": session.size,
                     "bytes_written": len(data),
-                    "write_id": write_id,
+                    "committed": True,
                 }
-            # Commit: fsync the temp, then the cancellation gate, then
-            # exactly one publish syscall. After the gate passes, a
-            # lost response means outcome-unknown (documented); the
-            # publish itself is atomic either way.
-            tfd = self._open_staging(fd, session, os.O_RDONLY)
-            try:
-                os.fsync(tfd)
             finally:
-                os.close(tfd)
-            if self._commit_hook is not None:
-                self._commit_hook()
-            token.check()
-            # The publish syscalls address the staging file by name;
-            # re-verify its identity immediately before publishing so
-            # a swapped-in symlink/file is never published.
-            self._verify_staging_name(fd, session)
-            if session.mode == "create":
-                # linkat fails with EEXIST if the target appeared:
-                # absence is verified atomically, no exists()+replace race.
-                try:
-                    os.link(
-                        session.temp_name,
-                        session.target_name,
-                        src_dir_fd=fd,
-                        dst_dir_fd=fd,
-                    )
-                except FileExistsError as exc:
-                    raise FsError(
-                        "already_exists", f"target already exists: {target.display}"
-                    ) from exc
-                os.unlink(session.temp_name, dir_fd=fd)
-            else:
-                os.rename(session.temp_name, session.target_name, src_dir_fd=fd, dst_dir_fd=fd)
-            with self._sessions_lock:
-                self._sessions.pop(write_id, None)
-            return {
-                "root_id": target.root.id,
-                "path": target.display,
-                "size": session.size,
-                "bytes_written": len(data),
-                "committed": True,
-            }
-        finally:
-            os.close(fd)
+                os.close(fd)
 
     # --- host.fs.patch ---
 
@@ -1227,9 +1290,15 @@ class HostFsService:
         violation = validate_patch_contract(patch_text)
         if violation is not None:
             raise FsError("invalid_patch", violation[:512])
+        if target.lexical in self._mount_points():
+            raise FsError("path_outside_root", "nested mount traversal is forbidden in v1")
         pfd, name = self._open_parent(target)
         try:
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=pfd)
+            # O_NONBLOCK: a FIFO target must fail typed below, not
+            # block the worker in open() past the deadline.
+            fd = os.open(
+                name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=pfd
+            )
             try:
                 st = os.fstat(fd)
                 if stat_mod.S_ISDIR(st.st_mode):
@@ -1259,7 +1328,7 @@ class HostFsService:
                     "dry_run": True,
                     "size": len(updated.encode("utf-8")),
                 }
-            temp_name = f".{name}.hb-{uuid.uuid4().hex}.tmp"
+            temp_name = _staging_name()
             tfd = os.open(
                 temp_name,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
@@ -1531,7 +1600,19 @@ class HostFsService:
                         # stays in place and the cleanup below removes
                         # the metadata (cancel-before-commit).
                         token.check()
-                        os.rename(name, candidate, src_dir_fd=pfd, dst_dir_fd=files_fd)
+                        # Atomic no-replace publish: an existing
+                        # Trash/files entry (e.g. orphaned without
+                        # .trashinfo by another trash client) must
+                        # never be destroyed by this delete.
+                        _rename_noreplace(name, pfd, candidate, files_fd)
+                    except OSError as exc:
+                        try:
+                            os.unlink(info_name, dir_fd=info_fd)
+                        except OSError:
+                            pass
+                        if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
+                            continue  # name collision: pick another name
+                        raise
                     except BaseException:
                         try:
                             os.unlink(info_name, dir_fd=info_fd)
