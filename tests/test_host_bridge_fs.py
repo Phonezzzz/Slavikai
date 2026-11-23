@@ -1387,3 +1387,113 @@ def test_config_wrong_type_path_rejected(tmp_path: Path, home: Path) -> None:
         env={"SLAVIK_HOST_BRIDGE_CONFIG": str(tmp_path / "absent.json")}, home=home
     )
     assert absent.describe() == [{"id": "workspace", "mode": "rw"}]
+
+
+def test_orphan_sweep_never_deletes_user_files(tmp_path: Path, home: Path) -> None:
+    # P2: the orphan sweep hard-deleted ANY file matching the
+    # staging name pattern older than the TTL — including user
+    # files and files in write_excluded paths — during an
+    # unrelated write. Only staging files proven to be created by
+    # this daemon (identity registry) may be removed by cleanup.
+    work = (home / "Project" / "work").resolve()
+    user_name = ".checkpoint.hb-" + "a" * 32 + ".tmp"
+    excluded_name = ".keep.hb-" + "b" * 32 + ".tmp"
+    _seed(work, user_name, "user data")
+    _seed(work, excluded_name, "excluded data")
+    old = time.time() - 3600
+    os.utime(work / user_name, (old, old))
+    os.utime(work / excluded_name, (old, old))
+    custom = RootsRegistry(
+        roots=(Root(id="work", path=work, mode="rw"),),
+        write_excluded=((work / excluded_name).resolve(),),
+        home=home.resolve(),
+        config_path=None,
+        socket_dir=None,
+    )
+    service = HostFsService(custom, trash_root=tmp_path / "Trash")
+    # An unrelated committed write in the same directory runs the sweep.
+    service.handle(
+        BridgeRequest(
+            version=1,
+            request_id="n1-write",
+            capability="host.fs.write",
+            params={"root_id": "work", "path": "other.txt", "content": "x", "commit": True},
+        ),
+        CancelToken(),
+    )
+    assert (work / user_name).read_text(encoding="utf-8") == "user data"
+    assert (work / excluded_name).read_text(encoding="utf-8") == "excluded data"
+    # Positive side: a proven-internal orphan (staging file of a
+    # session this daemon created, the session since lost) IS swept.
+    begin = service.handle(
+        BridgeRequest(
+            version=1,
+            request_id="n1-begin",
+            capability="host.fs.write",
+            params={"root_id": "work", "path": "lost.txt", "content": "partial"},
+        ),
+        CancelToken(),
+    )
+    temps = [
+        p for p in work.iterdir() if ".hb-" in p.name and p.name not in (user_name, excluded_name)
+    ]
+    assert len(temps) == 1
+    orphan = temps[0]
+    os.utime(orphan, (old, old))
+    with service._sessions_lock:
+        service._sessions.pop(begin["write_id"], None)
+    service.handle(
+        BridgeRequest(
+            version=1,
+            request_id="n1-trigger",
+            capability="host.fs.write",
+            params={"root_id": "work", "path": "trigger.txt", "content": "y", "commit": True},
+        ),
+        CancelToken(),
+    )
+    assert not orphan.exists()
+    assert (work / user_name).exists()
+    assert (work / excluded_name).exists()
+
+
+def test_list_pagination_after_cursor_deleted(bridge: Path, work_root: Path) -> None:
+    # P2: if the file named by next_cursor was deleted between
+    # pages, `started` never became True and the next page
+    # wrongly returned entries=[] truncated=false although files
+    # remained. Continuation must select names strictly after the
+    # cursor without requiring the cursor entry to exist.
+    for name in ("a.txt", "b.txt", "c.txt"):
+        _seed(work_root, name, "x")
+    page1 = _fs(bridge, "host.fs.list", root_id="work", path=".", limit=1)
+    assert [e["name"] for e in page1["entries"]] == ["a.txt"]  # type: ignore[index]
+    assert page1["next_cursor"] == "a.txt"
+    (work_root / "a.txt").unlink()
+    page2 = _fs(
+        bridge, "host.fs.list", root_id="work", path=".", limit=1, cursor=page1["next_cursor"]
+    )
+    assert [e["name"] for e in page2["entries"]] == ["b.txt"]  # type: ignore[index]
+    assert page2["truncated"] is True
+    page3 = _fs(
+        bridge, "host.fs.list", root_id="work", path=".", limit=1, cursor=page2["next_cursor"]
+    )
+    assert [e["name"] for e in page3["entries"]] == ["c.txt"]  # type: ignore[index]
+    assert page3["truncated"] is False
+
+
+def test_delete_long_name_into_trash(bridge: Path, work_root: Path, tmp_path: Path) -> None:
+    # P2: a valid 250-byte file name could not be deleted because
+    # the .trashinfo twin (name + 10 bytes) exceeded NAME_MAX=255
+    # (ENAMETOOLONG). The trash entry name is byte-truncated to
+    # fit; the full original path stays recorded in .trashinfo.
+    long_name = "x" * 246 + ".txt"  # 250 bytes
+    _seed(work_root, long_name, "bye")
+    result = _fs(bridge, "host.fs.delete", root_id="work", path=long_name)
+    assert result["recoverable"] is True
+    assert not (work_root / long_name).exists()
+    trash_name = result["trash_name"]
+    assert isinstance(trash_name, str)
+    assert len(os.fsencode(trash_name)) + len(".trashinfo") <= 255
+    trash_file = tmp_path / "Trash" / "files" / trash_name
+    info_file = tmp_path / "Trash" / "info" / f"{trash_name}.trashinfo"
+    assert trash_file.read_text(encoding="utf-8") == "bye"
+    assert long_name in info_file.read_text(encoding="utf-8")

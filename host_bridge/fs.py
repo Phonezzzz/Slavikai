@@ -47,7 +47,11 @@ Trust-model points enforced here (ADR-0013 §5, §9, §10, §11):
   (``st_dev``+``st_ino``) is recorded at creation; every later open
   uses ``O_NOFOLLOW`` and re-verifies the identity, so swapping the
   staging name for a symlink (or another file) cannot redirect
-  writes outside the root.
+  writes outside the root. Orphan cleanup hard-deletes only staging
+  files whose identity is in this process's registry (proven
+  internal) and whose path is neither write-excluded nor protected;
+  a user file that merely matches the staging name pattern is never
+  removed by cleanup.
 - **Cancel-before-commit.** Mutations check the request's
   ``CancelToken`` immediately before the single publish syscall
   (including the trash rename in delete, after the ``.trashinfo``
@@ -141,6 +145,37 @@ def _staging_name() -> str:
     the limit and make valid files unwritable (ENAMETOOLONG).
     """
     return f".hb-{uuid.uuid4().hex}.tmp"
+
+
+_NAME_MAX_BYTES: Final[int] = 255
+_TRASHINFO_SUFFIX: Final[str] = ".trashinfo"
+
+
+def _trash_candidate(name: str, attempt: int) -> str:
+    """Trash entry name that fits NAME_MAX together with its twin.
+
+    The ``.trashinfo`` metadata file appends 10 bytes to the entry
+    name and a collision suffix adds 9 more, so a valid file with a
+    250-byte name would exceed NAME_MAX=255 and be undeletable
+    (ENAMETOOLONG). The original part is byte-truncated to fit;
+    the full original path is recorded inside ``.trashinfo`` per
+    the freedesktop spec, so no information is lost.
+    """
+    suffix = Path(name).suffix
+    if len(os.fsencode(suffix)) > 32:
+        suffix = ""
+    stem = name[: len(name) - len(suffix)] if suffix else name
+    extra = "" if attempt == 0 else f"-{uuid.uuid4().hex[:8]}"
+    budget = (
+        _NAME_MAX_BYTES
+        - len(_TRASHINFO_SUFFIX)
+        - len(os.fsencode(extra))
+        - len(os.fsencode(suffix))
+    )
+    stem_bytes = os.fsencode(stem)
+    if len(stem_bytes) > budget:
+        stem = stem_bytes[:budget].decode("utf-8", errors="ignore")
+    return f"{stem}{extra}{suffix}"
 
 
 _DIR_OPEN_FLAGS: Final[int] = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -589,6 +624,13 @@ class HostFsService:
         self._clock = clock
         self._sessions: dict[str, _WriteSession] = {}
         self._sessions_lock = threading.Lock()
+        # (st_dev, st_ino) of every staging file this process has
+        # created and not yet published/discarded. The orphan sweep
+        # may hard-delete ONLY identities in this registry: a user
+        # file that merely matches the staging name pattern is not
+        # proven internal and must never be removed by cleanup
+        # (trash-only semantics, ADR-0013 §11).
+        self._staging_identities: set[tuple[int, int]] = set()
         self._checkout_cache: dict[Path, bool] = {}
         self._builtin_excluded = self._compute_builtin_exclusions()
         self._handlers: dict[
@@ -905,11 +947,12 @@ class HostFsService:
             names = sorted(os.listdir(fd))
             entries: list[dict[str, object]] = []
             truncated = False
-            started = cursor is None
             for name in names:
-                if not started:
-                    if name == cursor:
-                        started = True
+                if cursor is not None and name <= cursor:
+                    # Names are sorted, so continuation is "strictly
+                    # after the cursor name" — the cursor entry
+                    # itself need not still exist (it may have been
+                    # deleted or renamed between pages).
                     continue
                 if len(entries) >= limit:
                     truncated = True
@@ -1068,22 +1111,76 @@ class HostFsService:
             finally:
                 os.close(fd)
         except (FsError, OSError):
-            pass  # best-effort cleanup
+            # Best-effort: the identity stays registered so the
+            # orphan sweep can retry the unlink later.
+            return
+        self._forget_staging(session.temp_dev, session.temp_ino)
 
-    def _sweep_orphan_temps(self, dir_fd: int, now: float) -> None:
+    def _register_staging(self, dev: int, ino: int) -> None:
+        with self._sessions_lock:
+            self._staging_identities.add((dev, ino))
+
+    def _forget_staging(self, dev: int, ino: int) -> None:
+        with self._sessions_lock:
+            self._staging_identities.discard((dev, ino))
+
+    def _sweep_orphan_temps(
+        self, dir_fd: int, now: float, root: Root, dir_parts: tuple[str, ...]
+    ) -> None:
+        """Remove proven-internal staging orphans from one directory.
+
+        A file is unlinked only when ALL of these hold: its name
+        matches the internal staging pattern, its (st_dev, st_ino)
+        identity is in this daemon's staging registry (this process
+        created it), no live write session owns it, it is older
+        than the session TTL, and its path is neither write-excluded
+        nor protected. A user file that merely matches the staging
+        name pattern — including one in a write-excluded path — is
+        never hard-deleted here: cleanup must not bypass trash-only
+        semantics for anything not proven internal. Staging files
+        left by a previous daemon instance are not in the registry
+        and are left alone (inert, hidden); proving ownership
+        across restarts is not worth deleting unproven user data.
+        """
         try:
             names = os.listdir(dir_fd)
         except OSError:
             return
+        with self._sessions_lock:
+            known = set(self._staging_identities)
+            live = {(s.temp_dev, s.temp_ino) for s in self._sessions.values()}
         for name in names:
             if not _TEMP_NAME_RE.match(name):
                 continue
             try:
                 st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-                if now - st.st_mtime > WRITE_SESSION_TTL_S:
-                    os.unlink(name, dir_fd=dir_fd)
             except OSError:
-                pass
+                continue
+            identity = (st.st_dev, st.st_ino)
+            if (
+                not stat_mod.S_ISREG(st.st_mode)
+                or identity not in known
+                or identity in live
+                or now - st.st_mtime <= WRITE_SESSION_TTL_S
+            ):
+                continue
+            lexical = root.path.joinpath(*dir_parts, name)
+            probe = _Target(
+                root=root,
+                parts=(*dir_parts, name),
+                lexical=lexical,
+                display="/".join((*dir_parts, name)),
+            )
+            try:
+                self._check_write_excluded(probe)
+                self._require_normal(lexical, mutation=True)
+            except FsError:
+                continue
+            try:
+                os.unlink(name, dir_fd=dir_fd)
+            except OSError:
+                continue
+            self._forget_staging(*identity)
 
     def _open_staging(self, dir_fd: int, session: _WriteSession, flags: int) -> int:
         """Open the session's staging file without following symlinks.
@@ -1199,7 +1296,7 @@ class HostFsService:
             try:
                 fd = self._open_dirs(target.root, session.dir_parts, create=create_parents)
                 try:
-                    self._sweep_orphan_temps(fd, time.time())
+                    self._sweep_orphan_temps(fd, time.time(), target.root, session.dir_parts)
                     tfd = os.open(
                         session.temp_name,
                         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
@@ -1210,6 +1307,7 @@ class HostFsService:
                         tst = os.fstat(tfd)
                         session.temp_dev = tst.st_dev
                         session.temp_ino = tst.st_ino
+                        self._register_staging(tst.st_dev, tst.st_ino)
                     finally:
                         os.close(tfd)
                 finally:
@@ -1299,6 +1397,7 @@ class HostFsService:
                 session.finished = True
                 with self._sessions_lock:
                     self._sessions.pop(write_id, None)
+                    self._staging_identities.discard((session.temp_dev, session.temp_ino))
                 return {
                     "root_id": target.root.id,
                     "path": target.display,
@@ -1370,6 +1469,9 @@ class HostFsService:
                 dir_fd=pfd,
             )
             try:
+                tst = os.fstat(tfd)
+                temp_identity = (tst.st_dev, tst.st_ino)
+                self._register_staging(*temp_identity)
                 _write_all(tfd, updated.encode("utf-8"))
                 # Preserve the original file's permission bits: the
                 # publish replaces the inode, so without this an
@@ -1387,8 +1489,11 @@ class HostFsService:
                 try:
                     os.unlink(temp_name, dir_fd=pfd)
                 except OSError:
-                    pass
+                    pass  # identity stays registered; the orphan sweep retries
+                else:
+                    self._forget_staging(*temp_identity)
                 raise
+            self._forget_staging(*temp_identity)
         finally:
             os.close(pfd)
         return {
@@ -1633,11 +1738,7 @@ class HostFsService:
             try:
                 trash_name: str | None = None
                 for attempt in range(10):
-                    candidate = (
-                        name
-                        if attempt == 0
-                        else f"{Path(name).stem}-{uuid.uuid4().hex[:8]}{Path(name).suffix}"
-                    )
+                    candidate = _trash_candidate(name, attempt)
                     info_name = f"{candidate}.trashinfo"
                     try:
                         ifd = os.open(
