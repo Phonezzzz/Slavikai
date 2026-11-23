@@ -17,6 +17,9 @@ Trust-model points enforced here (ADR-0013):
   equal to the daemon's own UID) is accepted.
 - Non-root: the daemon runs as the owner's UID under a systemd user
   service and never invokes sudo/pkexec/setuid helpers.
+- Single instance: an existing socket with a live listener refuses
+  startup; only a provably stale socket file (connection refused) is
+  replaced, and shutdown unlinks only the socket this instance created.
 """
 
 from __future__ import annotations
@@ -52,6 +55,7 @@ SOCKET_FILE_NAME: Final[str] = "host-bridge.sock"
 _DIR_MODE: Final[int] = 0o700
 _SOCKET_MODE: Final[int] = 0o600
 _ACCEPT_TIMEOUT_S: Final[float] = 0.2
+_PROBE_TIMEOUT_S: Final[float] = 2.0
 
 
 class BridgeConfigError(Exception):
@@ -82,6 +86,28 @@ def resolve_socket_path(env: Mapping[str, str] | None = None) -> Path:
     return runtime_dir / SOCKET_DIR_NAME / SOCKET_FILE_NAME
 
 
+def _socket_has_live_listener(socket_path: Path) -> bool:
+    """Return True when a live listener accepts connections at socket_path.
+
+    A stale socket file (bound once, listener gone) refuses the
+    connection. Any other probe outcome means staleness cannot be
+    proven, so startup fails closed instead of stealing the path.
+    """
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(_PROBE_TIMEOUT_S)
+    try:
+        probe.connect(str(socket_path))
+    except (ConnectionRefusedError, FileNotFoundError):
+        return False
+    except OSError as exc:
+        raise BridgeConfigError(
+            f"cannot verify existing socket {socket_path} is stale: {exc}"
+        ) from exc
+    finally:
+        probe.close()
+    return True
+
+
 def read_peer_cred(conn: socket.socket) -> PeerCred:
     """Read SO_PEERCRED (pid, uid, gid) for a connected AF_UNIX socket."""
     if not hasattr(socket, "SO_PEERCRED"):
@@ -105,6 +131,7 @@ class HostBridgeDaemon:
         self._expected_uid = os.getuid() if expected_uid is None else expected_uid
         self._peer_cred_fn = read_peer_cred if peer_cred_fn is None else peer_cred_fn
         self._listener: socket.socket | None = None
+        self._socket_identity: tuple[int, int] | None = None
         self._stop = threading.Event()
 
     @property
@@ -125,7 +152,9 @@ class HostBridgeDaemon:
             mode = self._socket_path.lstat().st_mode
             if not stat.S_ISSOCK(mode):
                 raise BridgeConfigError(f"refusing to replace non-socket file: {self._socket_path}")
-            self._socket_path.unlink()
+            if _socket_has_live_listener(self._socket_path):
+                raise BridgeConfigError(f"host bridge daemon already running: {self._socket_path}")
+            self._socket_path.unlink(missing_ok=True)
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         old_umask = os.umask(0o077)
         try:
@@ -133,6 +162,8 @@ class HostBridgeDaemon:
         finally:
             os.umask(old_umask)
         os.chmod(self._socket_path, _SOCKET_MODE)
+        bound = self._socket_path.stat()
+        self._socket_identity = (bound.st_dev, bound.st_ino)
         listener.listen(16)
         listener.settimeout(_ACCEPT_TIMEOUT_S)
         self._listener = listener
@@ -155,10 +186,18 @@ class HostBridgeDaemon:
         if self._listener is not None:
             self._listener.close()
             self._listener = None
+        identity = self._socket_identity
+        self._socket_identity = None
+        if identity is None:
+            return
         try:
-            self._socket_path.unlink()
+            current = self._socket_path.stat()
         except FileNotFoundError:
-            pass
+            return
+        # Unlink only the socket this instance created; if the path now
+        # refers to another instance's socket, leave it in place.
+        if (current.st_dev, current.st_ino) == identity:
+            self._socket_path.unlink(missing_ok=True)
 
     @staticmethod
     def _close_gracefully(conn: socket.socket) -> None:

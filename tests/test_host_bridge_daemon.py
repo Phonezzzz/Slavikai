@@ -134,6 +134,44 @@ def test_shutdown_removes_socket_file(tmp_path: Path) -> None:
     assert not socket_path.exists()
 
 
+def test_second_daemon_on_live_socket_is_refused(tmp_path: Path) -> None:
+    socket_path = tmp_path / "slavikai" / "host-bridge.sock"
+    first = HostBridgeDaemon(socket_path)
+    thread = _start_daemon(first)
+    try:
+        second = HostBridgeDaemon(socket_path)
+        with pytest.raises(BridgeConfigError, match="already running"):
+            second.start()
+        # the refused attempt must not disturb the running instance
+        assert client.ping(socket_path) == {"pong": True}
+    finally:
+        first.shutdown()
+        thread.join(timeout=2.0)
+    # after the refused second attempt, the first shutdown still
+    # removes its own socket
+    assert not socket_path.exists()
+
+
+def test_shutdown_leaves_replaced_socket_in_place(tmp_path: Path) -> None:
+    socket_path = tmp_path / "slavikai" / "host-bridge.sock"
+    first = HostBridgeDaemon(socket_path)
+    first_thread = _start_daemon(first)
+    # Simulate another instance taking over the path: the first socket
+    # file is unlinked and a second daemon binds a fresh socket there.
+    socket_path.unlink()
+    second = HostBridgeDaemon(socket_path)
+    second_thread = _start_daemon(second)
+    try:
+        first.shutdown()
+        first_thread.join(timeout=2.0)
+        # first.shutdown() must not unlink the second instance's socket
+        assert socket_path.exists()
+        assert client.ping(socket_path) == {"pong": True}
+    finally:
+        second.shutdown()
+        second_thread.join(timeout=2.0)
+
+
 # --- same-UID capabilities over the real socket ---
 
 
