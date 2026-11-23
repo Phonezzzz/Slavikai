@@ -1409,11 +1409,15 @@ class HostFsService:
                     os.close(tfd)
                 if self._commit_hook is not None:
                     self._commit_hook()
-                token.check()
                 # The publish syscalls address the staging file by name;
                 # re-verify its identity immediately before publishing so
                 # a swapped-in symlink/file is never published.
                 self._verify_staging_name(fd, session)
+                # Cancellation gate AFTER the identity verification: the
+                # stat inside it can block past the deadline, and a
+                # request_timeout already returned to the client must
+                # exclude the publish (cancel-before-commit).
+                token.check()
                 if session.mode == "create":
                     # linkat fails with EEXIST if the target appeared:
                     # absence is verified atomically, no exists()+replace race.
@@ -1778,7 +1782,14 @@ class HostFsService:
             # Exclusive .trashinfo first; on failure the metadata is
             # removed again and the source stays untouched.
             info_fd = os.open(str(info_dir), _DIR_OPEN_FLAGS)
-            files_fd = os.open(str(files_dir), _DIR_OPEN_FLAGS)
+            try:
+                files_fd = os.open(str(files_dir), _DIR_OPEN_FLAGS)
+            except BaseException:
+                # The protecting finally below starts only once both
+                # descriptors exist; without this, a failed second
+                # open leaks info_fd on every delete (EMFILE).
+                os.close(info_fd)
+                raise
             try:
                 trash_name: str | None = None
                 for attempt in range(10):

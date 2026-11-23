@@ -1641,3 +1641,106 @@ def test_home_trash_dirs_created_private(registry: RootsRegistry, work_root: Pat
     assert result["recoverable"] is True
     for directory in (home_trash, home_trash / "files", home_trash / "info"):
         assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+
+
+def test_write_timeout_during_staging_verify_no_publish(
+    tmp_path: Path,
+    registry: RootsRegistry,
+    work_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # P2: if the staging identity verification (os.stat inside
+    # _verify_staging_name) runs past the deadline, the client gets
+    # request_timeout and the worker must not publish afterwards:
+    # the cancellation gate sits after the verification, immediately
+    # before the publish syscall (cancel-before-commit).
+    real_stat = os.stat
+
+    def slow_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        if isinstance(path, str) and path.startswith(".hb-") and path.endswith(".tmp"):
+            time.sleep(0.6)
+        return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "stat", slow_stat)
+    service = HostFsService(registry, trash_root=tmp_path / "Trash")
+    socket_path = tmp_path / "slavikai" / "host-bridge.sock"
+    daemon = HostBridgeDaemon(
+        socket_path,
+        fs_service=service,
+        capability_deadlines={"host.fs.write": 0.3},
+    )
+    thread = _start_daemon(daemon)
+    try:
+        with pytest.raises(client.BridgeClientError) as excinfo:
+            client.call(
+                socket_path,
+                "host.fs.write",
+                params={
+                    "root_id": "work",
+                    "path": "late.txt",
+                    "content": "must never land",
+                    "commit": True,
+                },
+            )
+        assert excinfo.value.code == "request_timeout"
+        time.sleep(1.0)  # let the abandoned worker finish verification
+        assert not (work_root / "late.txt").exists()
+        assert client.ping(socket_path) == {"pong": True}
+    finally:
+        daemon.shutdown()
+        thread.join(timeout=2.0)
+
+
+def test_delete_unopenable_trash_files_dir_no_fd_leak(
+    service: HostFsService, work_root: Path, tmp_path: Path
+) -> None:
+    # P2: if Trash/info opens but Trash/files does not (mode 0300:
+    # owner write+execute without read, left unchanged by
+    # _ensure_private_trash_dir, but O_RDONLY needs read), the
+    # already-acquired info_fd must be closed again; otherwise each
+    # failed delete leaks one descriptor towards EMFILE. Service
+    # level on purpose: fd counts over the daemon socket are noisy
+    # (connection sockets drain asynchronously), while the leak
+    # lives in the FS handler itself. Only directory descriptors
+    # are counted (the leaked info_fd is one): socket fds left over
+    # from other tests drain at arbitrary GC points and would
+    # otherwise move the total either way.
+    _seed(work_root, "victim.txt", "stay")
+    files_dir = tmp_path / "Trash" / "files"
+    files_dir.mkdir(parents=True)
+    files_dir.chmod(0o300)
+
+    def dir_fd_count() -> int:
+        count = 0
+        for name in os.listdir("/proc/self/fd"):
+            try:
+                target = os.readlink(f"/proc/self/fd/{name}")
+            except OSError:
+                continue
+            if target.startswith("/") and os.path.isdir(target):
+                count += 1
+        return count
+
+    def delete() -> None:
+        with pytest.raises(fs_module.FsError) as excinfo:
+            service.handle(
+                BridgeRequest(
+                    version=1,
+                    request_id="fd-leak-probe",
+                    capability="host.fs.delete",
+                    params={"root_id": "work", "path": "victim.txt"},
+                ),
+                CancelToken(),
+            )
+        assert excinfo.value.code == "io_error"
+
+    try:
+        delete()  # warm-up
+        before = dir_fd_count()
+        for _ in range(10):
+            delete()
+        after = dir_fd_count()
+        assert after == before
+        assert (work_root / "victim.txt").read_text(encoding="utf-8") == "stay"
+    finally:
+        files_dir.chmod(0o700)
