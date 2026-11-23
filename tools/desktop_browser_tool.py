@@ -400,16 +400,27 @@ class PlaywrightBrowserBackend:
             if declaration is not None:
                 click_timeout = max(1.0, (deadline - time.monotonic()) * 1000)
             _locator(page, request).click(timeout=click_timeout)
-            page.wait_for_timeout(50)
+            url_after = before_url
+            settled = True
+            try:
+                page.wait_for_timeout(50)
+                url_after = page.url
+            except Exception:  # noqa: BLE001 - наблюдение после успешного действия
+                if declaration is None:
+                    raise
+                # Вкладка закрылась после успешного действия: фактов
+                # захвата не будет, результат остаётся неподтверждённым
+                # (UNVERIFIED), а не failure самого действия.
+                settled = False
             data: dict[str, JSONValue] = {
                 "output": "Browser element clicked; inspect resulting page state.",
                 "operation": operation,
                 "page_id": page_id,
                 "before_url": before_url,
-                "url": page.url,
+                "url": url_after,
                 "requires_followup_observation": True,
             }
-            if declaration is not None and capture is not None:
+            if declaration is not None and capture is not None and settled:
                 facts = self._finish_browser_state_capture(
                     page, declaration, capture[0], capture[1], deadline=deadline
                 )
@@ -498,16 +509,27 @@ class PlaywrightBrowserBackend:
             if declaration is not None:
                 submit_timeout = max(1.0, (deadline - time.monotonic()) * 1000)
             _locator(page, request).press("Enter", timeout=submit_timeout)
-            page.wait_for_timeout(50)
+            url_after = before_url
+            settled = True
+            try:
+                page.wait_for_timeout(50)
+                url_after = page.url
+            except Exception:  # noqa: BLE001 - наблюдение после успешного действия
+                if declaration is None:
+                    raise
+                # Вкладка закрылась после успешного действия: фактов
+                # захвата не будет, результат остаётся неподтверждённым
+                # (UNVERIFIED), а не failure самого действия.
+                settled = False
             data = {
                 "output": "Browser form submitted; inspect resulting page state.",
                 "operation": operation,
                 "page_id": page_id,
                 "before_url": before_url,
-                "url": page.url,
+                "url": url_after,
                 "requires_followup_observation": True,
             }
-            if declaration is not None and capture is not None:
+            if declaration is not None and capture is not None and settled:
                 facts = self._finish_browser_state_capture(
                     page, declaration, capture[0], capture[1], deadline=deadline
                 )
@@ -1048,9 +1070,12 @@ class PlaywrightBrowserBackend:
             return None
         return float(value)
 
-    def _entity_locator(self, page: Page, entity_id: str) -> Locator:
+    def _entity_selector(self, entity_id: str) -> str:
         escaped = entity_id.replace("\\", "\\\\").replace('"', '\\"')
-        return page.locator(f'[id="{escaped}"]')
+        return f'[id="{escaped}"]'
+
+    def _entity_locator(self, page: Page, entity_id: str) -> Locator:
+        return page.locator(self._entity_selector(entity_id))
 
     def _read_entity_text(
         self, page: Page, declaration: dict[str, JSONValue], *, timeout_ms: float
@@ -1060,13 +1085,22 @@ class PlaywrightBrowserBackend:
         Идентичность записи — сам ID: селектор статуса разрешается
         внутри элемента с этим ID, а не по странице (селектор с одним
         совпадением после перерисовки может указывать на другую
-        запись). Неоднозначность (``count != 1`` на любом уровне) или
-        ошибка чтения — None: захват недоступен, не догадка.
+        запись). Принадлежность найденного элемента сущности
+        проверяется пересечением с потомками entity (``and_``):
+        селектор, выходящий за пределы entity (например xpath с
+        ``..`` в соседнюю запись), пересечения не даёт. Все чтения
+        ограничены timeout драйвера: ``Locator.count()`` отправляется
+        без timeout (kNoTimeout) и на зависшей странице держит
+        executor неограниченно, поэтому здесь его нет —
+        неоднозначность ловит строгий ``element_handle`` (0 совпадений
+        или зависшая страница — TimeoutError, больше одного — strict
+        mode violation). Любая ошибка — None: захват недоступен, не
+        догадка.
         """
         try:
-            entity = self._entity_locator(page, str(declaration["entity_id"]))
-            if entity.count() != 1:
+            if self._read_entity_count(page, declaration, timeout_ms=timeout_ms) != 1:
                 return None
+            entity = self._entity_locator(page, str(declaration["entity_id"]))
             index = declaration.get("index")
             name = declaration.get("name")
             status = _build_locator(
@@ -1077,15 +1111,37 @@ class PlaywrightBrowserBackend:
                 exact=declaration.get("exact") is True,
                 index=index if isinstance(index, int) and not isinstance(index, bool) else None,
             )
-            if status.count() != 1:
+            status = status.and_(entity.locator("*"))
+            if status.element_handle(timeout=timeout_ms) is None:
                 return None
             return status.inner_text(timeout=timeout_ms)
         except Exception:  # noqa: BLE001 - захват не должен ронять действие
             return None
 
-    def _read_entity_count(self, page: Page, declaration: dict[str, JSONValue]) -> int | None:
+    def _read_entity_count(
+        self, page: Page, declaration: dict[str, JSONValue], *, timeout_ms: float
+    ) -> int | None:
+        """Точное число элементов с ``entity_id``, ограниченное по времени.
+
+        ``Locator.count()`` драйвер отправляет без timeout: на
+        странице с заблокированным JS-потоком он висит неограниченно
+        вместе с Desktop executor и host lease. Здесь count читается
+        ``wait_for_function`` с timeout драйвера (объект-обёртка,
+        чтобы 0 не считался falsy и не ждал до timeout); по истечении
+        или ошибке — None (захват недоступен → UNVERIFIED).
+        """
         try:
-            return self._entity_locator(page, str(declaration["entity_id"])).count()
+            handle = page.wait_for_function(
+                "(sel) => ({n: document.querySelectorAll(sel).length})",
+                arg=self._entity_selector(str(declaration["entity_id"])),
+                timeout=timeout_ms,
+            )
+            value = handle.json_value()
+            if isinstance(value, dict):
+                n = value.get("n")
+                if isinstance(n, int) and not isinstance(n, bool):
+                    return n
+            return None
         except Exception:  # noqa: BLE001 - захват не должен ронять действие
             return None
 
@@ -1122,7 +1178,9 @@ class PlaywrightBrowserBackend:
             if before is None:
                 return None
             return before, token
-        before_count = self._read_entity_count(page, declaration)
+        before_count = self._read_entity_count(
+            page, declaration, timeout_ms=_read_timeout_ms(deadline)
+        )
         if before_count is None:
             return None
         return before_count, token
@@ -1154,25 +1212,34 @@ class PlaywrightBrowserBackend:
         matched = False
         observed = False
         last_after: str | int | None = None
-        while True:
-            if kind == "text":
-                value = self._read_entity_text(
-                    page, declaration, timeout_ms=_read_timeout_ms(deadline)
-                )
-                if value is not None:
-                    observed = True
-                    last_after = value
-                    matched = value == after_expected
-            else:
-                count = self._read_entity_count(page, declaration)
-                if count is not None:
-                    observed = True
-                    last_after = count
-                    matched = count == after_expected
-            if matched or self._cancelled() or time.monotonic() >= deadline:
-                break
-            remaining_ms = (deadline - time.monotonic()) * 1000
-            page.wait_for_timeout(max(0.0, min(float(BROWSER_STATE_POLL_MS), remaining_ms)))
+        try:
+            while True:
+                if kind == "text":
+                    value = self._read_entity_text(
+                        page, declaration, timeout_ms=_read_timeout_ms(deadline)
+                    )
+                    if value is not None:
+                        observed = True
+                        last_after = value
+                        matched = value == after_expected
+                else:
+                    count = self._read_entity_count(
+                        page, declaration, timeout_ms=_read_timeout_ms(deadline)
+                    )
+                    if count is not None:
+                        observed = True
+                        last_after = count
+                        matched = count == after_expected
+                if matched or self._cancelled() or time.monotonic() >= deadline:
+                    break
+                remaining_ms = (deadline - time.monotonic()) * 1000
+                page.wait_for_timeout(max(0.0, min(float(BROWSER_STATE_POLL_MS), remaining_ms)))
+        except Exception:  # noqa: BLE001 - ошибка наблюдения после успешного действия
+            # Вкладка закрылась (отложенный window.close) или страница
+            # перестала отвечать во время опроса: действие уже успешно,
+            # подтверждающих фактов нет — результат неподтверждён
+            # (UNVERIFIED), а не failure самого действия.
+            return None
         if not observed:
             return None
         if self._document_token(page) != token:

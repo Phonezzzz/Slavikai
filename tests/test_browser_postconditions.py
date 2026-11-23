@@ -1701,15 +1701,41 @@ def test_browser_state_malformed_declaration_is_unconfirmed() -> None:
 # --- E02-T10: захват фактов в PlaywrightBrowserBackend (фейковая страница) -
 
 
-class _StateFakeLocator:
-    """Locator фейковой страницы записей для захвата browser_state."""
+class _StateFakeElementHandle:
+    """Маркер ElementHandle: production-код проверяет только не-None."""
 
-    def __init__(self, page: _StateFakePage, *, entity_id: str | None, selector: str) -> None:
+
+class _StateFakeLocator:
+    """Locator фейковой страницы записей для захвата browser_state.
+
+    ``resolved_entity_id`` — запись, на которую селектор фактически
+    указывает: обычный селектор внутри entity разрешается в саму
+    entity, а селектор из ``page.escape_selectors`` (например xpath с
+    ``..``) — в соседнюю запись. ``and_`` моделирует пересечение с
+    потомками entity: убежавший селектор пересечения не даёт.
+    """
+
+    def __init__(
+        self,
+        page: _StateFakePage,
+        *,
+        entity_id: str | None,
+        selector: str,
+        resolved_entity_id: str | None = None,
+        empty: bool = False,
+    ) -> None:
         self._page = page
         self._entity_id = entity_id
         self._selector = selector
+        self._resolved_entity_id = (
+            resolved_entity_id if resolved_entity_id is not None else entity_id
+        )
+        self._empty = empty
 
     def count(self) -> int:
+        self._page.count_calls += 1
+        if self._empty:
+            return 0
         if self._entity_id is not None:
             if self._entity_id in self._page.duplicate_ids:
                 return 2
@@ -1717,27 +1743,60 @@ class _StateFakeLocator:
         return 1
 
     def locator(self, selector: str) -> _StateFakeLocator:
-        return _StateFakeLocator(self._page, entity_id=self._entity_id, selector=selector)
+        resolved = self._page.escape_selectors.get(selector, self._entity_id)
+        return _StateFakeLocator(
+            self._page,
+            entity_id=self._entity_id,
+            selector=selector,
+            resolved_entity_id=resolved,
+        )
+
+    def and_(self, other: _StateFakeLocator) -> _StateFakeLocator:
+        return _StateFakeLocator(
+            self._page,
+            entity_id=self._entity_id,
+            selector=self._selector,
+            resolved_entity_id=self._resolved_entity_id,
+            empty=self._empty or self._resolved_entity_id != other._entity_id,
+        )
+
+    def element_handle(self, timeout: float | None = None) -> _StateFakeElementHandle:
+        del timeout
+        if self._page.closed:
+            raise RuntimeError("Target page, context or browser has been closed")
+        if self._page.busy:
+            raise TimeoutError("Locator.element_handle: Timeout exceeded.")
+        if self._empty or self._resolved_entity_id not in self._page.records:
+            raise TimeoutError("Locator.element_handle: Timeout exceeded.")
+        return _StateFakeElementHandle()
 
     def inner_text(self, timeout: float | None = None) -> str:
         del timeout
-        assert self._entity_id is not None
-        return self._page.records[self._entity_id]
+        if self._page.closed:
+            raise RuntimeError("Target page, context or browser has been closed")
+        if self._page.busy:
+            raise TimeoutError("Locator.inner_text: Timeout exceeded.")
+        assert self._resolved_entity_id is not None
+        return self._page.records[self._resolved_entity_id]
 
     def click(self, timeout: float | None = None) -> None:
         del timeout
         self._page.apply_action(self._selector)
+        if self._page.close_on_click:
+            self._page.closed = True
 
     def press(self, key: str, timeout: float | None = None) -> None:
         del key, timeout
         self._page.apply_action(self._selector)
+        if self._page.close_on_click:
+            self._page.closed = True
 
 
 class _StateFakeJSHandle:
-    def __init__(self, value: float) -> None:
+    def __init__(self, value: object) -> None:
         self._value = value
 
-    def json_value(self) -> float:
+    def json_value(self) -> object:
         return self._value
 
 
@@ -1756,6 +1815,12 @@ class _StateFakePage:
         self.time_origin = 1000.0
         self.busy = False
         self.cancelled_flag = False
+        # Селектор -> entity_id, на которую он фактически указывает
+        # (модель выхода селектора за пределы entity, например xpath ..).
+        self.escape_selectors: dict[str, str] = {}
+        self.closed = False
+        self.close_on_click = False
+        self.count_calls = 0
         self._effects: dict[str, tuple[int, object]] = {}
         self._pending: list[list[object]] = []
 
@@ -1794,16 +1859,26 @@ class _StateFakePage:
         return _StateFakeLocator(self, entity_id=None, selector="test_id")
 
     def wait_for_function(
-        self, expression: str, timeout: float | None = None
+        self, expression: str, arg: object = None, timeout: float | None = None
     ) -> _StateFakeJSHandle:
         del timeout
-        assert "performance.timeOrigin" in expression
+        if self.closed:
+            raise RuntimeError("Target page, context or browser has been closed")
         if self.busy:
             raise TimeoutError("Page.wait_for_function: Timeout exceeded.")
+        if "querySelectorAll" in expression:
+            assert isinstance(arg, str) and arg.startswith('[id="') and arg.endswith('"]')
+            entity_id = arg[len('[id="') : -2].replace('\\"', '"').replace("\\\\", "\\")
+            if entity_id in self.duplicate_ids:
+                return _StateFakeJSHandle({"n": 2})
+            return _StateFakeJSHandle({"n": 1 if entity_id in self.records else 0})
+        assert "performance.timeOrigin" in expression
         return _StateFakeJSHandle(self.time_origin)
 
     def wait_for_timeout(self, timeout: float) -> None:
         del timeout
+        if self.closed:
+            raise RuntimeError("Target page, context or browser has been closed")
         time.sleep(0.005)
         still_pending: list[list[object]] = []
         for item in self._pending:
@@ -1816,7 +1891,7 @@ class _StateFakePage:
         self._pending = still_pending
 
     def is_closed(self) -> bool:
-        return False
+        return self.closed
 
 
 def _state_backend(tmp_path: Path, page: _StateFakePage, *, cancelled=None):  # noqa: ANN001, ANN202
@@ -2026,6 +2101,110 @@ def test_backend_cancel_during_poll_stops_without_match(tmp_path: Path) -> None:
     facts = result.data["browser_state"]
     assert isinstance(facts, dict)
     assert facts["after_matches_after"] is False
+
+
+def test_backend_escaping_status_selector_is_not_captured(tmp_path: Path) -> None:
+    """Селектор статуса, выходящий в соседнюю запись, не подтверждает X.
+
+    ``xpath=../div[@id="order-Y"]/span`` изнутри order-X читает статус
+    order-Y: изменилась только Y, но без проверки принадлежности
+    факты были бы помечены entity_id="order-X" и дали DONE для
+    неизменившейся X. Пересечение с потомками entity обязано отсечь
+    такой селектор (захвата нет → UNVERIFIED).
+    """
+    escape = 'xpath=../div[@id="order-Y"]/span'
+    page = _StateFakePage({"order-X": "Черновик", "order-Y": "Черновик"})
+    page.escape_selectors[escape] = "order-Y"
+    page.on_action(
+        "#pay-x",
+        after_polls=1,
+        effect=lambda p: p.records.update({"order-Y": "Оплачено"}),
+    )
+    backend = _state_backend(tmp_path, page)
+    args = _state_args()
+    declaration = args["browser_state"]
+    assert isinstance(declaration, dict)
+    declaration["selector"] = escape
+    args["timeout_seconds"] = 1
+
+    result = backend.handle(ToolRequest("desktop_browser", args))
+
+    assert result.ok, result.data
+    assert "browser_state" not in result.data
+    assert page.records["order-X"] == "Черновик"
+
+
+def test_backend_busy_page_after_action_ends_unverified(tmp_path: Path) -> None:
+    """Зависшая после действия страница не держит захват неограниченно.
+
+    Все чтения захвата ограничены timeout драйвера; неограниченный
+    ``Locator.count()`` (kNoTimeout) в пути захвата не вызывается.
+    Наблюдение завершается по deadline без фактов (UNVERIFIED).
+    """
+    page = _StateFakePage({"order-X": "Черновик"})
+    page.on_action(
+        "#pay-x",
+        after_polls=1,
+        effect=lambda p: setattr(p, "busy", True),
+    )
+    backend = _state_backend(tmp_path, page)
+    args = _state_args()
+    args["timeout_seconds"] = 1
+
+    result = backend.handle(ToolRequest("desktop_browser", args))
+
+    assert result.ok, result.data
+    assert "browser_state" not in result.data
+    assert page.count_calls == 0
+
+
+def test_backend_tab_closed_during_poll_keeps_action_success(tmp_path: Path) -> None:
+    """Закрытие вкладки во время опроса не превращает действие в failure.
+
+    Отложенный ``window.close()`` после успешного click: ошибка
+    наблюдения перехватывается, результат действия — success без
+    подтверждающих фактов (UNVERIFIED), а не FAILED.
+    """
+    page = _StateFakePage({"order-X": "Черновик"})
+    page.on_action(
+        "#pay-x",
+        after_polls=2,
+        effect=lambda p: setattr(p, "closed", True),
+    )
+    backend = _state_backend(tmp_path, page)
+    args = _state_args()
+    args["timeout_seconds"] = 5
+
+    result = backend.handle(ToolRequest("desktop_browser", args))
+
+    assert result.ok, result.data
+    assert "browser_state" not in result.data
+
+
+def test_backend_tab_closed_by_action_keeps_success_with_declaration(
+    tmp_path: Path,
+) -> None:
+    """Вкладка закрылась самим действием: с объявлением — success без фактов.
+
+    Без объявления прежнее поведение сохраняется: ошибка ожидания
+    после действия не проглатывается.
+    """
+    page = _StateFakePage({"order-X": "Черновик"})
+    page.close_on_click = True
+    backend = _state_backend(tmp_path, page)
+
+    result = backend.handle(ToolRequest("desktop_browser", _state_args()))
+
+    assert result.ok, result.data
+    assert "browser_state" not in result.data
+
+    plain_page = _StateFakePage({"order-X": "Черновик"})
+    plain_page.close_on_click = True
+    plain_backend = _state_backend(tmp_path, plain_page)
+    plain_args = _state_args()
+    del plain_args["browser_state"]
+    with pytest.raises(RuntimeError, match="has been closed"):
+        plain_backend.handle(ToolRequest("desktop_browser", plain_args))
 
 
 # --- E02-T10: DesktopRuntime с фейковым handler (факты захвата) -----------
