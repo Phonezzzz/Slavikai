@@ -1011,10 +1011,15 @@ class HostFsService:
                     name = entry.name
                     if cursor is not None and name <= cursor:
                         continue
-                    if largest is None or name > largest:
-                        largest = name
                     if self._classify(target.lexical / name, mutation=False) != "normal":
                         continue
+                    # Continuation (``largest``) counts allowed names
+                    # only: a denied name after the last allowed entry
+                    # must not flip ``truncated`` — that would both
+                    # promise an empty next page and leak the denied
+                    # entry's existence (no existence oracle).
+                    if largest is None or name > largest:
+                        largest = name
                     bisect.insort(selected, name)
                     if len(selected) > limit + 1:
                         selected.pop()
@@ -1992,15 +1997,37 @@ class HostFsService:
                         )
                     except FileExistsError:
                         continue
+                    info_identity: tuple[int, int] | None = None
                     try:
-                        body = (
-                            "[Trash Info]\n"
-                            f"Path={quote(str(target.lexical), safe='/')}\n"
-                            f"DeletionDate={datetime.now().astimezone().isoformat(timespec='seconds')}\n"
-                        )
-                        _write_all(ifd, body.encode("utf-8"))
-                    finally:
-                        os.close(ifd)
+                        try:
+                            ist = os.fstat(ifd)
+                            info_identity = (ist.st_dev, ist.st_ino)
+                            body = (
+                                "[Trash Info]\n"
+                                f"Path={quote(str(target.lexical), safe='/')}\n"
+                                f"DeletionDate={datetime.now().astimezone().isoformat(timespec='seconds')}\n"
+                            )
+                            _write_all(ifd, body.encode("utf-8"))
+                        finally:
+                            os.close(ifd)
+                    except BaseException:
+                        # Metadata preparation/write failed: remove
+                        # the .trashinfo (identity-checked) instead of
+                        # leaving an orphan no cleanup path owns; the
+                        # source stays untouched.
+                        if info_identity is not None:
+                            self._discard_temp(info_fd, info_name, info_identity)
+                        else:
+                            # fstat failed before the identity was
+                            # recorded; the name was created O_EXCL by
+                            # this call, so a best-effort unlink by
+                            # name cannot remove a pre-existing file.
+                            try:
+                                os.unlink(info_name, dir_fd=info_fd)
+                            except OSError:
+                                pass
+                        raise
+                    assert info_identity is not None
                     try:
                         # Cancel gate immediately before the publish
                         # syscall: if the deadline fired while the
@@ -2014,18 +2041,12 @@ class HostFsService:
                         # never be destroyed by this delete.
                         _rename_noreplace(name, pfd, candidate, files_fd)
                     except OSError as exc:
-                        try:
-                            os.unlink(info_name, dir_fd=info_fd)
-                        except OSError:
-                            pass
+                        self._discard_temp(info_fd, info_name, info_identity)
                         if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
                             continue  # name collision: pick another name
                         raise
                     except BaseException:
-                        try:
-                            os.unlink(info_name, dir_fd=info_fd)
-                        except OSError:
-                            pass
+                        self._discard_temp(info_fd, info_name, info_identity)
                         raise
                     trash_name = candidate
                     break

@@ -2464,3 +2464,64 @@ def test_write_orphan_sweep_bounded_and_cancellable(
     write(service, "trigger2.txt", CancelToken(), "sweep3")
     assert consumed[0] <= 6
     assert listdir_calls[0] == 0
+
+
+# --- twelfth review: list continuation oracle, trashinfo write rollback ---
+
+
+def test_list_denied_name_after_page_no_continuation_oracle(bridge: Path, work_root: Path) -> None:
+    # N1 (twelfth review): the continuation flag must be computed from
+    # allowed names only. A denied name (``*.key``) sorting after the
+    # last allowed entry previously landed in ``largest`` before the
+    # classify check, flipping truncated=true with a next_cursor whose
+    # next page is empty — and leaking the denied entry's existence.
+    _seed(work_root, "a.txt", "x")
+    baseline = _fs(bridge, "host.fs.list", root_id="work", path=".", limit=1)
+    assert [e["name"] for e in baseline["entries"]] == ["a.txt"]  # type: ignore[index]
+    assert baseline["truncated"] is False
+    assert baseline["next_cursor"] is None
+    _seed(work_root, "z.key", "SECRET=<redacted>")
+    with_denied = _fs(bridge, "host.fs.list", root_id="work", path=".", limit=1)
+    assert with_denied["entries"] == baseline["entries"]
+    assert with_denied["truncated"] is False
+    assert with_denied["next_cursor"] is None
+    # Same through the cursor path: the final allowed page must not
+    # claim a continuation just because a denied name follows it.
+    _seed(work_root, "b.txt", "x")
+    page1 = _fs(bridge, "host.fs.list", root_id="work", path=".", limit=1)
+    assert [e["name"] for e in page1["entries"]] == ["a.txt"]  # type: ignore[index]
+    assert page1["truncated"] is True
+    page2 = _fs(
+        bridge, "host.fs.list", root_id="work", path=".", limit=1, cursor=page1["next_cursor"]
+    )
+    assert [e["name"] for e in page2["entries"]] == ["b.txt"]  # type: ignore[index]
+    assert page2["truncated"] is False
+    assert page2["next_cursor"] is None
+
+
+def test_delete_trashinfo_write_failure_removes_metadata(
+    bridge: Path, work_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # N2 (twelfth review): if writing the .trashinfo fails (ENOSPC),
+    # the rollback must remove the metadata (identity-checked) instead
+    # of leaving an orphan .trashinfo per attempt; the source stays
+    # untouched and repeated attempts accumulate nothing.
+    _seed(work_root, "stuck.txt", "stay")
+    real_write_all = fs_module._write_all
+
+    def failing_write_all(fd: int, data: bytes) -> None:
+        raise OSError(errno.ENOSPC, "simulated trashinfo write failure")
+
+    monkeypatch.setattr(fs_module, "_write_all", failing_write_all)
+    try:
+        for _ in range(3):
+            assert (
+                _fs_error(bridge, "host.fs.delete", root_id="work", path="stuck.txt") == "io_error"
+            )
+    finally:
+        monkeypatch.setattr(fs_module, "_write_all", real_write_all)
+    assert (work_root / "stuck.txt").exists()
+    info_dir = tmp_path / "Trash" / "info"
+    files_dir = tmp_path / "Trash" / "files"
+    assert not info_dir.exists() or list(info_dir.iterdir()) == []
+    assert not files_dir.exists() or list(files_dir.iterdir()) == []
