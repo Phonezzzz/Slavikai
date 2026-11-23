@@ -91,7 +91,23 @@ def call(
         raise BridgeClientError(
             "malformed_response", f"bridge response carries unsupported version: {version!r}"
         )
-    if payload.get("request_id") != rid:
+    response_rid = payload.get("request_id")
+    if response_rid != rid:
+        error = payload.get("error")
+        if (
+            response_rid is None
+            and payload.get("ok") is False
+            and isinstance(error, dict)
+            and error.get("code") == "invalid_request_id"
+        ):
+            # The daemon could not echo an ID because the request ID
+            # itself was invalid; surface the typed error instead of
+            # masking it as a correlation failure.
+            message = error.get("message")
+            raise BridgeClientError(
+                "invalid_request_id",
+                message if isinstance(message, str) else "bridge rejected the request ID",
+            )
         raise BridgeClientError(
             "malformed_response", "bridge response request_id does not match the request"
         )

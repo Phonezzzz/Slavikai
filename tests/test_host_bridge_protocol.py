@@ -26,6 +26,7 @@ from host_bridge.protocol import (
     MAX_FRAME_BYTES,
     MAX_REQUEST_ID_CHARS,
     PROTOCOL_VERSION,
+    BridgeProtocolError,
     BridgeRequest,
     FrameTooLargeError,
     InvalidRequestIdError,
@@ -368,3 +369,48 @@ def test_client_side_timeout_is_typed(tmp_path: Path) -> None:
     finally:
         daemon.shutdown()
         thread.join(timeout=2.0)
+
+
+# --- error-size bound and typed-error preservation (PR #195 rework) ---
+
+
+def test_unknown_field_error_message_is_bounded() -> None:
+    error = UnknownFieldError(["x" * 5000], request_id="r-1")
+    assert len(str(error)) < 256
+    assert len(encode_error(error)) <= MAX_FRAME_BYTES + 1
+
+
+def test_encode_error_backstop_caps_oversized_message() -> None:
+    error = BridgeProtocolError("some_code", "y" * 200_000, request_id="r-1")
+    frame = encode_error(error)
+    assert len(frame) <= MAX_FRAME_BYTES + 1
+    payload = json.loads(frame)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "some_code"
+    assert payload["request_id"] == "r-1"
+
+
+def test_oversized_unknown_field_name_over_socket_stays_typed(bridge: Path) -> None:
+    field_name = "f" * 60_000
+    frame = (
+        b'{"version": 1, "request_id": "r-1", "capability": "bridge.ping", "'
+        + field_name.encode("ascii")
+        + b'": 1}\n'
+    )
+    assert len(frame) - 1 <= MAX_FRAME_BYTES
+    payload = _raw_roundtrip(bridge, frame)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "unknown_field"
+    assert payload["request_id"] == "r-1"
+
+
+def test_client_empty_request_id_surfaces_typed_error(bridge: Path) -> None:
+    with pytest.raises(client.BridgeClientError) as excinfo:
+        client.call(bridge, "bridge.ping", request_id="")
+    assert excinfo.value.code == "invalid_request_id"
+
+
+def test_client_overlong_request_id_surfaces_typed_error(bridge: Path) -> None:
+    with pytest.raises(client.BridgeClientError) as excinfo:
+        client.call(bridge, "bridge.ping", request_id="x" * (MAX_REQUEST_ID_CHARS + 1))
+    assert excinfo.value.code == "invalid_request_id"

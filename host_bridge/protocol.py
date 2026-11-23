@@ -41,7 +41,9 @@ Frame limit: one frame (the JSON object bytes, excluding the newline
 delimiter) must not exceed ``MAX_FRAME_BYTES``; larger frames are
 rejected with ``frame_too_large`` and the connection is closed (framing
 is lost). Per-request deadline enforcement lives in the daemon
-(``request_timeout``).
+(``request_timeout``). Error responses obey the same limit:
+request-derived strings echoed in error messages are truncated, and
+``encode_error`` never emits a frame larger than ``MAX_FRAME_BYTES``.
 """
 
 from __future__ import annotations
@@ -69,9 +71,22 @@ MAX_FRAME_BYTES: Final[int] = 64 * 1024
 MAX_REQUEST_ID_CHARS: Final[int] = 128
 MAX_ATTRIBUTION_CHARS: Final[int] = 256
 
+# Error messages may echo request-derived strings (field names,
+# capability names). Bound them so an error response can never exceed
+# the frame limit no matter what the request contained.
+MAX_ERROR_ECHO_CHARS: Final[int] = 64
+MAX_ERROR_FIELDS_LISTED: Final[int] = 8
+
 _REQUEST_FIELDS: Final[frozenset[str]] = frozenset(
     {"version", "request_id", "capability", "principal_id", "run_id", "params"}
 )
+
+
+def _bounded_echo(text: str) -> str:
+    """Truncate a request-derived string for safe echo in an error."""
+    if len(text) <= MAX_ERROR_ECHO_CHARS:
+        return text
+    return text[: MAX_ERROR_ECHO_CHARS - 1] + "…"
 
 
 class BridgeProtocolError(Exception):
@@ -108,9 +123,14 @@ class InvalidRequestIdError(BridgeProtocolError):
 
 class UnknownFieldError(BridgeProtocolError):
     def __init__(self, fields: list[str], *, request_id: str | None = None) -> None:
+        ordered = sorted(fields)
+        shown = [_bounded_echo(name) for name in ordered[:MAX_ERROR_FIELDS_LISTED]]
+        suffix = ""
+        if len(ordered) > MAX_ERROR_FIELDS_LISTED:
+            suffix = f" (+{len(ordered) - MAX_ERROR_FIELDS_LISTED} more)"
         super().__init__(
             "unknown_field",
-            f"unknown request field(s): {', '.join(sorted(fields))}",
+            f"unknown request field(s): {', '.join(shown)}{suffix}",
             request_id=request_id,
         )
 
@@ -118,7 +138,9 @@ class UnknownFieldError(BridgeProtocolError):
 class UnknownCapabilityError(BridgeProtocolError):
     def __init__(self, capability: str, *, request_id: str | None = None) -> None:
         super().__init__(
-            "unknown_capability", f"unknown capability: {capability!r}", request_id=request_id
+            "unknown_capability",
+            f"unknown capability: {_bounded_echo(capability)!r}",
+            request_id=request_id,
         )
 
 
@@ -268,4 +290,14 @@ def encode_error(error: BridgeProtocolError) -> bytes:
         "ok": False,
         "error": {"code": error.code, "message": str(error)},
     }
-    return json.dumps(payload).encode("utf-8") + b"\n"
+    frame = json.dumps(payload).encode("utf-8")
+    if len(frame) > MAX_FRAME_BYTES:
+        # Backstop: no error response may exceed the frame limit,
+        # whatever the request contained. The echoed request_id is
+        # already bounded by validation, so the minimal payload fits.
+        payload["error"] = {
+            "code": error.code,
+            "message": "error detail omitted (frame limit)",
+        }
+        frame = json.dumps(payload).encode("utf-8")
+    return frame + b"\n"
