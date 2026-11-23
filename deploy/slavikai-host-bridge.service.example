@@ -1,0 +1,28 @@
+# SlavikAI Owner Host Bridge — systemd USER service example (ADR-0013, E03-T02).
+#
+# Install (owner action, not done by the repo):
+#   cp deploy/slavikai-host-bridge.service.example \
+#      ~/.config/systemd/user/slavikai-host-bridge.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now slavikai-host-bridge.service
+#
+# The daemon runs as the owner's UID (never root) and listens only on
+# $XDG_RUNTIME_DIR/slavikai/host-bridge.sock (directory 0700, socket 0600).
+# Without XDG_RUNTIME_DIR it refuses to start. The full systemd hardening
+# profile is E03-T09; only the basics are set here.
+
+[Unit]
+Description=SlavikAI Owner Host Bridge (AF_UNIX daemon)
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/slavikai
+ExecStart=/opt/slavikai/venv-prod/bin/python -m host_bridge
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
