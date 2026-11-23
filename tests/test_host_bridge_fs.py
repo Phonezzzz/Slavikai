@@ -2109,3 +2109,177 @@ def test_link_publish_finishes_session_despite_cleanup_failure(
     )
     monkeypatch.undo()
     assert (work_root / "pub.txt").read_text(encoding="utf-8") == "old"
+
+
+# --- tenth review: cancel before parent creation, bounded list scan ---
+
+
+def _slow_open_root(monkeypatch: pytest.MonkeyPatch, delay: float = 0.6) -> None:
+    real_open_root = HostFsService._open_root
+
+    def slow_open_root(self: HostFsService, root: object) -> int:
+        time.sleep(delay)
+        return real_open_root(self, root)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(HostFsService, "_open_root", slow_open_root)
+
+
+def test_write_create_parents_cancelled_during_root_open_creates_nothing(
+    tmp_path: Path,
+    registry: RootsRegistry,
+    work_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # P2 (tenth review): if opening the root runs past the deadline,
+    # host.fs.write with create_parents=true still created the parent
+    # directories and the staging file after the request_timeout
+    # response — the token was checked only before publish. The
+    # creating walk must check the token before every mkdir and
+    # before creating the staging file (cancel-before-commit).
+    _slow_open_root(monkeypatch)
+    service = HostFsService(registry, trash_root=tmp_path / "Trash")
+    socket_path = tmp_path / "slavikai" / "host-bridge.sock"
+    daemon = HostBridgeDaemon(
+        socket_path,
+        fs_service=service,
+        capability_deadlines={"host.fs.write": 0.3},
+    )
+    thread = _start_daemon(daemon)
+    try:
+        with pytest.raises(client.BridgeClientError) as excinfo:
+            client.call(
+                socket_path,
+                "host.fs.write",
+                params={
+                    "root_id": "work",
+                    "path": "late/parent/file.txt",
+                    "content": "must never land",
+                    "commit": True,
+                },
+            )
+        assert excinfo.value.code == "request_timeout"
+        time.sleep(1.0)  # let the abandoned worker reach the mkdir gate
+        assert not (work_root / "late").exists()
+        assert client.ping(socket_path) == {"pong": True}
+    finally:
+        daemon.shutdown()
+        thread.join(timeout=2.0)
+
+
+def test_move_create_parents_cancelled_during_root_open_creates_nothing(
+    tmp_path: Path,
+    registry: RootsRegistry,
+    work_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # P2 (tenth review): the same creating walk backs _move's
+    # destination parents; a cancelled move must not leave freshly
+    # created destination directories behind either.
+    _seed(work_root, "src.txt", "stay")
+    _slow_open_root(monkeypatch)
+    service = HostFsService(registry, trash_root=tmp_path / "Trash")
+    socket_path = tmp_path / "slavikai" / "host-bridge.sock"
+    daemon = HostBridgeDaemon(
+        socket_path,
+        fs_service=service,
+        capability_deadlines={"host.fs.move": 0.3},
+    )
+    thread = _start_daemon(daemon)
+    try:
+        with pytest.raises(client.BridgeClientError) as excinfo:
+            client.call(
+                socket_path,
+                "host.fs.move",
+                params={
+                    "root_id": "work",
+                    "path": "src.txt",
+                    "dest_path": "late/parent/moved.txt",
+                },
+            )
+        assert excinfo.value.code == "request_timeout"
+        time.sleep(1.0)  # let the abandoned worker reach the mkdir gate
+        assert not (work_root / "late").exists()
+        assert (work_root / "src.txt").read_text(encoding="utf-8") == "stay"
+        assert client.ping(socket_path) == {"pong": True}
+    finally:
+        daemon.shutdown()
+        thread.join(timeout=2.0)
+
+
+def test_list_scan_bounded_inside_scandir(
+    registry: RootsRegistry, tmp_path: Path, work_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # P2 (tenth review): _list loaded every name via os.listdir and
+    # sorted before paging, so even list(limit=1) on a huge directory
+    # consumed unbounded memory/CPU with no cancellation check. The
+    # scan must run through a checked scandir with a hard visited
+    # cap, retaining only a bounded page selection.
+    for i in range(100):
+        _seed(work_root, f"many/f{i:03d}.txt", "x")
+    service = HostFsService(registry, trash_root=tmp_path / "Trash")
+    monkeypatch.setattr(fs_module, "MAX_LIST_VISITED", 5, raising=False)
+    calls = _counting_scandir(monkeypatch)
+    calls[0] = 0
+    with pytest.raises(Exception) as excinfo:
+        service.handle(
+            BridgeRequest(
+                version=1,
+                request_id="list-scan1",
+                capability="host.fs.list",
+                params={"root_id": "work", "path": "many", "limit": 1},
+            ),
+            CancelToken(),
+        )
+    assert getattr(excinfo.value, "code", None) == "io_error"
+    assert calls[0] == 0  # cap fired during the scan, before any stat
+
+
+def test_list_cancel_stops_scan(
+    registry: RootsRegistry, tmp_path: Path, work_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # P2 (tenth review, cancellation side): an already-cancelled token
+    # must stop the list scan before it stats any entry.
+    for i in range(100):
+        _seed(work_root, f"many/f{i:03d}.txt", "x")
+    service = HostFsService(registry, trash_root=tmp_path / "Trash")
+    calls = _counting_scandir(monkeypatch)
+    calls[0] = 0
+    token = CancelToken()
+    token.cancel()
+    with pytest.raises(RequestTimeoutError):
+        service.handle(
+            BridgeRequest(
+                version=1,
+                request_id="list-scan2",
+                capability="host.fs.list",
+                params={"root_id": "work", "path": "many", "limit": 1},
+            ),
+            token,
+        )
+    assert calls[0] == 0
+
+
+def test_list_pagination_many_entries_order_preserved(bridge: Path, work_root: Path) -> None:
+    # Bounded page selection must preserve the sorted cursor order:
+    # paging through many entries yields every name exactly once, in
+    # order, with truncated only on non-final pages.
+    expected = [f"f{i:03d}.txt" for i in range(100)]
+    for name in expected:
+        _seed(work_root, f"many/{name}", "x")
+    seen: list[str] = []
+    cursor: object = None
+    pages = 0
+    while True:
+        params: dict[str, object] = {"root_id": "work", "path": "many", "limit": 7}
+        if cursor is not None:
+            params["cursor"] = cursor
+        page = _fs(bridge, "host.fs.list", **params)
+        pages += 1
+        seen.extend(str(e["name"]) for e in page["entries"])  # type: ignore[union-attr]
+        if not page["truncated"]:
+            assert page["next_cursor"] is None
+            break
+        cursor = page["next_cursor"]
+        assert cursor is not None
+        assert pages < 50  # pagination must terminate
+    assert seen == expected

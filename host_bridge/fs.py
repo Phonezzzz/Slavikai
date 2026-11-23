@@ -70,6 +70,7 @@ Trust-model points enforced here (ADR-0013 §5, §9, §10, §11):
 
 from __future__ import annotations
 
+import bisect
 import ctypes
 import errno
 import json
@@ -127,6 +128,7 @@ MAX_SEARCH_QUERY_CHARS: Final[int] = 256
 MAX_SEARCH_VISITED: Final[int] = 200_000
 MAX_SEARCH_COLLECTED: Final[int] = 10_000
 MAX_SUBTREE_ENTRIES: Final[int] = 50_000
+MAX_LIST_VISITED: Final[int] = 200_000
 
 CONFIG_ENV_VAR: Final[str] = "SLAVIK_HOST_BRIDGE_CONFIG"
 CONFIG_FILE_NAME: Final[str] = "host-bridge.json"
@@ -828,7 +830,14 @@ class HostFsService:
             raise
         return fd
 
-    def _open_dirs(self, root: Root, parts: Sequence[str], *, create: bool = False) -> int:
+    def _open_dirs(
+        self,
+        root: Root,
+        parts: Sequence[str],
+        *,
+        create: bool = False,
+        token: CancelToken | None = None,
+    ) -> int:
         """Walk directory components below ``root``; return the final dir fd.
 
         Every component is opened relative to the previously pinned
@@ -845,6 +854,11 @@ class HostFsService:
             for part in parts:
                 lexical = lexical / part
                 if create:
+                    if token is not None:
+                        # Cancel-before-commit: a deadline that fired
+                        # while the root was opening must not leave
+                        # freshly created parent directories behind.
+                        token.check()
                     try:
                         os.mkdir(part, 0o755, dir_fd=fd)
                     except FileExistsError:
@@ -877,10 +891,12 @@ class HostFsService:
             raise
         return fd
 
-    def _open_parent(self, target: _Target, *, create: bool = False) -> tuple[int, str]:
+    def _open_parent(
+        self, target: _Target, *, create: bool = False, token: CancelToken | None = None
+    ) -> tuple[int, str]:
         if not target.parts:
             raise FsError("invalid_path", "path must name an entry below the root")
-        fd = self._open_dirs(target.root, target.parts[:-1], create=create)
+        fd = self._open_dirs(target.root, target.parts[:-1], create=create, token=token)
         return fd, target.parts[-1]
 
     @staticmethod
@@ -972,27 +988,46 @@ class HostFsService:
         cursor = _str_param(params, "cursor", required=False)
         fd = self._open_dirs(target.root, target.parts)
         try:
-            names = sorted(os.listdir(fd))
+            # Bounded page selection (ADR-0013 §7 bounded
+            # operations): scan via a checked scandir with a hard
+            # visited cap, retaining only the smallest ``limit + 1``
+            # allowed names strictly after the cursor — never the
+            # whole directory, however small the requested page.
+            # Continuation is "strictly after the cursor name", so
+            # the cursor entry itself need not still exist (it may
+            # have been deleted or renamed between pages). Denied
+            # entries are omitted (no existence oracle) and do not
+            # consume page slots.
+            selected: list[str] = []
+            visited = 0
+            largest: str | None = None
+            with os.scandir(fd) as it:
+                for entry in it:
+                    token.check()
+                    visited += 1
+                    if visited > MAX_LIST_VISITED:
+                        raise FsError("io_error", "list exceeded the visited-entry limit")
+                    name = entry.name
+                    if cursor is not None and name <= cursor:
+                        continue
+                    if largest is None or name > largest:
+                        largest = name
+                    if self._classify(target.lexical / name, mutation=False) != "normal":
+                        continue
+                    bisect.insort(selected, name)
+                    if len(selected) > limit + 1:
+                        selected.pop()
             entries: list[dict[str, object]] = []
-            truncated = False
-            for name in names:
-                if cursor is not None and name <= cursor:
-                    # Names are sorted, so continuation is "strictly
-                    # after the cursor name" — the cursor entry
-                    # itself need not still exist (it may have been
-                    # deleted or renamed between pages).
-                    continue
-                if len(entries) >= limit:
-                    truncated = True
-                    break
+            for name in selected[:limit]:
                 token.check()
-                if self._classify(target.lexical / name, mutation=False) != "normal":
-                    continue  # denied entries are omitted (no existence oracle)
                 try:
                     st = os.stat(name, dir_fd=fd, follow_symlinks=False)
                 except FileNotFoundError:
                     continue  # vanished mid-listing
                 entries.append(_entry_dict(name, st))
+            truncated = len(selected) > limit or (
+                len(entries) == limit and largest is not None and largest > str(entries[-1]["name"])
+            )
         finally:
             os.close(fd)
         result: dict[str, object] = {
@@ -1368,9 +1403,14 @@ class HostFsService:
             with self._sessions_lock:
                 self._sessions[write_id] = session
             try:
-                fd = self._open_dirs(target.root, session.dir_parts, create=create_parents)
+                fd = self._open_dirs(
+                    target.root, session.dir_parts, create=create_parents, token=token
+                )
                 try:
                     self._sweep_orphan_temps(fd, time.time(), target.root, session.dir_parts)
+                    # Cancel-before-commit: never create the staging
+                    # file for a request whose deadline already fired.
+                    token.check()
                     tfd = os.open(
                         session.temp_name,
                         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
@@ -1744,7 +1784,7 @@ class HostFsService:
             sst = os.stat(sname, dir_fd=sfd, follow_symlinks=False)
             if stat_mod.S_ISDIR(sst.st_mode):
                 self._check_subtree(source, token, dest=dest)
-            dfd, dname = self._open_parent(dest, create=True)
+            dfd, dname = self._open_parent(dest, create=True, token=token)
             try:
                 token.check()
                 try:
