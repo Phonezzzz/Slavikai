@@ -1502,13 +1502,31 @@ class HostFsService:
                         raise FsError(
                             "already_exists", f"target already exists: {target.display}"
                         ) from exc
-                    os.unlink(session.temp_name, dir_fd=fd)
                 else:
                     os.rename(session.temp_name, session.target_name, src_dir_fd=fd, dst_dir_fd=fd)
+                # The publish syscall has succeeded: finish the session
+                # irreversibly BEFORE any staging-name cleanup. After a
+                # link publish the staging name is a hardlink of the
+                # target, so a session kept alive by a failed cleanup
+                # unlink would let later chunks mutate the published
+                # file (atomic-publish contract).
                 session.finished = True
                 with self._sessions_lock:
                     self._sessions.pop(write_id, None)
-                    self._staging_identities.discard((session.temp_dev, session.temp_ino))
+                if session.mode == "create":
+                    try:
+                        os.unlink(session.temp_name, dir_fd=fd)
+                    except OSError:
+                        # Best-effort: the identity stays registered so
+                        # the orphan sweep removes the leftover staging
+                        # name later. The session is already finished.
+                        pass
+                    else:
+                        with self._sessions_lock:
+                            self._staging_identities.discard((session.temp_dev, session.temp_ino))
+                else:
+                    with self._sessions_lock:
+                        self._staging_identities.discard((session.temp_dev, session.temp_ino))
                 return {
                     "root_id": target.root.id,
                     "path": target.display,
@@ -1644,17 +1662,22 @@ class HostFsService:
                 if root_dev is None:
                     root_dev = os.fstat(fd).st_dev
                 # Stat entries while the directory fd is open (DirEntry
-                # stats are fd-relative for fd-based scandir).
+                # stats are fd-relative for fd-based scandir). Check
+                # cancellation and the entry cap inside the scan, before
+                # stat'ing the next entry, so one huge directory cannot
+                # be fully accumulated first (bounded operations).
                 with os.scandir(fd) as it:
-                    entries = [(entry.name, entry.stat(follow_symlinks=False)) for entry in it]
+                    entries: list[tuple[str, os.stat_result]] = []
+                    for entry in it:
+                        token.check()
+                        seen += 1
+                        if seen > MAX_SUBTREE_ENTRIES:
+                            raise FsError("subtree_too_large", "subtree exceeds the entry limit")
+                        entries.append((entry.name, entry.stat(follow_symlinks=False)))
             finally:
                 os.close(fd)
             current_lexical = target.root.path.joinpath(*parts) if parts else target.root.path
             for name, st in entries:
-                token.check()
-                seen += 1
-                if seen > MAX_SUBTREE_ENTRIES:
-                    raise FsError("subtree_too_large", "subtree exceeds the entry limit")
                 lexical = current_lexical / name
                 self._require_normal(lexical, mutation=True)
                 probe = _Target(
@@ -1980,6 +2003,16 @@ class HostFsService:
                 with os.scandir(fd) as it:
                     scanned: list[tuple[str, os.stat_result | None]] = []
                     for entry in it:
+                        # Bound the scan itself, not just the processing
+                        # below: check cancellation and the visited cap
+                        # before stat'ing the next entry, so a huge
+                        # directory cannot exhaust memory or keep a
+                        # cancelled worker walking (ADR-0013 §7 bounded
+                        # operations).
+                        token.check()
+                        visited += 1
+                        if visited > MAX_SEARCH_VISITED:
+                            raise FsError("io_error", "search exceeded the visited-entry limit")
                         try:
                             scanned.append((entry.name, entry.stat(follow_symlinks=False)))
                         except FileNotFoundError:
@@ -1987,10 +2020,6 @@ class HostFsService:
             finally:
                 os.close(fd)
             for name, st in scanned:
-                token.check()
-                visited += 1
-                if visited > MAX_SEARCH_VISITED:
-                    raise FsError("io_error", "search exceeded the visited-entry limit")
                 rel_path = f"{rel}/{name}" if rel else name
                 lexical = target.lexical / rel_path
                 if self._classify(lexical, mutation=False) != "normal":

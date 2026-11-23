@@ -14,6 +14,7 @@ list/search.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import os
@@ -41,6 +42,7 @@ from host_bridge.protocol import (
     MAX_FRAME_BYTES,
     BridgeConfigError,
     BridgeRequest,
+    RequestTimeoutError,
     encode_request,
 )
 
@@ -1951,3 +1953,159 @@ def test_delete_unopenable_trash_files_dir_no_fd_leak(
         assert (work_root / "victim.txt").read_text(encoding="utf-8") == "stay"
     finally:
         files_dir.chmod(0o700)
+
+
+# --- ninth review: bounded scans, link-publish session finish ---
+
+
+def _counting_scandir(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Wrap os.scandir so DirEntry.stat calls are counted in calls[0]."""
+    real_scandir = os.scandir
+    calls = [0]
+
+    class _Entry:
+        def __init__(self, entry: os.DirEntry[str]) -> None:
+            self._entry = entry
+
+        @property
+        def name(self) -> str:
+            return self._entry.name
+
+        def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
+            calls[0] += 1
+            return self._entry.stat(follow_symlinks=follow_symlinks)
+
+        def __getattr__(self, item: str) -> object:
+            return getattr(self._entry, item)
+
+    @contextlib.contextmanager
+    def counting(path: int) -> Iterator[Iterator[_Entry]]:
+        with real_scandir(path) as it:
+            yield (_Entry(entry) for entry in it)
+
+    monkeypatch.setattr(os, "scandir", counting)
+    return calls
+
+
+def test_search_scan_bounded_inside_scandir(
+    registry: RootsRegistry, tmp_path: Path, work_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # P2 (ninth review): the search scan stat'ed every entry of a
+    # directory into `scanned` before checking MAX_SEARCH_VISITED or
+    # the cancel token, so the limit bounded neither memory nor the
+    # work of a cancelled worker. Checks must run inside the scandir
+    # loop, before stat'ing the next entry.
+    for i in range(100):
+        _seed(work_root, f"many/f{i:03d}.txt", "x")
+    service = HostFsService(registry, trash_root=tmp_path / "Trash")
+    monkeypatch.setattr(fs_module, "MAX_SEARCH_VISITED", 5)
+    calls = _counting_scandir(monkeypatch)
+    calls[0] = 0
+    with pytest.raises(Exception) as excinfo:
+        service.handle(
+            BridgeRequest(
+                version=1,
+                request_id="scan1",
+                capability="host.fs.search",
+                params={"root_id": "work", "query": "f", "path": "many"},
+            ),
+            CancelToken(),
+        )
+    assert getattr(excinfo.value, "code", None) == "io_error"
+    assert calls[0] <= 5
+
+
+def test_search_cancel_stops_scan(
+    registry: RootsRegistry, tmp_path: Path, work_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # P2 (ninth review, cancellation side): an already-cancelled token
+    # must stop the search scan before it stats the directory.
+    for i in range(100):
+        _seed(work_root, f"many/f{i:03d}.txt", "x")
+    service = HostFsService(registry, trash_root=tmp_path / "Trash")
+    calls = _counting_scandir(monkeypatch)
+    calls[0] = 0
+    token = CancelToken()
+    token.cancel()
+    with pytest.raises(RequestTimeoutError):
+        service.handle(
+            BridgeRequest(
+                version=1,
+                request_id="scan2",
+                capability="host.fs.search",
+                params={"root_id": "work", "query": "f", "path": "many"},
+            ),
+            token,
+        )
+    assert calls[0] == 0
+
+
+def test_subtree_scan_bounded_inside_scandir(
+    registry: RootsRegistry, tmp_path: Path, work_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # P2 (ninth review): _check_subtree had the same unbounded scan —
+    # a list comprehension stat'ed the whole directory before the
+    # MAX_SUBTREE_ENTRIES / token checks in the processing loop.
+    for i in range(100):
+        _seed(work_root, f"tree/f{i:03d}.txt", "x")
+    service = HostFsService(registry, trash_root=tmp_path / "Trash")
+    monkeypatch.setattr(fs_module, "MAX_SUBTREE_ENTRIES", 5)
+    calls = _counting_scandir(monkeypatch)
+    calls[0] = 0
+    with pytest.raises(Exception) as excinfo:
+        service.handle(
+            BridgeRequest(
+                version=1,
+                request_id="scan3",
+                capability="host.fs.move",
+                params={"root_id": "work", "path": "tree", "dest_path": "tree2"},
+            ),
+            CancelToken(),
+        )
+    assert getattr(excinfo.value, "code", None) == "subtree_too_large"
+    assert calls[0] <= 5
+    assert (work_root / "tree" / "f000.txt").exists()
+
+
+def test_link_publish_finishes_session_despite_cleanup_failure(
+    bridge: Path, work_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # P2 (ninth review): if os.link published but the staging-name
+    # unlink failed, the session stayed alive and the staging file
+    # (now a hardlink of the target) kept accepting chunks, mutating
+    # the published file. A successful link must finish the session
+    # irreversibly; staging-name cleanup is best-effort.
+    begin = _fs(bridge, "host.fs.write", root_id="work", path="pub.txt", content="old")
+    write_id = begin["write_id"]
+    real_unlink = os.unlink
+
+    def failing_unlink(path: object, *, dir_fd: int | None = None) -> None:
+        if isinstance(path, str) and ".hb-" in path:
+            raise OSError(errno.EIO, "simulated cleanup failure")
+        real_unlink(path, dir_fd=dir_fd)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "unlink", failing_unlink)
+    done = _fs(
+        bridge,
+        "host.fs.write",
+        root_id="work",
+        path="pub.txt",
+        write_id=write_id,
+        commit=True,
+    )
+    assert done["committed"] is True
+    assert (work_root / "pub.txt").read_text(encoding="utf-8") == "old"
+    assert (
+        _fs_error(
+            bridge,
+            "host.fs.write",
+            root_id="work",
+            path="pub.txt",
+            content="NEW",
+            offset=0,
+            write_id=write_id,
+        )
+        == "invalid_params"
+    )
+    monkeypatch.undo()
+    assert (work_root / "pub.txt").read_text(encoding="utf-8") == "old"
