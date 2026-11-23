@@ -1497,3 +1497,147 @@ def test_delete_long_name_into_trash(bridge: Path, work_root: Path, tmp_path: Pa
     info_file = tmp_path / "Trash" / "info" / f"{trash_name}.trashinfo"
     assert trash_file.read_text(encoding="utf-8") == "bye"
     assert long_name in info_file.read_text(encoding="utf-8")
+
+
+def test_abort_after_staging_substitution_keeps_user_file(bridge: Path, work_root: Path) -> None:
+    # N2 (fifth review): _discard_session_temp unlinked by name with
+    # no identity check. Moving the staging file away and a user
+    # file onto the staging name, then aborting, permanently deleted
+    # the substituted user file. Abort must verify st_dev/st_ino and
+    # leave foreign files (and the moved staging file) untouched.
+    begin = _fs(bridge, "host.fs.write", root_id="work", path="victim.txt", content="abc")
+    write_id = begin["write_id"]
+    temps = [p.name for p in work_root.iterdir() if ".hb-" in p.name]
+    assert len(temps) == 1
+    _fs(
+        bridge,
+        "host.fs.move",
+        root_id="work",
+        path=temps[0],
+        dest_path="moved-staging.txt",
+    )
+    _seed(work_root, "user.txt", "USER DATA")
+    _fs(bridge, "host.fs.move", root_id="work", path="user.txt", dest_path=temps[0])
+    result = _fs(
+        bridge,
+        "host.fs.write",
+        root_id="work",
+        path="victim.txt",
+        write_id=write_id,
+        abort=True,
+    )
+    assert result["aborted"] is True
+    assert (work_root / temps[0]).read_text(encoding="utf-8") == "USER DATA"
+    assert (work_root / "moved-staging.txt").read_text(encoding="utf-8") == "abc"
+
+
+def test_ttl_discard_after_staging_substitution_keeps_user_file(
+    registry: RootsRegistry, tmp_path: Path, work_root: Path
+) -> None:
+    # N2, TTL path: session expiry goes through the same discard;
+    # a substituted user file must survive the sweep.
+    now = [1000.0]
+    service = HostFsService(registry, trash_root=tmp_path / "Trash", clock=lambda: now[0])
+    service.handle(
+        BridgeRequest(
+            version=1,
+            request_id="w1",
+            capability="host.fs.write",
+            params={"root_id": "work", "path": "victim.txt", "content": "abc"},
+        ),
+        CancelToken(),
+    )
+    temps = [p.name for p in work_root.iterdir() if ".hb-" in p.name]
+    assert len(temps) == 1
+    service.handle(
+        BridgeRequest(
+            version=1,
+            request_id="m1",
+            capability="host.fs.move",
+            params={"root_id": "work", "path": temps[0], "dest_path": "moved-staging.txt"},
+        ),
+        CancelToken(),
+    )
+    _seed(work_root, "user.txt", "USER DATA")
+    service.handle(
+        BridgeRequest(
+            version=1,
+            request_id="m2",
+            capability="host.fs.move",
+            params={"root_id": "work", "path": "user.txt", "dest_path": temps[0]},
+        ),
+        CancelToken(),
+    )
+    now[0] += 601.0  # past the session TTL
+    service.handle(
+        BridgeRequest(
+            version=1,
+            request_id="w2",
+            capability="host.fs.write",
+            params={"root_id": "work", "path": "other.txt", "content": "x", "commit": True},
+        ),
+        CancelToken(),
+    )
+    assert (work_root / temps[0]).read_text(encoding="utf-8") == "USER DATA"
+    assert (work_root / "moved-staging.txt").read_text(encoding="utf-8") == "abc"
+
+
+def test_trash_dirs_created_private_under_permissive_umask(
+    bridge: Path, work_root: Path, tmp_path: Path
+) -> None:
+    # N1 (fifth review): trash dirs created via mkdir(parents=True)
+    # inherited umask 022 -> 0755, so deleting a 0644 file from a
+    # private 0700 directory made it readable by other local users
+    # (ADR-0013 §7). Trash dirs must be created 0700.
+    _seed(work_root, "del.txt", "bye")
+    old_umask = os.umask(0o022)
+    try:
+        result = _fs(bridge, "host.fs.delete", root_id="work", path="del.txt")
+    finally:
+        os.umask(old_umask)
+    assert result["recoverable"] is True
+    trash = tmp_path / "Trash"
+    for directory in (trash, trash / "files", trash / "info"):
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    assert (trash / "files" / "del.txt").read_text(encoding="utf-8") == "bye"
+
+
+def test_existing_loose_trash_dir_tightened(bridge: Path, work_root: Path, tmp_path: Path) -> None:
+    # N1: an existing trash dir owned by the user but group/other
+    # accessible is tightened to 0700 before use (documented policy
+    # in _ensure_private_trash_dir), so delete keeps working without
+    # widening access.
+    trash = tmp_path / "Trash"
+    (trash / "files").mkdir(parents=True)
+    (trash / "info").mkdir(parents=True)
+    for directory in (trash, trash / "files", trash / "info"):
+        os.chmod(directory, 0o755)
+    _seed(work_root, "del.txt", "bye")
+    result = _fs(bridge, "host.fs.delete", root_id="work", path="del.txt")
+    assert result["recoverable"] is True
+    for directory in (trash, trash / "files", trash / "info"):
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+
+
+def test_home_trash_dirs_created_private(registry: RootsRegistry, work_root: Path) -> None:
+    # N1, home branch: ~/.local/share/Trash and its subdirs are
+    # created 0700 even under a permissive umask.
+    home_trash = registry.home / ".local" / "share" / "Trash"
+    _seed(work_root, "gone.txt", "bye")
+    service = HostFsService(registry, mount_bindings_fn=lambda: [])
+    old_umask = os.umask(0o022)
+    try:
+        result = service.handle(
+            BridgeRequest(
+                version=1,
+                request_id="del-home-private",
+                capability="host.fs.delete",
+                params={"root_id": "work", "path": "gone.txt"},
+            ),
+            CancelToken(),
+        )
+    finally:
+        os.umask(old_umask)
+    assert result["recoverable"] is True
+    for directory in (home_trash, home_trash / "files", home_trash / "info"):
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700

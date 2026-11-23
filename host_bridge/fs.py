@@ -224,6 +224,27 @@ def _io_error(exc: OSError) -> FsError:
     return FsError("io_error", f"filesystem operation failed: {name}")
 
 
+def _ensure_private_trash_dir(path: Path) -> None:
+    """Create a trash directory with owner-only (0700) access.
+
+    Trash must never widen access to owner files (ADR-0013 §7):
+    creating ``Trash``/``files``/``info`` under a permissive umask
+    would leave them 0755, so a 0644 file deleted from a private
+    0700 directory would become readable by other local users.
+    New directories are created 0700 (a umask can only strip bits);
+    an existing directory owned by this user that grants group or
+    other access is tightened to 0700; a directory owned by another
+    user (or not a real directory) is refused, never used or
+    chmodded.
+    """
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    st = path.lstat()
+    if not stat_mod.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise FsError("trash_unavailable", "trash directory is not owned by the user")
+    if stat_mod.S_IMODE(st.st_mode) & 0o077:
+        os.chmod(path, 0o700)
+
+
 def _write_all(fd: int, data: bytes) -> None:
     view = memoryview(data)
     while view:
@@ -1107,9 +1128,25 @@ class HostFsService:
         try:
             fd = self._open_dirs(root, session.dir_parts)
             try:
+                st = os.stat(session.temp_name, dir_fd=fd, follow_symlinks=False)
+                if not stat_mod.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != (
+                    session.temp_dev,
+                    session.temp_ino,
+                ):
+                    # The staging name no longer denotes this
+                    # session's file (it was moved away and a foreign
+                    # file substituted): never unlink foreign data.
+                    # Drop the identity so the orphan sweep does not
+                    # chase the moved staging file either.
+                    self._forget_staging(session.temp_dev, session.temp_ino)
+                    return
                 os.unlink(session.temp_name, dir_fd=fd)
             finally:
                 os.close(fd)
+        except FileNotFoundError:
+            # Staging file already gone; nothing left to discard.
+            self._forget_staging(session.temp_dev, session.temp_ino)
+            return
         except (FsError, OSError):
             # Best-effort: the identity stays registered so the
             # orphan sweep can retry the unlink later.
@@ -1658,13 +1695,17 @@ class HostFsService:
         device, else the topdir ``.Trash/<uid>`` (only when a sticky
         ``.Trash`` exists) or ``.Trash-<uid>``. No trash on the same
         mount -> ``trash_unavailable`` and the source stays untouched.
+        All trash directories are created/kept owner-only (0700) so a
+        delete never widens access to owner files (ADR-0013 §7); see
+        ``_ensure_private_trash_dir``.
         """
         uid = os.getuid()
         if self._trash_root is not None:
             files_dir = self._trash_root / "files"
             info_dir = self._trash_root / "info"
-            files_dir.mkdir(parents=True, exist_ok=True)
-            info_dir.mkdir(parents=True, exist_ok=True)
+            _ensure_private_trash_dir(self._trash_root)
+            _ensure_private_trash_dir(files_dir)
+            _ensure_private_trash_dir(info_dir)
             return files_dir, info_dir
         home_trash = self._registry.home / ".local" / "share" / "Trash"
         # The home trash may not exist yet (fresh home): determine
@@ -1682,10 +1723,11 @@ class HostFsService:
             try:
                 files_dir = home_trash / "files"
                 info_dir = home_trash / "info"
-                files_dir.mkdir(parents=True, exist_ok=True)
-                info_dir.mkdir(parents=True, exist_ok=True)
+                _ensure_private_trash_dir(home_trash)
+                _ensure_private_trash_dir(files_dir)
+                _ensure_private_trash_dir(info_dir)
                 return files_dir, info_dir
-            except OSError:
+            except (OSError, FsError):
                 pass
         mount_root = self._topdir_of(source_lexical)
         if mount_root is not None:
@@ -1695,19 +1737,21 @@ class HostFsService:
                 if stat_mod.S_ISDIR(st.st_mode) and st.st_mode & stat_mod.S_ISVTX:
                     files_dir = shared / str(uid) / "files"
                     info_dir = shared / str(uid) / "info"
-                    files_dir.mkdir(parents=True, exist_ok=True)
-                    info_dir.mkdir(parents=True, exist_ok=True)
+                    _ensure_private_trash_dir(shared / str(uid))
+                    _ensure_private_trash_dir(files_dir)
+                    _ensure_private_trash_dir(info_dir)
                     return files_dir, info_dir
-            except OSError:
+            except (OSError, FsError):
                 pass
             own = mount_root / f".Trash-{uid}"
             try:
                 files_dir = own / "files"
                 info_dir = own / "info"
-                files_dir.mkdir(parents=True, exist_ok=True)
-                info_dir.mkdir(parents=True, exist_ok=True)
+                _ensure_private_trash_dir(own)
+                _ensure_private_trash_dir(files_dir)
+                _ensure_private_trash_dir(info_dir)
                 return files_dir, info_dir
-            except OSError:
+            except (OSError, FsError):
                 pass
         raise FsError("trash_unavailable", "no trash available on the source mount")
 
