@@ -1253,3 +1253,137 @@ def test_delete_timeout_during_trashinfo_create_keeps_source(
     finally:
         daemon.shutdown()
         thread.join(timeout=2.0)
+
+
+# --- third Codex review on E03-T04 (03d6eeb findings) ---
+
+
+def test_move_creating_excluded_destination_descendant_refused(tmp_path: Path, home: Path) -> None:
+    # P1: write_excluded may name a path INSIDE the future destination.
+    # Checking only the source subtree let a directory move create the
+    # excluded file at the destination; descendants must also be
+    # checked by their future destination paths.
+    work = (home / "Project" / "work").resolve()
+    _seed(work, "src/protected", "payload")
+    _seed(work, "src/ok.txt", "fine")
+    custom = RootsRegistry(
+        roots=(Root(id="work", path=work, mode="rw"),),
+        write_excluded=((work / "dest" / "protected").resolve(),),
+        home=home.resolve(),
+        config_path=None,
+        socket_dir=None,
+    )
+    service = HostFsService(custom, trash_root=tmp_path / "Trash")
+    with pytest.raises(Exception) as excinfo:
+        service.handle(
+            BridgeRequest(
+                version=1,
+                request_id="mv-excluded",
+                capability="host.fs.move",
+                params={"root_id": "work", "path": "src", "dest_path": "dest"},
+            ),
+            CancelToken(),
+        )
+    assert getattr(excinfo.value, "code", None) == "write_excluded"
+    assert (work / "src" / "protected").exists()
+    assert not (work / "dest" / "protected").exists()
+
+
+def test_write_partial_pwrite_hard_limit_no_publish(
+    bridge: Path, work_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # P2: os.pwrite may write fewer bytes than requested (file-size
+    # limit / disk full). Ignoring the return value published a
+    # truncated staging file as success and, on overwrite, destroyed
+    # the previous full version. A chunk that cannot be written in
+    # full must fail typed before publish.
+    _seed(work_root, "keep.txt", "previous-full")
+    real_pwrite = os.pwrite
+
+    def limited_pwrite(fd: int, data: bytes, offset: int) -> int:
+        if offset >= 4:
+            raise OSError(errno.EFBIG, "simulated file size limit")
+        return real_pwrite(fd, data[:4], offset)
+
+    monkeypatch.setattr(os, "pwrite", limited_pwrite)
+    assert (
+        _fs_error(
+            bridge,
+            "host.fs.write",
+            root_id="work",
+            path="keep.txt",
+            mode="overwrite",
+            content="abcdefgh",
+            commit=True,
+        )
+        == "io_error"
+    )
+    assert (work_root / "keep.txt").read_text(encoding="utf-8") == "previous-full"
+
+
+def test_write_short_pwrite_loops_until_complete(
+    bridge: Path, work_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # P2 (positive side): short-but-completable pwrites must be looped
+    # over until the whole chunk is on disk; commit then publishes
+    # the full content, not the first short write.
+    real_pwrite = os.pwrite
+
+    def short_pwrite(fd: int, data: bytes, offset: int) -> int:
+        return real_pwrite(fd, data[:3], offset)
+
+    monkeypatch.setattr(os, "pwrite", short_pwrite)
+    result = _fs(
+        bridge,
+        "host.fs.write",
+        root_id="work",
+        path="looped.txt",
+        content="abcdefgh",
+        commit=True,
+    )
+    assert result["committed"] is True
+    assert result["size"] == 8
+    assert (work_root / "looped.txt").read_text(encoding="utf-8") == "abcdefgh"
+
+
+def test_delete_creates_home_trash_on_fresh_home(registry: RootsRegistry, work_root: Path) -> None:
+    # P2: on a fresh home ~/.local/share/Trash does not exist yet.
+    # The device must be taken from an existing ancestor and the
+    # home trash created when it matches the source's device,
+    # instead of failing trash_unavailable on the first ENOENT.
+    home_trash = registry.home / ".local" / "share" / "Trash"
+    assert not home_trash.exists()
+    _seed(work_root, "gone.txt", "bye")
+    service = HostFsService(registry, mount_bindings_fn=lambda: [])
+    result = service.handle(
+        BridgeRequest(
+            version=1,
+            request_id="del-fresh-home",
+            capability="host.fs.delete",
+            params={"root_id": "work", "path": "gone.txt"},
+        ),
+        CancelToken(),
+    )
+    assert result["recoverable"] is True
+    assert (home_trash / "files" / "gone.txt").read_text(encoding="utf-8") == "bye"
+    assert (home_trash / "info" / "gone.txt.trashinfo").exists()
+    assert not (work_root / "gone.txt").exists()
+
+
+def test_config_wrong_type_path_rejected(tmp_path: Path, home: Path) -> None:
+    # P2: only a truly ABSENT config may fall back to the built-in
+    # default registry. An existing directory or dangling symlink at
+    # the config path is a broken owner config and must fail closed
+    # with BridgeConfigError, not silently start with other powers.
+    cfg_dir = tmp_path / "host-bridge.json"
+    cfg_dir.mkdir()
+    with pytest.raises(BridgeConfigError):
+        load_registry(env={"SLAVIK_HOST_BRIDGE_CONFIG": str(cfg_dir)}, home=home)
+    dangling = tmp_path / "dangling.json"
+    dangling.symlink_to(tmp_path / "missing-target.json")
+    with pytest.raises(BridgeConfigError):
+        load_registry(env={"SLAVIK_HOST_BRIDGE_CONFIG": str(dangling)}, home=home)
+    absent = load_registry(
+        env={"SLAVIK_HOST_BRIDGE_CONFIG": str(tmp_path / "absent.json")}, home=home
+    )
+    assert absent.describe() == [{"id": "workspace", "mode": "rw"}]

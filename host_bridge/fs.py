@@ -196,6 +196,25 @@ def _write_all(fd: int, data: bytes) -> None:
         view = view[written:]
 
 
+def _pwrite_all(fd: int, data: bytes, offset: int) -> None:
+    """Write the whole chunk at ``offset`` or raise.
+
+    ``os.pwrite`` may legally write fewer bytes than requested
+    (file-size limit, disk full, signals). Ignoring the return
+    value would let commit publish a truncated staging file as a
+    successful write, so loop over the remainder and surface any
+    failure before publish.
+    """
+    view = memoryview(data)
+    written_total = 0
+    while view:
+        written = os.pwrite(fd, view, offset + written_total)
+        if written <= 0 or written > len(view):
+            raise OSError(errno.EIO, "short pwrite")
+        written_total += written
+        view = view[written:]
+
+
 # renameat2 syscall number (x86_64) and RENAME_NOREPLACE flag. The
 # bridge daemon runs on the owner's Linux host; if the syscall is
 # unavailable the move fails typed instead of silently degrading to a
@@ -344,7 +363,16 @@ def load_registry(
     """
     resolved_home = (home or Path.home()).expanduser().resolve()
     config_path = resolve_config_path(env, home=resolved_home)
-    if not config_path.is_file():
+    try:
+        config_stat = config_path.stat()
+    except FileNotFoundError:
+        # A dangling symlink also raises FileNotFoundError from
+        # stat(), but the path exists as an (invalid) config object:
+        # only a truly absent path may fall back to defaults.
+        if config_path.is_symlink() or os.path.lexists(config_path):
+            raise BridgeConfigError(
+                f"host bridge config path exists but is not a readable file: {config_path}"
+            ) from None
         registry = default_registry(home=resolved_home, socket_dir=socket_dir)
         return RootsRegistry(
             roots=registry.roots,
@@ -352,6 +380,12 @@ def load_registry(
             home=registry.home,
             config_path=config_path,
             socket_dir=socket_dir,
+        )
+    except OSError as exc:
+        raise BridgeConfigError(f"cannot read host bridge config {config_path}: {exc}") from exc
+    if not stat_mod.S_ISREG(config_stat.st_mode):
+        raise BridgeConfigError(
+            f"host bridge config path exists but is not a regular file: {config_path}"
         )
     try:
         payload = json.loads(config_path.read_text(encoding="utf-8"))
@@ -1214,7 +1248,7 @@ class HostFsService:
                         raise FsError("content_too_large", "write session exceeds size limit")
                     tfd = self._open_staging(fd, session, os.O_WRONLY)
                     try:
-                        os.pwrite(tfd, data, offset)
+                        _pwrite_all(tfd, data, offset)
                     finally:
                         os.close(tfd)
                     session.size = max(session.size, offset + len(data))
@@ -1367,7 +1401,9 @@ class HostFsService:
 
     # --- subtree checks for move / recursive delete ---
 
-    def _check_subtree(self, target: _Target, token: CancelToken) -> None:
+    def _check_subtree(
+        self, target: _Target, token: CancelToken, *, dest: _Target | None = None
+    ) -> None:
         """Refuse when any descendant is protected, write-excluded or on
         another mount. Symlink entries are classified by their resolved
         path (conservative) and never descended.
@@ -1409,6 +1445,23 @@ class HostFsService:
                     display=target.display,
                 )
                 self._check_write_excluded(probe)
+                if dest is not None:
+                    # A move must not create protected/excluded paths
+                    # at the destination either: check every
+                    # descendant by its future destination path, not
+                    # only by its current source path.
+                    rel_parts = probe.parts[len(target.parts) :]
+                    future_parts = dest.parts + rel_parts
+                    future_lexical = dest.root.path.joinpath(*future_parts)
+                    self._require_normal(future_lexical, mutation=True)
+                    self._check_write_excluded(
+                        _Target(
+                            root=dest.root,
+                            parts=future_parts,
+                            lexical=future_lexical,
+                            display=dest.display,
+                        )
+                    )
                 if stat_mod.S_ISDIR(st.st_mode):
                     if st.st_dev != root_dev or lexical in mount_points:
                         raise FsError(
@@ -1448,7 +1501,7 @@ class HostFsService:
         try:
             sst = os.stat(sname, dir_fd=sfd, follow_symlinks=False)
             if stat_mod.S_ISDIR(sst.st_mode):
-                self._check_subtree(source, token)
+                self._check_subtree(source, token, dest=dest)
             dfd, dname = self._open_parent(dest, create=True)
             try:
                 token.check()
@@ -1509,15 +1562,26 @@ class HostFsService:
             info_dir.mkdir(parents=True, exist_ok=True)
             return files_dir, info_dir
         home_trash = self._registry.home / ".local" / "share" / "Trash"
-        try:
-            if home_trash.stat().st_dev == source_dev:
+        # The home trash may not exist yet (fresh home): determine
+        # its device from the nearest existing ancestor and create
+        # it when that device is the source's, instead of giving up
+        # on the first ENOENT.
+        home_dev: int | None = None
+        for candidate in (home_trash, *home_trash.parents):
+            try:
+                home_dev = candidate.stat().st_dev
+                break
+            except OSError:
+                continue
+        if home_dev == source_dev:
+            try:
                 files_dir = home_trash / "files"
                 info_dir = home_trash / "info"
                 files_dir.mkdir(parents=True, exist_ok=True)
                 info_dir.mkdir(parents=True, exist_ok=True)
                 return files_dir, info_dir
-        except OSError:
-            pass
+            except OSError:
+                pass
         mount_root = self._topdir_of(source_lexical)
         if mount_root is not None:
             shared = mount_root / ".Trash"
