@@ -2283,3 +2283,184 @@ def test_list_pagination_many_entries_order_preserved(bridge: Path, work_root: P
         assert cursor is not None
         assert pages < 50  # pagination must terminate
     assert seen == expected
+
+
+# --- eleventh review: patch staging leak, bounded orphan sweep ---
+
+
+def test_patch_preparation_failure_discards_staging(
+    registry: RootsRegistry, tmp_path: Path, work_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # N1 (eleventh review): if _write_all/fchmod/fsync failed during
+    # _patch staging preparation, the finally closed the fd but the
+    # _discard_temp block was never reached — every failed patch
+    # leaked a .hb-*.tmp that no session owns. Preparation failures
+    # must discard the staging file (identity-checked).
+    _seed(work_root, "code.txt", "a\nb\nc\n")
+    patch = "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"
+    service = HostFsService(registry, trash_root=tmp_path / "Trash")
+
+    def failing_fsync(fd: int) -> None:
+        raise OSError(errno.EIO, "injected fsync failure")
+
+    monkeypatch.setattr(os, "fsync", failing_fsync)
+    for attempt in range(3):
+        with pytest.raises(fs_module.FsError):
+            service.handle(
+                BridgeRequest(
+                    version=1,
+                    request_id=f"prep{attempt}",
+                    capability="host.fs.patch",
+                    params={"root_id": "work", "path": "code.txt", "patch": patch},
+                ),
+                CancelToken(),
+            )
+    assert [p.name for p in work_root.iterdir() if ".hb-" in p.name] == []
+    assert (work_root / "code.txt").read_text(encoding="utf-8") == "a\nb\nc\n"
+
+
+def test_patch_preparation_failure_keeps_substituted_user_file(
+    registry: RootsRegistry, tmp_path: Path, work_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # N1, identity side: the preparation-failure cleanup must keep
+    # the identity check — if the staging file was moved away and a
+    # user file substituted at its name before the failure, the
+    # discard must leave the user file (and the moved staging)
+    # untouched, exactly like the publish-path cleanup.
+    _seed(work_root, "code.txt", "a\nb\nc\n")
+    patch = "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"
+    service = HostFsService(registry, trash_root=tmp_path / "Trash")
+    swapped: list[str] = []
+
+    def substituting_fsync(fd: int) -> None:
+        temps = [p.name for p in work_root.iterdir() if ".hb-" in p.name]
+        assert len(temps) == 1
+        (work_root / temps[0]).rename(work_root / "moved-staging.txt")
+        (work_root / temps[0]).write_text("USER DATA", encoding="utf-8")
+        swapped.append(temps[0])
+        raise OSError(errno.EIO, "injected fsync failure")
+
+    monkeypatch.setattr(os, "fsync", substituting_fsync)
+    with pytest.raises(fs_module.FsError):
+        service.handle(
+            BridgeRequest(
+                version=1,
+                request_id="prep-sub",
+                capability="host.fs.patch",
+                params={"root_id": "work", "path": "code.txt", "patch": patch},
+            ),
+            CancelToken(),
+        )
+    assert (work_root / "code.txt").read_text(encoding="utf-8") == "a\nb\nc\n"
+    assert (work_root / swapped[0]).read_text(encoding="utf-8") == "USER DATA"
+    assert (work_root / "moved-staging.txt").read_text(encoding="utf-8") == "a\nB\nc\n"
+    # The discard also drops the staging identity from the registry,
+    # so the orphan sweep does not chase the moved staging file.
+    moved_stat = (work_root / "moved-staging.txt").stat()
+    assert (moved_stat.st_dev, moved_stat.st_ino) not in service._staging_identities
+
+
+def test_write_orphan_sweep_bounded_and_cancellable(
+    registry: RootsRegistry, tmp_path: Path, work_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # N2 (eleventh review): the orphan cleanup at write-session
+    # start loaded every name via os.listdir and iterated without
+    # an entry budget or cancellation check — even with an empty
+    # staging registry — so a deadline firing mid-cleanup left the
+    # worker consuming memory/CPU after request_timeout. The sweep
+    # must skip the walk when the registry is empty and otherwise
+    # consume os.scandir entries under a budget with per-entry
+    # token checks.
+    for i in range(100):
+        _seed(work_root, f"many/f{i:03d}.txt", "x")
+
+    consumed = [0]
+    listdir_calls = [0]
+    cancel_after: list[int | None] = [None]
+    token_box: list[CancelToken | None] = [None]
+    real_scandir = os.scandir
+    real_listdir = os.listdir
+
+    @contextlib.contextmanager
+    def counting_scandir(path: int) -> Iterator[Iterator[os.DirEntry[str]]]:
+        with real_scandir(path) as it:
+
+            def gen() -> Iterator[os.DirEntry[str]]:
+                for entry in it:
+                    consumed[0] += 1
+                    if cancel_after[0] is not None and consumed[0] >= cancel_after[0]:
+                        tok = token_box[0]
+                        if tok is not None:
+                            tok.cancel()
+                    yield entry
+
+            yield gen()
+
+    def counting_listdir(path: int) -> list[str]:
+        listdir_calls[0] += 1
+        return real_listdir(path)
+
+    monkeypatch.setattr(os, "scandir", counting_scandir)
+    monkeypatch.setattr(os, "listdir", counting_listdir)
+
+    def write(service: HostFsService, name: str, token: CancelToken, request_id: str) -> object:
+        return service.handle(
+            BridgeRequest(
+                version=1,
+                request_id=request_id,
+                capability="host.fs.write",
+                params={
+                    "root_id": "work",
+                    "path": f"many/{name}",
+                    "content": "y",
+                    "commit": True,
+                },
+            ),
+            token,
+        )
+
+    # Empty staging registry: nothing can match, so no walk at all.
+    fresh = HostFsService(registry, trash_root=tmp_path / "Trash")
+    write(fresh, "first.txt", CancelToken(), "sweep1")
+    assert consumed[0] == 0
+    assert listdir_calls[0] == 0
+
+    # Proven orphan in the registry; cancelling mid-walk must abort
+    # the sweep promptly instead of scanning the whole directory.
+    service = HostFsService(registry, trash_root=tmp_path / "Trash")
+    begin = service.handle(
+        BridgeRequest(
+            version=1,
+            request_id="sweep-begin",
+            capability="host.fs.write",
+            params={"root_id": "work", "path": "many/lost.txt", "content": "partial"},
+        ),
+        CancelToken(),
+    )
+    temps = [p for p in (work_root / "many").iterdir() if ".hb-" in p.name]
+    assert len(temps) == 1
+    orphan = temps[0]
+    old = time.time() - 3600
+    os.utime(orphan, (old, old))
+    with service._sessions_lock:
+        service._sessions.pop(begin["write_id"], None)
+    # Path.iterdir() above goes through os.listdir on this Python;
+    # reset both counters so only the sweep is measured below.
+    consumed[0] = 0
+    listdir_calls[0] = 0
+    token = CancelToken()
+    token_box[0] = token
+    cancel_after[0] = 3
+    with pytest.raises(RequestTimeoutError):
+        write(service, "trigger.txt", token, "sweep2")
+    assert consumed[0] <= 4
+    assert listdir_calls[0] == 0
+    cancel_after[0] = None
+    token_box[0] = None
+
+    # Entry budget caps the walk; the write itself still succeeds.
+    monkeypatch.setattr(fs_module, "MAX_ORPHAN_SWEEP_ENTRIES", 5)
+    consumed[0] = 0
+    write(service, "trigger2.txt", CancelToken(), "sweep3")
+    assert consumed[0] <= 6
+    assert listdir_calls[0] == 0

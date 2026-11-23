@@ -128,6 +128,7 @@ MAX_SEARCH_QUERY_CHARS: Final[int] = 256
 MAX_SEARCH_VISITED: Final[int] = 200_000
 MAX_SEARCH_COLLECTED: Final[int] = 10_000
 MAX_SUBTREE_ENTRIES: Final[int] = 50_000
+MAX_ORPHAN_SWEEP_ENTRIES: Final[int] = 50_000
 MAX_LIST_VISITED: Final[int] = 200_000
 
 CONFIG_ENV_VAR: Final[str] = "SLAVIK_HOST_BRIDGE_CONFIG"
@@ -1204,7 +1205,12 @@ class HostFsService:
             self._staging_identities.discard((dev, ino))
 
     def _sweep_orphan_temps(
-        self, dir_fd: int, now: float, root: Root, dir_parts: tuple[str, ...]
+        self,
+        dir_fd: int,
+        now: float,
+        root: Root,
+        dir_parts: tuple[str, ...],
+        token: CancelToken,
     ) -> None:
         """Remove proven-internal staging orphans from one directory.
 
@@ -1220,46 +1226,63 @@ class HostFsService:
         left by a previous daemon instance are not in the registry
         and are left alone (inert, hidden); proving ownership
         across restarts is not worth deleting unproven user data.
+
+        The walk is bounded and cancellable: with an empty staging
+        registry nothing can match, so the directory is not scanned
+        at all; otherwise entries are consumed from ``os.scandir``
+        one at a time under ``MAX_ORPHAN_SWEEP_ENTRIES`` with a
+        token check per entry, so a huge directory neither loads
+        every name into memory nor keeps a cancelled worker busy
+        after ``request_timeout``. Orphans past the budget are left
+        for a later sweep (best-effort cleanup).
         """
-        try:
-            names = os.listdir(dir_fd)
-        except OSError:
-            return
         with self._sessions_lock:
             known = set(self._staging_identities)
             live = {(s.temp_dev, s.temp_ino) for s in self._sessions.values()}
-        for name in names:
-            if not _TEMP_NAME_RE.match(name):
-                continue
-            try:
-                st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-            except OSError:
-                continue
-            identity = (st.st_dev, st.st_ino)
-            if (
-                not stat_mod.S_ISREG(st.st_mode)
-                or identity not in known
-                or identity in live
-                or now - st.st_mtime <= WRITE_SESSION_TTL_S
-            ):
-                continue
-            lexical = root.path.joinpath(*dir_parts, name)
-            probe = _Target(
-                root=root,
-                parts=(*dir_parts, name),
-                lexical=lexical,
-                display="/".join((*dir_parts, name)),
-            )
-            try:
-                self._check_write_excluded(probe)
-                self._require_normal(lexical, mutation=True)
-            except FsError:
-                continue
-            try:
-                os.unlink(name, dir_fd=dir_fd)
-            except OSError:
-                continue
-            self._forget_staging(*identity)
+        if not known:
+            return
+        seen = 0
+        try:
+            with os.scandir(dir_fd) as it:
+                for entry in it:
+                    token.check()
+                    seen += 1
+                    if seen > MAX_ORPHAN_SWEEP_ENTRIES:
+                        return
+                    name = entry.name
+                    if not _TEMP_NAME_RE.match(name):
+                        continue
+                    try:
+                        st = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    identity = (st.st_dev, st.st_ino)
+                    if (
+                        not stat_mod.S_ISREG(st.st_mode)
+                        or identity not in known
+                        or identity in live
+                        or now - st.st_mtime <= WRITE_SESSION_TTL_S
+                    ):
+                        continue
+                    lexical = root.path.joinpath(*dir_parts, name)
+                    probe = _Target(
+                        root=root,
+                        parts=(*dir_parts, name),
+                        lexical=lexical,
+                        display="/".join((*dir_parts, name)),
+                    )
+                    try:
+                        self._check_write_excluded(probe)
+                        self._require_normal(lexical, mutation=True)
+                    except FsError:
+                        continue
+                    try:
+                        os.unlink(name, dir_fd=dir_fd)
+                    except OSError:
+                        continue
+                    self._forget_staging(*identity)
+        except OSError:
+            return
 
     def _open_staging(self, dir_fd: int, session: _WriteSession, flags: int) -> int:
         """Open the session's staging file without following symlinks.
@@ -1407,7 +1430,7 @@ class HostFsService:
                     target.root, session.dir_parts, create=create_parents, token=token
                 )
                 try:
-                    self._sweep_orphan_temps(fd, time.time(), target.root, session.dir_parts)
+                    self._sweep_orphan_temps(fd, time.time(), target.root, session.dir_parts, token)
                     # Cancel-before-commit: never create the staging
                     # file for a request whose deadline already fired.
                     token.check()
@@ -1422,6 +1445,16 @@ class HostFsService:
                         session.temp_dev = tst.st_dev
                         session.temp_ino = tst.st_ino
                         self._register_staging(tst.st_dev, tst.st_ino)
+                    except BaseException:
+                        # fstat failed before the identity was
+                        # recorded; the name was created O_EXCL by
+                        # this call, so a best-effort unlink by name
+                        # cannot remove a pre-existing user file.
+                        try:
+                            os.unlink(session.temp_name, dir_fd=fd)
+                        except OSError:
+                            pass
+                        raise
                     finally:
                         os.close(tfd)
                 finally:
@@ -1637,18 +1670,37 @@ class HostFsService:
                 0o600,
                 dir_fd=pfd,
             )
+            temp_identity: tuple[int, int] | None = None
             try:
-                tst = os.fstat(tfd)
-                temp_identity = (tst.st_dev, tst.st_ino)
-                self._register_staging(*temp_identity)
-                _write_all(tfd, updated.encode("utf-8"))
-                # Preserve the original file's permission bits: the
-                # publish replaces the inode, so without this an
-                # executable 0755 file would silently become 0600.
-                os.fchmod(tfd, stat_mod.S_IMODE(st.st_mode))
-                os.fsync(tfd)
-            finally:
-                os.close(tfd)
+                try:
+                    tst = os.fstat(tfd)
+                    temp_identity = (tst.st_dev, tst.st_ino)
+                    self._register_staging(*temp_identity)
+                    _write_all(tfd, updated.encode("utf-8"))
+                    # Preserve the original file's permission bits: the
+                    # publish replaces the inode, so without this an
+                    # executable 0755 file would silently become 0600.
+                    os.fchmod(tfd, stat_mod.S_IMODE(st.st_mode))
+                    os.fsync(tfd)
+                finally:
+                    os.close(tfd)
+            except BaseException:
+                # Preparation failed after the staging file was
+                # created: discard it (identity-checked) instead of
+                # leaking a .hb-*.tmp that no write session owns and
+                # _sweep_sessions will never remove.
+                if temp_identity is not None:
+                    self._discard_temp(pfd, temp_name, temp_identity)
+                else:
+                    # fstat failed before the identity was recorded;
+                    # the name was created O_EXCL by this call, so a
+                    # best-effort unlink by name cannot remove a
+                    # pre-existing user file.
+                    try:
+                        os.unlink(temp_name, dir_fd=pfd)
+                    except OSError:
+                        pass
+                raise
             try:
                 if self._commit_hook is not None:
                     self._commit_hook()
