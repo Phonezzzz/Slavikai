@@ -1138,6 +1138,8 @@ upload → external/write
 
 #### E02-T08 — browser real E2E acceptance
 
+**Статус:** DONE (PR #191 MERGED 2026-11-23, main `c779bff`; фикс ложного DONE фазы 3 — PR #190, main `cfebbc6`). Все 3 фазы E2E зелёные на реальном Chromium (opt-in `tests/test_browser_runtime_e2e.py`); ручная приёмка шагов 2 и 8 на ПК владельца пройдена 2026-11-23 (headed handoff → вход владельца → агент довёл действие до подтверждённого результата; после инвалидации сессии агент сам вызвал `login_handoff`, ложного DONE нет). Решение владельца 2026-11-23 (вариант C): автодетект logout в рантайме в T08 не входит.
+
 **Scenario.**
 
 1. Создать тестовый profile.
