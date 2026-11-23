@@ -17,7 +17,9 @@ from __future__ import annotations
 import errno
 import json
 import os
+import resource
 import socket
+import stat
 import threading
 import time
 from collections.abc import Iterator
@@ -25,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+import host_bridge.fs as fs_module
 from host_bridge import client
 from host_bridge.daemon import HostBridgeDaemon
 from host_bridge.fs import (
@@ -522,26 +525,23 @@ def test_move_cross_device_is_typed(
     # /dev or /run is deny-classified by design), so EXDEV is
     # simulated at the rename syscall: the typed error must surface
     # and the source must stay untouched (no copy+delete fallback).
+    # overwrite=false goes through the atomic renameat2 helper.
     _seed(work_root, "xdev.txt", "data")
-    real_rename = os.rename
 
     def exdev_rename(*args: object, **kwargs: object) -> None:
         raise OSError(errno.EXDEV, "simulated cross-device rename")
 
-    monkeypatch.setattr(os, "rename", exdev_rename)
-    try:
-        assert (
-            _fs_error(
-                bridge,
-                "host.fs.move",
-                root_id="work",
-                path="xdev.txt",
-                dest_path="moved.txt",
-            )
-            == "cross_device_move"
+    monkeypatch.setattr(fs_module, "_rename_noreplace", exdev_rename)
+    assert (
+        _fs_error(
+            bridge,
+            "host.fs.move",
+            root_id="work",
+            path="xdev.txt",
+            dest_path="moved.txt",
         )
-    finally:
-        monkeypatch.setattr(os, "rename", real_rename)
+        == "cross_device_move"
+    )
     assert (work_root / "xdev.txt").exists()
     assert not (work_root / "moved.txt").exists()
 
@@ -712,3 +712,274 @@ def test_config_rejects_malformed_json(tmp_path: Path, home: Path) -> None:
     env = _config_env(tmp_path, "{not json")
     with pytest.raises(BridgeConfigError):
         load_registry(env=env, home=home)
+
+
+# --- Codex rework regressions (PR #196 review) ---
+
+
+def test_staging_symlink_swap_cannot_redirect_write(
+    bridge: Path, work_root: Path, tmp_path: Path
+) -> None:
+    # P1: the staging temp name is learnable via list; swapping it for
+    # a symlink to a file outside the root (via move overwrite) must
+    # not redirect later chunk writes. The staging file keeps its
+    # identity until commit.
+    outside = tmp_path / "outside.txt"
+    outside.write_text("ORIGINAL", encoding="utf-8")
+    begin = _fs(bridge, "host.fs.write", root_id="work", path="victim.txt", content="abc")
+    write_id = begin["write_id"]
+    temps = [p.name for p in work_root.iterdir() if ".hb-" in p.name]
+    assert len(temps) == 1
+    (work_root / "evil-link").symlink_to(outside)
+    _fs(
+        bridge,
+        "host.fs.move",
+        root_id="work",
+        path="evil-link",
+        dest_path=temps[0],
+        overwrite=True,
+    )
+    assert (
+        _fs_error(
+            bridge,
+            "host.fs.write",
+            root_id="work",
+            path="victim.txt",
+            content="XYZ",
+            offset=3,
+            write_id=write_id,
+        )
+        == "path_outside_root"
+    )
+    assert outside.read_text(encoding="utf-8") == "ORIGINAL"
+    # Commit must refuse to publish the swapped-in symlink as well.
+    assert (
+        _fs_error(
+            bridge,
+            "host.fs.write",
+            root_id="work",
+            path="victim.txt",
+            content="",
+            offset=3,
+            write_id=write_id,
+            commit=True,
+        )
+        == "path_outside_root"
+    )
+    assert outside.read_text(encoding="utf-8") == "ORIGINAL"
+    assert not (work_root / "victim.txt").exists()
+
+
+def test_delete_timeout_during_trashinfo_write_keeps_source(
+    tmp_path: Path,
+    registry: RootsRegistry,
+    work_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # P1: if the .trashinfo write runs past the deadline, the client
+    # gets request_timeout and the source must remain in place even
+    # after the abandoned worker finishes (cancel-before-commit).
+    _seed(work_root, "keep.txt", "stay")
+    real_write_all = fs_module._write_all
+
+    def slow_write_all(fd: int, data: bytes) -> None:
+        time.sleep(0.6)
+        real_write_all(fd, data)
+
+    monkeypatch.setattr(fs_module, "_write_all", slow_write_all)
+    service = HostFsService(registry, trash_root=tmp_path / "Trash")
+    socket_path = tmp_path / "slavikai" / "host-bridge.sock"
+    daemon = HostBridgeDaemon(
+        socket_path,
+        fs_service=service,
+        capability_deadlines={"host.fs.delete": 0.3},
+    )
+    thread = _start_daemon(daemon)
+    try:
+        with pytest.raises(client.BridgeClientError) as excinfo:
+            client.call(
+                socket_path,
+                "host.fs.delete",
+                params={"root_id": "work", "path": "keep.txt"},
+            )
+        assert excinfo.value.code == "request_timeout"
+        time.sleep(1.0)  # let the abandoned worker finish the info write
+        assert (work_root / "keep.txt").read_text(encoding="utf-8") == "stay"
+        info_dir = tmp_path / "Trash" / "info"
+        files_dir = tmp_path / "Trash" / "files"
+        assert not info_dir.exists() or list(info_dir.iterdir()) == []
+        assert not files_dir.exists() or list(files_dir.iterdir()) == []
+        assert client.ping(socket_path) == {"pong": True}
+    finally:
+        daemon.shutdown()
+        thread.join(timeout=2.0)
+
+
+def test_new_checkout_protected_immediately(bridge: Path, work_root: Path) -> None:
+    # P1: a directory checked while it was not a checkout must become
+    # write-excluded as soon as checkout markers appear, without a
+    # daemon restart (negative results are not cached).
+    _fs(
+        bridge,
+        "host.fs.write",
+        root_id="work",
+        path="proj/notes.txt",
+        content="plain",
+        commit=True,
+    )
+    checkout = work_root / "proj"
+    (checkout / "host_bridge").mkdir()
+    (checkout / "host_bridge" / "daemon.py").write_text("# daemon", encoding="utf-8")
+    (checkout / "docs").mkdir()
+    (checkout / "docs" / "runtime_contract_claims.json").write_text("{}", encoding="utf-8")
+    assert (
+        _fs_error(
+            bridge,
+            "host.fs.write",
+            root_id="work",
+            path="proj/new.txt",
+            content="x",
+            commit=True,
+        )
+        == "write_excluded"
+    )
+    assert (
+        _fs_error(
+            bridge,
+            "host.fs.write",
+            root_id="work",
+            path="proj/notes.txt",
+            mode="overwrite",
+            content="tampered",
+            commit=True,
+        )
+        == "write_excluded"
+    )
+    assert (checkout / "notes.txt").read_text(encoding="utf-8") == "plain"
+
+
+def test_move_noreplace_refuses_concurrent_destination(
+    bridge: Path, work_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # P2: with overwrite=false, a destination created after any
+    # existence check but before the rename syscall must survive;
+    # the atomic renameat2(RENAME_NOREPLACE) refuses instead.
+    _seed(work_root, "src.txt", "payload")
+    real_noreplace = fs_module._rename_noreplace
+
+    def racing_noreplace(src: str, src_fd: int, dst: str, dst_fd: int) -> None:
+        (work_root / "dst.txt").write_text("concurrent", encoding="utf-8")
+        real_noreplace(src, src_fd, dst, dst_fd)
+
+    monkeypatch.setattr(fs_module, "_rename_noreplace", racing_noreplace)
+    assert (
+        _fs_error(bridge, "host.fs.move", root_id="work", path="src.txt", dest_path="dst.txt")
+        == "already_exists"
+    )
+    assert (work_root / "dst.txt").read_text(encoding="utf-8") == "concurrent"
+    assert (work_root / "src.txt").read_text(encoding="utf-8") == "payload"
+
+
+def test_search_and_subtree_respect_mount_points(
+    registry: RootsRegistry, tmp_path: Path, work_root: Path
+) -> None:
+    # P2: a same-device bind mount inside the root must not be
+    # descended by search (names/metadata beyond the tree) and must
+    # refuse a subtree move, matching direct list behavior.
+    _seed(work_root, "report-top.txt", "x")
+    _seed(work_root, "mounted/report-inside.txt", "x")
+    _seed(work_root, "tree/mounted2/inner.txt", "x")
+    mounted = (work_root / "mounted").resolve()
+    mounted2 = (work_root / "tree" / "mounted2").resolve()
+    service = HostFsService(
+        registry,
+        trash_root=tmp_path / "Trash",
+        mount_bindings_fn=lambda: [(mounted, mounted), (mounted2, mounted2)],
+    )
+    result = service.handle(
+        BridgeRequest(
+            version=1,
+            request_id="s1",
+            capability="host.fs.search",
+            params={"root_id": "work", "query": "report"},
+        ),
+        CancelToken(),
+    )
+    paths = sorted(m["path"] for m in result["matches"])  # type: ignore[index]
+    assert paths == ["report-top.txt"]
+    with pytest.raises(Exception) as excinfo:
+        service.handle(
+            BridgeRequest(
+                version=1,
+                request_id="m1",
+                capability="host.fs.move",
+                params={"root_id": "work", "path": "tree", "dest_path": "tree2"},
+            ),
+            CancelToken(),
+        )
+    assert getattr(excinfo.value, "code", None) == "path_outside_root"
+    assert (work_root / "tree" / "mounted2" / "inner.txt").exists()
+
+
+def test_subtree_walk_bounded_fds(registry: RootsRegistry, tmp_path: Path, work_root: Path) -> None:
+    # P2: moving a wide tree must not need one open fd per directory;
+    # with a tight RLIMIT_NOFILE the old walk died with EMFILE.
+    for i in range(150):
+        _seed(work_root, f"tree/d{i:03d}/f.txt", "x")
+    service = HostFsService(registry, trash_root=tmp_path / "Trash")
+    open_fds = len(os.listdir("/proc/self/fd"))
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (open_fds + 12, hard))
+    try:
+        result = service.handle(
+            BridgeRequest(
+                version=1,
+                request_id="mv1",
+                capability="host.fs.move",
+                params={"root_id": "work", "path": "tree", "dest_path": "tree2"},
+            ),
+            CancelToken(),
+        )
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+    assert result["moved"] is True
+    assert (work_root / "tree2" / "d149" / "f.txt").exists()
+
+
+def test_patch_preserves_mode(bridge: Path, work_root: Path) -> None:
+    # P2: patch publishes a new inode; the original permission bits
+    # must be carried over (0755 executable must not become 0600).
+    script = _seed(work_root, "script.sh", "echo old\n")
+    script.chmod(0o755)
+    patch = "@@ -1,1 +1,1 @@\n-echo old\n+echo new\n"
+    done = _fs(bridge, "host.fs.patch", root_id="work", path="script.sh", patch=patch)
+    assert done["applied"] is True
+    assert script.read_text(encoding="utf-8") == "echo new\n"
+    assert stat.S_IMODE(script.stat().st_mode) == 0o755
+
+
+def test_list_long_names_frame_budget_with_cursor(bridge: Path, work_root: Path) -> None:
+    # P2: 500 entries with ~192-char names at limit=500 — the frame
+    # budget must include the actual next_cursor; the client gets
+    # pages, not an internal_error.
+    names = [f"f{i:03d}" + "x" * 185 + ".txt" for i in range(500)]
+    for name in names:
+        _seed(work_root, name, "x")
+    collected: list[str] = []
+    cursor: object = None
+    for _ in range(20):
+        params: dict[str, object] = {"root_id": "work", "path": ".", "limit": 500}
+        if cursor is not None:
+            params["cursor"] = cursor
+        page = _fs(bridge, "host.fs.list", **params)
+        entries = page["entries"]  # type: ignore[index]
+        assert entries, "a page must never be empty while entries remain"
+        collected.extend(e["name"] for e in entries)  # type: ignore[index]
+        if not page["truncated"]:
+            assert page["next_cursor"] is None
+            break
+        cursor = page["next_cursor"]
+        assert cursor == entries[-1]["name"]  # type: ignore[index]
+    else:
+        raise AssertionError("pagination did not terminate")
+    assert collected == names

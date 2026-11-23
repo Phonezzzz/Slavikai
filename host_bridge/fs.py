@@ -41,21 +41,30 @@ Trust-model points enforced here (ADR-0013 §5, §9, §10, §11):
   ``pwrite``) and publish with a single commit: ``os.link`` for
   ``create`` (atomic absence check, no exists()+replace race),
   ``os.rename`` for ``overwrite``. Unfinished writes are size-capped
-  and expire after a TTL.
+  and expire after a TTL. The staging file's identity
+  (``st_dev``+``st_ino``) is recorded at creation; every later open
+  uses ``O_NOFOLLOW`` and re-verifies the identity, so swapping the
+  staging name for a symlink (or another file) cannot redirect
+  writes outside the root.
 - **Cancel-before-commit.** Mutations check the request's
-  ``CancelToken`` immediately before the single publish syscall. A
-  cancelled/timed-out mutation never publishes late; if the publish
-  already happened when the response is lost, the outcome is unknown
-  to the client (documented in ``host_bridge.client``) and must not
-  be auto-retried.
-- **Move** is a single ``renameat``; ``EXDEV`` is a typed error (no
-  copy+delete fallback). **Delete** is trash-only with freedesktop
-  ``.trashinfo`` created exclusively before the move; no trash on the
-  source's mount → ``trash_unavailable`` and the source is untouched.
+  ``CancelToken`` immediately before the single publish syscall
+  (including the trash rename in delete, after the ``.trashinfo``
+  write). A cancelled/timed-out mutation never publishes late; if
+  the publish already happened when the response is lost, the
+  outcome is unknown to the client (documented in
+  ``host_bridge.client``) and must not be auto-retried.
+- **Move** is a single ``renameat`` (``renameat2`` with
+  ``RENAME_NOREPLACE`` when ``overwrite=false``, so a destination
+  created concurrently is never destroyed); ``EXDEV`` is a typed
+  error (no copy+delete fallback). **Delete** is trash-only with
+  freedesktop ``.trashinfo`` created exclusively before the move; no
+  trash on the source's mount → ``trash_unavailable`` and the source
+  is untouched.
 """
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import json
 import os
@@ -172,6 +181,35 @@ def _write_all(fd: int, data: bytes) -> None:
     while view:
         written = os.write(fd, view)
         view = view[written:]
+
+
+# renameat2 syscall number (x86_64) and RENAME_NOREPLACE flag. The
+# bridge daemon runs on the owner's Linux host; if the syscall is
+# unavailable the move fails typed instead of silently degrading to a
+# racy stat+rename.
+_SYS_RENAMEAT2: Final[int] = 316
+_RENAME_NOREPLACE: Final[int] = 1
+
+
+def _rename_noreplace(src: str, src_dir_fd: int, dst: str, dst_dir_fd: int) -> None:
+    """Atomically rename without replacing an existing destination.
+
+    Raises ``OSError`` with ``EEXIST`` when the destination exists at
+    syscall time (a destination created concurrently is never
+    destroyed), ``EXDEV`` across filesystems, etc.
+    """
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = libc.syscall(
+        ctypes.c_long(_SYS_RENAMEAT2),
+        ctypes.c_int(src_dir_fd),
+        ctypes.c_char_p(os.fsencode(src)),
+        ctypes.c_int(dst_dir_fd),
+        ctypes.c_char_p(os.fsencode(dst)),
+        ctypes.c_uint(_RENAME_NOREPLACE),
+    )
+    if result != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
 
 
 @dataclass(frozen=True)
@@ -449,6 +487,11 @@ class _WriteSession:
     mode: str  # "create" | "overwrite"
     size: int = 0
     last_touch: float = 0.0
+    # Identity of the staging file recorded at creation. Every later
+    # open re-verifies it (with O_NOFOLLOW), so replacing the staging
+    # name with a symlink or another file cannot redirect the write.
+    temp_dev: int = 0
+    temp_ino: int = 0
 
 
 def _type_name(mode: int) -> str:
@@ -548,13 +591,17 @@ class HostFsService:
         return tuple(dict.fromkeys(excluded))
 
     def _is_slavikai_checkout(self, directory: Path) -> bool:
-        cached = self._checkout_cache.get(directory)
-        if cached is not None:
-            return cached
+        # Only positive results are cached: a directory that was not a
+        # checkout at first check may become one later (clone/restore)
+        # and must be write-excluded immediately, without a daemon
+        # restart. A cached positive stays excluded (fail-closed).
+        if self._checkout_cache.get(directory):
+            return True
         result = (directory / "host_bridge" / "daemon.py").is_file() and (
             directory / "docs" / "runtime_contract_claims.json"
         ).is_file()
-        self._checkout_cache[directory] = result
+        if result:
+            self._checkout_cache[directory] = True
         return result
 
     def _check_write_excluded(self, target: _Target) -> None:
@@ -825,13 +872,20 @@ class HostFsService:
             "truncated": truncated,
             "next_cursor": None,
         }
+
+        def _sync_cursor() -> None:
+            # The cursor resumes after the last kept entry. It is part
+            # of the serialized frame, so it must be set BEFORE the
+            # size check and recomputed whenever entries are trimmed.
+            result["next_cursor"] = entries[-1]["name"] if result["truncated"] and entries else None
+
+        _sync_cursor()
         # Frame budget: drop trailing entries until the serialized
-        # frame fits; the cursor resumes after the last kept entry.
+        # frame (including the actual cursor) fits.
         while entries and not self._frame_fits(result, request_id):
             entries.pop()
             result["truncated"] = True
-        if result["truncated"] and entries:
-            result["next_cursor"] = entries[-1]["name"]
+            _sync_cursor()
         return result
 
     # --- host.fs.read ---
@@ -953,6 +1007,37 @@ class HostFsService:
             except OSError:
                 pass
 
+    def _open_staging(self, dir_fd: int, session: _WriteSession, flags: int) -> int:
+        """Open the session's staging file without following symlinks.
+
+        ``O_NOFOLLOW`` refuses a symlink swapped in under the staging
+        name (``ELOOP`` → ``path_outside_root``), and the recorded
+        ``st_dev``+``st_ino`` identity refuses any other replacement:
+        the write can only ever touch the file this session created.
+        """
+        fd = os.open(session.temp_name, flags | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+        try:
+            st = os.fstat(fd)
+            if not stat_mod.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != (
+                session.temp_dev,
+                session.temp_ino,
+            ):
+                raise FsError("path_outside_root", "staging file identity changed")
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    @staticmethod
+    def _verify_staging_name(dir_fd: int, session: _WriteSession) -> None:
+        """Verify the staging name still denotes the session's file."""
+        st = os.stat(session.temp_name, dir_fd=dir_fd, follow_symlinks=False)
+        if not stat_mod.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != (
+            session.temp_dev,
+            session.temp_ino,
+        ):
+            raise FsError("path_outside_root", "staging file identity changed")
+
     def _write(
         self, params: dict[str, object], request_id: str, token: CancelToken
     ) -> dict[str, object]:
@@ -1034,7 +1119,12 @@ class HostFsService:
                         0o600,
                         dir_fd=fd,
                     )
-                    os.close(tfd)
+                    try:
+                        tst = os.fstat(tfd)
+                        session.temp_dev = tst.st_dev
+                        session.temp_ino = tst.st_ino
+                    finally:
+                        os.close(tfd)
                 finally:
                     os.close(fd)
             except BaseException:
@@ -1060,7 +1150,7 @@ class HostFsService:
                     raise _invalid_params("offset leaves a gap in the write session")
                 if offset + len(data) > MAX_WRITE_BYTES:
                     raise FsError("content_too_large", "write session exceeds size limit")
-                tfd = os.open(session.temp_name, os.O_WRONLY | os.O_CLOEXEC, dir_fd=fd)
+                tfd = self._open_staging(fd, session, os.O_WRONLY)
                 try:
                     os.pwrite(tfd, data, offset)
                 finally:
@@ -1081,7 +1171,7 @@ class HostFsService:
             # exactly one publish syscall. After the gate passes, a
             # lost response means outcome-unknown (documented); the
             # publish itself is atomic either way.
-            tfd = os.open(session.temp_name, os.O_RDONLY | os.O_CLOEXEC, dir_fd=fd)
+            tfd = self._open_staging(fd, session, os.O_RDONLY)
             try:
                 os.fsync(tfd)
             finally:
@@ -1089,6 +1179,10 @@ class HostFsService:
             if self._commit_hook is not None:
                 self._commit_hook()
             token.check()
+            # The publish syscalls address the staging file by name;
+            # re-verify its identity immediately before publishing so
+            # a swapped-in symlink/file is never published.
+            self._verify_staging_name(fd, session)
             if session.mode == "create":
                 # linkat fails with EEXIST if the target appeared:
                 # absence is verified atomically, no exists()+replace race.
@@ -1174,6 +1268,10 @@ class HostFsService:
             )
             try:
                 _write_all(tfd, updated.encode("utf-8"))
+                # Preserve the original file's permission bits: the
+                # publish replaces the inode, so without this an
+                # executable 0755 file would silently become 0600.
+                os.fchmod(tfd, stat_mod.S_IMODE(st.st_mode))
                 os.fsync(tfd)
             finally:
                 os.close(tfd)
@@ -1203,45 +1301,52 @@ class HostFsService:
     def _check_subtree(self, target: _Target, token: CancelToken) -> None:
         """Refuse when any descendant is protected, write-excluded or on
         another mount. Symlink entries are classified by their resolved
-        path (conservative) and never descended."""
-        fd = self._open_dirs(target.root, target.parts)
-        try:
-            root_dev = os.fstat(fd).st_dev
-            seen = 0
-            stack: list[tuple[int, Path]] = [(fd, target.lexical)]
-            owned: list[int] = []
+        path (conservative) and never descended.
+
+        The walk holds at most one directory fd at a time: each
+        directory is opened via ``_open_dirs`` (which re-enforces the
+        fd-relative symlink/mount rules for the whole path), scanned,
+        and closed before its children are visited, so the fd count
+        does not grow with the number of directories in the tree.
+        """
+        mount_points = self._mount_points()
+        seen = 0
+        root_dev: int | None = None
+        stack: list[tuple[str, ...]] = [target.parts]
+        while stack:
+            parts = stack.pop()
+            fd = self._open_dirs(target.root, parts)
             try:
-                while stack:
-                    current_fd, current_lexical = stack.pop()
-                    for entry in os.scandir(current_fd):
-                        token.check()
-                        seen += 1
-                        if seen > MAX_SUBTREE_ENTRIES:
-                            raise FsError("subtree_too_large", "subtree exceeds the entry limit")
-                        lexical = current_lexical / entry.name
-                        self._require_normal(lexical, mutation=True)
-                        probe = _Target(
-                            root=target.root,
-                            parts=lexical.relative_to(target.root.path).parts,
-                            lexical=lexical,
-                            display=target.display,
-                        )
-                        self._check_write_excluded(probe)
-                        st = entry.stat(follow_symlinks=False)
-                        if stat_mod.S_ISDIR(st.st_mode):
-                            if st.st_dev != root_dev:
-                                raise FsError(
-                                    "path_outside_root",
-                                    "subtree crosses a nested mount",
-                                )
-                            nfd = os.open(entry.name, _DIR_OPEN_FLAGS, dir_fd=current_fd)
-                            owned.append(nfd)
-                            stack.append((nfd, lexical))
+                if root_dev is None:
+                    root_dev = os.fstat(fd).st_dev
+                # Stat entries while the directory fd is open (DirEntry
+                # stats are fd-relative for fd-based scandir).
+                with os.scandir(fd) as it:
+                    entries = [(entry.name, entry.stat(follow_symlinks=False)) for entry in it]
             finally:
-                for nfd in owned:
-                    os.close(nfd)
-        finally:
-            os.close(fd)
+                os.close(fd)
+            current_lexical = target.root.path.joinpath(*parts) if parts else target.root.path
+            for name, st in entries:
+                token.check()
+                seen += 1
+                if seen > MAX_SUBTREE_ENTRIES:
+                    raise FsError("subtree_too_large", "subtree exceeds the entry limit")
+                lexical = current_lexical / name
+                self._require_normal(lexical, mutation=True)
+                probe = _Target(
+                    root=target.root,
+                    parts=lexical.relative_to(target.root.path).parts,
+                    lexical=lexical,
+                    display=target.display,
+                )
+                self._check_write_excluded(probe)
+                if stat_mod.S_ISDIR(st.st_mode):
+                    if st.st_dev != root_dev or lexical in mount_points:
+                        raise FsError(
+                            "path_outside_root",
+                            "subtree crosses a nested mount",
+                        )
+                    stack.append((*parts, name))
 
     # --- host.fs.move (single rename) ---
 
@@ -1277,16 +1382,15 @@ class HostFsService:
                 self._check_subtree(source, token)
             dfd, dname = self._open_parent(dest, create=True)
             try:
-                if not overwrite:
-                    try:
-                        os.stat(dname, dir_fd=dfd, follow_symlinks=False)
-                    except FileNotFoundError:
-                        pass
-                    else:
-                        raise FsError("already_exists", f"destination exists: {dest.display}")
                 token.check()
                 try:
-                    os.rename(sname, dname, src_dir_fd=sfd, dst_dir_fd=dfd)
+                    if overwrite:
+                        os.rename(sname, dname, src_dir_fd=sfd, dst_dir_fd=dfd)
+                    else:
+                        # Atomic no-replace: a destination created
+                        # concurrently (after any stat) is never
+                        # destroyed; the syscall itself refuses.
+                        _rename_noreplace(sname, sfd, dname, dfd)
                 except OSError as exc:
                     if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
                         raise FsError(
@@ -1421,6 +1525,12 @@ class HostFsService:
                     finally:
                         os.close(ifd)
                     try:
+                        # Cancel gate immediately before the publish
+                        # syscall: if the deadline fired while the
+                        # .trashinfo was being written, the source
+                        # stays in place and the cleanup below removes
+                        # the metadata (cancel-before-commit).
+                        token.check()
                         os.rename(name, candidate, src_dir_fd=pfd, dst_dir_fd=files_fd)
                     except BaseException:
                         try:
@@ -1478,48 +1588,58 @@ class HostFsService:
         needle = query.casefold()
         collected: list[tuple[float, str, os.stat_result]] = []
         visited = 0
-        root_fd = self._open_dirs(target.root, target.parts)
-        try:
-            root_dev = os.fstat(root_fd).st_dev
-            stack: list[tuple[int, str]] = [(root_fd, "")]
-            owned: list[int] = []
+        mount_points = self._mount_points()
+        root_dev: int | None = None
+        # Bounded-fd walk: each directory is opened via _open_dirs
+        # (fd-relative symlink/mount rules re-enforced per path),
+        # scanned and closed before its children are visited, so the
+        # open-fd count does not grow with the tree size. Nested
+        # mounts (including same-device bind mounts) are never
+        # descended, matching direct list behavior.
+        stack: list[tuple[tuple[str, ...], str]] = [(target.parts, "")]
+        while stack:
+            parts, rel = stack.pop()
+            fd = self._open_dirs(target.root, parts)
             try:
-                while stack:
-                    current_fd, rel = stack.pop()
-                    for entry in os.scandir(current_fd):
-                        token.check()
-                        visited += 1
-                        if visited > MAX_SEARCH_VISITED:
-                            raise FsError("io_error", "search exceeded the visited-entry limit")
-                        rel_path = f"{rel}/{entry.name}" if rel else entry.name
-                        lexical = target.lexical / rel_path
-                        if self._classify(lexical, mutation=False) != "normal":
-                            continue  # denied entries omitted, dirs not descended
+                if root_dev is None:
+                    root_dev = os.fstat(fd).st_dev
+                with os.scandir(fd) as it:
+                    scanned: list[tuple[str, os.stat_result | None]] = []
+                    for entry in it:
                         try:
-                            st = entry.stat(follow_symlinks=False)
+                            scanned.append((entry.name, entry.stat(follow_symlinks=False)))
                         except FileNotFoundError:
-                            continue
-                        if needle in entry.name.casefold():
-                            if (
-                                modified_after is None
-                                or datetime.fromtimestamp(st.st_mtime).astimezone()
-                                >= modified_after
-                            ):
-                                collected.append((st.st_mtime, rel_path, st))
-                                if len(collected) > MAX_SEARCH_COLLECTED:
-                                    raise FsError(
-                                        "io_error",
-                                        "search exceeded the collected-result limit",
-                                    )
-                        if stat_mod.S_ISDIR(st.st_mode) and st.st_dev == root_dev:
-                            nfd = os.open(entry.name, _DIR_OPEN_FLAGS, dir_fd=current_fd)
-                            owned.append(nfd)
-                            stack.append((nfd, rel_path))
+                            scanned.append((entry.name, None))
             finally:
-                for nfd in owned:
-                    os.close(nfd)
-        finally:
-            os.close(root_fd)
+                os.close(fd)
+            for name, st in scanned:
+                token.check()
+                visited += 1
+                if visited > MAX_SEARCH_VISITED:
+                    raise FsError("io_error", "search exceeded the visited-entry limit")
+                rel_path = f"{rel}/{name}" if rel else name
+                lexical = target.lexical / rel_path
+                if self._classify(lexical, mutation=False) != "normal":
+                    continue  # denied entries omitted, dirs not descended
+                if st is None:
+                    continue  # vanished mid-scan
+                if needle in name.casefold():
+                    if (
+                        modified_after is None
+                        or datetime.fromtimestamp(st.st_mtime).astimezone() >= modified_after
+                    ):
+                        collected.append((st.st_mtime, rel_path, st))
+                        if len(collected) > MAX_SEARCH_COLLECTED:
+                            raise FsError(
+                                "io_error",
+                                "search exceeded the collected-result limit",
+                            )
+                if (
+                    stat_mod.S_ISDIR(st.st_mode)
+                    and st.st_dev == root_dev
+                    and lexical not in mount_points
+                ):
+                    stack.append(((*parts, name), rel_path))
         collected.sort(key=lambda item: item[0], reverse=True)
         matches = [
             {
