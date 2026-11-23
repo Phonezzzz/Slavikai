@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 
 import pytest
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from core.agent import Agent
 from core.agent_response import ResponseProduced
@@ -54,7 +56,7 @@ from server.http.handlers.ui_chat import _iterate_stream_in_thread
 from shared.auto_models import AutoRunStatus
 from shared.models import JSONValue, LLMMessage, ToolRequest, ToolResult
 from tests.test_canonical_loop_e2e import _E2EAgent
-from tools.desktop_browser_tool import PlaywrightBrowserBackend
+from tools.desktop_browser_tool import PlaywrightBrowserBackend, _browser_state_declaration
 from tools.tool_registry import ToolRegistry
 from tools.workspace_tools import ReadFileTool, workspace_root_context
 
@@ -1765,9 +1767,14 @@ class _StateFakeLocator:
         if self._page.closed:
             raise RuntimeError("Target page, context or browser has been closed")
         if self._page.busy:
-            raise TimeoutError("Locator.element_handle: Timeout exceeded.")
+            raise PlaywrightTimeoutError("Locator.element_handle: Timeout exceeded.")
         if self._empty or self._resolved_entity_id not in self._page.records:
-            raise TimeoutError("Locator.element_handle: Timeout exceeded.")
+            raise PlaywrightTimeoutError("Locator.element_handle: Timeout exceeded.")
+        if self._entity_id is not None and self._entity_id in self._page.duplicate_ids:
+            raise PlaywrightError(
+                "Locator.element_handle: Error: strict mode violation: "
+                f'locator("[id=\\"{self._entity_id}\\"]") resolved to 2 elements'
+            )
         return _StateFakeElementHandle()
 
     def inner_text(self, timeout: float | None = None) -> str:
@@ -1775,7 +1782,9 @@ class _StateFakeLocator:
         if self._page.closed:
             raise RuntimeError("Target page, context or browser has been closed")
         if self._page.busy:
-            raise TimeoutError("Locator.inner_text: Timeout exceeded.")
+            raise PlaywrightTimeoutError("Locator.inner_text: Timeout exceeded.")
+        if self._page.read_delay:
+            time.sleep(self._page.read_delay)
         assert self._resolved_entity_id is not None
         return self._page.records[self._resolved_entity_id]
 
@@ -1818,6 +1827,13 @@ class _StateFakePage:
         # Селектор -> entity_id, на которую он фактически указывает
         # (модель выхода селектора за пределы entity, например xpath ..).
         self.escape_selectors: dict[str, str] = {}
+        # entity_id -> сфабрикованный count для wait_for_function с
+        # querySelectorAll (модель переопределённого страницей
+        # document.querySelectorAll; production count так не читает).
+        self.query_selector_all_spoof: dict[str, int] = {}
+        # Задержка чтения inner_text: модель чтения, завершающегося
+        # после deadline вызова.
+        self.read_delay = 0.0
         self.closed = False
         self.close_on_click = False
         self.count_calls = 0
@@ -1865,10 +1881,14 @@ class _StateFakePage:
         if self.closed:
             raise RuntimeError("Target page, context or browser has been closed")
         if self.busy:
-            raise TimeoutError("Page.wait_for_function: Timeout exceeded.")
+            raise PlaywrightTimeoutError("Page.wait_for_function: Timeout exceeded.")
+        if expression.strip() == "() => true":
+            return _StateFakeJSHandle(True)
         if "querySelectorAll" in expression:
             assert isinstance(arg, str) and arg.startswith('[id="') and arg.endswith('"]')
             entity_id = arg[len('[id="') : -2].replace('\\"', '"').replace("\\\\", "\\")
+            if entity_id in self.query_selector_all_spoof:
+                return _StateFakeJSHandle({"n": self.query_selector_all_spoof[entity_id]})
             if entity_id in self.duplicate_ids:
                 return _StateFakeJSHandle({"n": 2})
             return _StateFakeJSHandle({"n": 1 if entity_id in self.records else 0})
@@ -2205,6 +2225,114 @@ def test_backend_tab_closed_by_action_keeps_success_with_declaration(
     del plain_args["browser_state"]
     with pytest.raises(RuntimeError, match="has been closed"):
         plain_backend.handle(ToolRequest("desktop_browser", plain_args))
+
+
+def _validated_declaration() -> dict[str, JSONValue]:
+    declaration = _browser_state_declaration(ToolRequest("desktop_browser", _state_args()))
+    assert declaration is not None
+    return declaration
+
+
+def test_backend_count_ignores_spoofed_query_selector_all(tmp_path: Path) -> None:
+    """Подменённый страницей querySelectorAll не фабрикует создание сущности.
+
+    Скрипт страницы переопределяет ``document.querySelectorAll`` и
+    после клика возвращает length=1 для order-Z, не создавая элемент.
+    Подсчёт через движок селекторов драйвера видит правду: сущности
+    нет, after_count=0, подтверждения нет.
+    """
+    page = _StateFakePage({"order-X": "Черновик"})
+    page.on_action(
+        "#pay-x",
+        after_polls=1,
+        effect=lambda p: p.query_selector_all_spoof.update({"order-Z": 1}),
+    )
+    backend = _state_backend(tmp_path, page)
+    args = _state_args()
+    args["browser_state"] = {"entity_id": "order-Z", "expect": {"kind": "count", "after": 1}}
+    args["timeout_seconds"] = 1
+
+    result = backend.handle(ToolRequest("desktop_browser", args))
+
+    assert result.ok, result.data
+    facts = result.data["browser_state"]
+    assert isinstance(facts, dict)
+    assert facts["before_count"] == 0
+    assert facts["after_count"] == 0
+    assert "order-Z" not in page.records
+
+
+def test_backend_duplicate_creation_is_not_confirmed(tmp_path: Path) -> None:
+    """Создание двух элементов с одним ID не подтверждает 0 -> 1.
+
+    Строгий element_handle падает strict mode violation при >1
+    совпадении: count кодируется как 2, verifier подтверждает
+    только точный переход 0 -> 1.
+    """
+
+    def create_duplicates(p: _StateFakePage) -> None:
+        p.records.update({"order-Z": "Новая"})
+        p.duplicate_ids.add("order-Z")
+
+    page = _StateFakePage({"order-X": "Черновик"})
+    page.on_action("#pay-x", after_polls=1, effect=create_duplicates)
+    backend = _state_backend(tmp_path, page)
+    args = _state_args()
+    args["browser_state"] = {"entity_id": "order-Z", "expect": {"kind": "count", "after": 1}}
+    args["timeout_seconds"] = 1
+
+    result = backend.handle(ToolRequest("desktop_browser", args))
+
+    assert result.ok, result.data
+    facts = result.data["browser_state"]
+    assert isinstance(facts, dict)
+    assert facts["before_count"] == 0
+    assert facts["after_count"] == 2
+
+
+def test_backend_finish_capture_after_deadline_returns_no_facts(tmp_path: Path) -> None:
+    """Истёкший deadline: подтверждение после срока не принимается.
+
+    Статус X уже «Оплачено» (совпадение доступно), но deadline вызова
+    прошёл до начала опроса: фактов нет (UNVERIFIED), а не DONE.
+    """
+    page = _StateFakePage({"order-X": "Оплачено"})
+    backend = _state_backend(tmp_path, page)
+    token = backend._document_token(page)
+    assert token is not None
+
+    facts = backend._finish_browser_state_capture(
+        page,
+        _validated_declaration(),
+        "Черновик",
+        token,
+        deadline=time.monotonic() - 1.0,
+    )
+
+    assert facts is None
+
+
+def test_backend_finish_capture_match_after_deadline_is_rejected(tmp_path: Path) -> None:
+    """Чтение, завершившееся после deadline, не подтверждает совпадение.
+
+    Статус X уже «Оплачено», но чтение inner_text завершается после
+    deadline вызова: совпадение получено поздно и не принимается.
+    """
+    page = _StateFakePage({"order-X": "Оплачено"})
+    page.read_delay = 0.3
+    backend = _state_backend(tmp_path, page)
+    token = backend._document_token(page)
+    assert token is not None
+
+    facts = backend._finish_browser_state_capture(
+        page,
+        _validated_declaration(),
+        "Черновик",
+        token,
+        deadline=time.monotonic() + 0.05,
+    )
+
+    assert facts is None
 
 
 # --- E02-T10: DesktopRuntime с фейковым handler (факты захвата) -----------

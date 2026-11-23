@@ -18,9 +18,8 @@ from playwright.sync_api import (
     Playwright,
     sync_playwright,
 )
-from playwright.sync_api import (
-    Error as PlaywrightError,
-)
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from core.browser_lease import BrowserProfileLease
 from core.browser_service import (
@@ -58,6 +57,11 @@ FRESH_URL_TIMEOUT_MS = 3_000
 # ограничено, чтобы зависший JS страницы не держал executor.
 BROWSER_STATE_POLL_MS = 100
 BROWSER_STATE_READ_TIMEOUT_MS = 2_000
+# Одно чтение числа сущностей: строгий ``element_handle`` ждёт
+# появления элемента, поэтому probe ограничен отдельно от общего
+# бюджета чтения — иначе отсутствующая сущность съедала бы весь
+# остаток таймаута вызова на каждом чтении «до».
+BROWSER_STATE_COUNT_PROBE_MS = 500
 
 # E02-T09 rework round 5: origin документа элемента нельзя читать
 # evaluate в main world страницы — скрипт cross-origin iframe может
@@ -1118,32 +1122,57 @@ class PlaywrightBrowserBackend:
         except Exception:  # noqa: BLE001 - захват не должен ронять действие
             return None
 
+    def _page_responsive(self, page: Page, *, timeout_ms: float) -> bool:
+        """Жив ли основной поток страницы (bounded, без DOM-API страницы).
+
+        ``wait_for_function("() => true")`` не вызывает переопределяемых
+        страницей DOM-методов: на зависшей странице драйвер прерывает
+        ожидание по timeout, на живой — возвращается сразу. Используется
+        только чтобы отличить «элемента нет» от «страница зависла» при
+        подсчёте сущностей; само значение ничего не доказывает.
+        """
+        try:
+            page.wait_for_function("() => true", timeout=timeout_ms)
+            return True
+        except Exception:  # noqa: BLE001 - захват не должен ронять действие
+            return False
+
     def _read_entity_count(
         self, page: Page, declaration: dict[str, JSONValue], *, timeout_ms: float
     ) -> int | None:
-        """Точное число элементов с ``entity_id``, ограниченное по времени.
+        """Точное число элементов с ``entity_id`` через движок селекторов драйвера.
 
-        ``Locator.count()`` драйвер отправляет без timeout: на
-        странице с заблокированным JS-потоком он висит неограниченно
-        вместе с Desktop executor и host lease. Здесь count читается
-        ``wait_for_function`` с timeout драйвера (объект-обёртка,
-        чтобы 0 не считался falsy и не ждал до timeout); по истечении
-        или ошибке — None (захват недоступен → UNVERIFIED).
+        ``wait_for_function`` выполняется в main world: скрипт страницы,
+        переопределивший ``document.querySelectorAll``, фабрикует
+        ``before_count=0, after_count=1`` без создания элемента — DONE
+        для несуществующей сущности. Резолв селекторов Playwright идёт
+        в изолированном utility world и подмене не подвержен, но
+        ``Locator.count()`` отправляется без timeout (kNoTimeout) и на
+        зависшей странице держит executor неограниченно. Поэтому число
+        выводится из ограниченных по времени строгих чтений:
+        ``element_handle`` возвращает handle ровно при одном совпадении,
+        при нескольких сразу падает strict mode violation, при нуле или
+        зависшей странице — TimeoutError по истечении probe; ноль от
+        зависшей страницы отличает bounded liveness-проба. Больше
+        одного совпадения кодируется как 2: verifier подтверждает
+        только 0 -> 1. Любая иная ошибка — None (захват недоступен →
+        UNVERIFIED).
         """
+        probe_ms = min(timeout_ms, float(BROWSER_STATE_COUNT_PROBE_MS))
+        entity = self._entity_locator(page, str(declaration["entity_id"]))
         try:
-            handle = page.wait_for_function(
-                "(sel) => ({n: document.querySelectorAll(sel).length})",
-                arg=self._entity_selector(str(declaration["entity_id"])),
-                timeout=timeout_ms,
-            )
-            value = handle.json_value()
-            if isinstance(value, dict):
-                n = value.get("n")
-                if isinstance(n, int) and not isinstance(n, bool):
-                    return n
+            handle = entity.element_handle(timeout=probe_ms)
+        except PlaywrightTimeoutError:
+            if not self._page_responsive(page, timeout_ms=probe_ms):
+                return None
+            return 0
+        except PlaywrightError as exc:
+            if "strict mode violation" in str(exc):
+                return 2
             return None
         except Exception:  # noqa: BLE001 - захват не должен ронять действие
             return None
+        return 1 if handle is not None else 0
 
     def _begin_browser_state_capture(
         self,
@@ -1197,12 +1226,14 @@ class PlaywrightBrowserBackend:
         """Опрос «после» и факты сравнения для verifier (E02-T10).
 
         Опрос — в пределах общего таймаута вызова и с учётом отмены;
-        повторного click/submit нет. Навигация на другой документ
-        (токен изменился или не читается) ломает непрерывность
-        наблюдения: фактов нет, результат неподтверждён. Для text в
-        результат идут только факты точного сравнения с объявленным
-        ожиданием — сырые строки не покидают tool (result.data целиком
-        уходит модели).
+        повторного click/submit нет. Совпадение принимается только
+        если чтение завершилось до deadline: подтверждение, полученное
+        после истечения срока, фактов не даёт (UNVERIFIED). Навигация
+        на другой документ (токен изменился или не читается) ломает
+        непрерывность наблюдения: фактов нет, результат
+        неподтверждён. Для text в результат идут только факты точного
+        сравнения с объявленным ожиданием — сырые строки не покидают
+        tool (result.data целиком уходит модели).
         """
         expect = declaration.get("expect")
         if not isinstance(expect, dict):
@@ -1214,6 +1245,12 @@ class PlaywrightBrowserBackend:
         last_after: str | int | None = None
         try:
             while True:
+                if time.monotonic() >= deadline:
+                    # Срок вызова истёк до чтения: новых наблюдений не
+                    # делаем. Уже собранные честные факты (без
+                    # совпадения) уходят как есть — подтверждения в
+                    # них нет; если наблюдений не было, фактов не будет.
+                    break
                 if kind == "text":
                     value = self._read_entity_text(
                         page, declaration, timeout_ms=_read_timeout_ms(deadline)
@@ -1230,7 +1267,13 @@ class PlaywrightBrowserBackend:
                         observed = True
                         last_after = count
                         matched = count == after_expected
-                if matched or self._cancelled() or time.monotonic() >= deadline:
+                if matched:
+                    if time.monotonic() >= deadline:
+                        # Совпадение получено чтением, завершившимся
+                        # после deadline: не принимать (UNVERIFIED).
+                        return None
+                    break
+                if self._cancelled() or time.monotonic() >= deadline:
                     break
                 remaining_ms = (deadline - time.monotonic()) * 1000
                 page.wait_for_timeout(max(0.0, min(float(BROWSER_STATE_POLL_MS), remaining_ms)))

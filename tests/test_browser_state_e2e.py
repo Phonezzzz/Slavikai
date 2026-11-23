@@ -6,7 +6,10 @@
 строк). Клик, изменивший только Y, уже оплаченный X, создание сущности
 (count 0 -> 1), submit формы и навигация на другой документ
 (непрерывность наблюдения разорвана -> захвата нет) покрыты отдельными
-сценариями. Подтверждённый захват проходит штатный
+сценариями. Отдельный сценарий: скрипт страницы переопределяет
+``document.querySelectorAll`` и фабрикует создание сущности —
+подсчёт через движок селекторов драйвера подмене не подвержен.
+Подтверждённый захват проходит штатный
 ``VerifierRuntime.verify_browser_postconditions``.
 
 Opt-in, только headless: ``SLAVIK_RUN_BROWSER_PERSISTENCE_E2E=1``.
@@ -58,6 +61,27 @@ _OTHER_HTML = """<!doctype html><html><body>
 <div id="order-X"><span class="status">Оплачено</span></div>
 </body></html>"""
 
+_SPOOF_HTML = """<!doctype html><html><body>
+<button id="fake-create">Фейк</button>
+<button id="real-create">Создать</button>
+<script>
+  const orig = document.querySelectorAll.bind(document);
+  document.querySelectorAll = function (sel) {
+    if (sel.includes('order-Z')) {
+      return { length: window.__faked ? 1 : 0 };
+    }
+    return orig(sel);
+  };
+  document.getElementById('fake-create').onclick = () => { window.__faked = true; };
+  document.getElementById('real-create').onclick = () => setTimeout(() => {
+    const d = document.createElement('div');
+    d.id = 'order-Z';
+    d.textContent = 'Новая';
+    document.body.appendChild(d);
+  }, 300);
+</script>
+</body></html>"""
+
 
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - http.server naming
@@ -65,6 +89,8 @@ class _Handler(BaseHTTPRequestHandler):
             body = _ORDERS_HTML
         elif self.path == "/other":
             body = _OTHER_HTML
+        elif self.path == "/spoof":
+            body = _SPOOF_HTML
         else:
             self.send_response(404)
             self.end_headers()
@@ -244,6 +270,71 @@ def test_browser_state_navigation_breaks_continuity(tmp_path: Path) -> None:
         assert result.ok, result.data
         assert "browser_state" not in result.data
         assert _verify(args, result) == VerificationStatus.FAILED
+    finally:
+        tool.close()
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.skipif(
+    os.environ.get("SLAVIK_RUN_BROWSER_PERSISTENCE_E2E") != "1",
+    reason="real-browser E2E is opt-in (SLAVIK_RUN_BROWSER_PERSISTENCE_E2E=1)",
+)
+def test_browser_state_count_ignores_spoofed_query_selector_all(tmp_path: Path) -> None:
+    # Скрипт страницы переопределяет document.querySelectorAll и после
+    # клика фабрикует length=1 для order-Z, не создавая элемент.
+    # Подсчёт через движок селекторов драйвера (utility world) подмене
+    # не подвержен: подтверждения нет. Реальное создание на той же
+    # странице подтверждается как прежде.
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    origin = f"http://127.0.0.1:{server.server_address[1]}"
+    tool = DesktopBrowserTool(
+        _security(tmp_path),
+        profile=BrowserProfile(profile_id="default", owner_id="local"),
+        profile_root=tmp_path / "profiles",
+    )
+
+    def act(args: dict[str, JSONValue]) -> ToolResult:
+        return tool.handle(ToolRequest("desktop_browser", args))
+
+    try:
+        opened = act({"operation": "open", "url": f"{origin}/spoof"})
+        assert opened.ok, opened.data
+
+        fake_args: dict[str, JSONValue] = {
+            "operation": "click",
+            "selector_type": "css",
+            "selector": "#fake-create",
+            "timeout_seconds": 3,
+            "browser_state": {"entity_id": "order-Z", "expect": {"kind": "count", "after": 1}},
+        }
+        result = act(fake_args)
+        assert result.ok, result.data
+        facts = result.data["browser_state"]
+        assert isinstance(facts, dict)
+        assert facts["before_count"] == 0
+        assert facts["after_count"] == 0
+        assert _verify(fake_args, result) == VerificationStatus.FAILED
+
+        reloaded = act({"operation": "navigate", "url": f"{origin}/spoof"})
+        assert reloaded.ok, reloaded.data
+        real_args: dict[str, JSONValue] = {
+            "operation": "click",
+            "selector_type": "css",
+            "selector": "#real-create",
+            "timeout_seconds": 5,
+            "browser_state": {"entity_id": "order-Z", "expect": {"kind": "count", "after": 1}},
+        }
+        result = act(real_args)
+        assert result.ok, result.data
+        assert result.data["browser_state"] == {
+            "kind": "count",
+            "entity_id": "order-Z",
+            "before_count": 0,
+            "after_count": 1,
+        }
+        assert _verify(real_args, result) == VerificationStatus.PASSED
     finally:
         tool.close()
         server.shutdown()
