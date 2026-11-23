@@ -1252,6 +1252,36 @@ class HostFsService:
         ):
             raise FsError("path_outside_root", "staging file identity changed")
 
+    @staticmethod
+    def _verify_temp_name(dir_fd: int, temp_name: str, identity: tuple[int, int]) -> None:
+        """Verify a staging name still denotes the file we created."""
+        st = os.stat(temp_name, dir_fd=dir_fd, follow_symlinks=False)
+        if not stat_mod.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != identity:
+            raise FsError("path_outside_root", "staging file identity changed")
+
+    def _discard_temp(self, dir_fd: int, temp_name: str, identity: tuple[int, int]) -> None:
+        """Unlink a staging file only while it is still ours.
+
+        If the name now denotes a foreign file (the staging file was
+        moved away and a user file substituted), leave it untouched
+        and drop the identity so the orphan sweep does not chase the
+        moved staging file either.
+        """
+        try:
+            st = os.stat(temp_name, dir_fd=dir_fd, follow_symlinks=False)
+            if not stat_mod.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != identity:
+                self._forget_staging(*identity)
+                return
+            os.unlink(temp_name, dir_fd=dir_fd)
+        except FileNotFoundError:
+            self._forget_staging(*identity)
+            return
+        except OSError:
+            # Best-effort: the identity stays registered so the
+            # orphan sweep can retry the unlink later.
+            return
+        self._forget_staging(*identity)
+
     def _write(
         self, params: dict[str, object], request_id: str, token: CancelToken
     ) -> dict[str, object]:
@@ -1524,15 +1554,18 @@ class HostFsService:
             try:
                 if self._commit_hook is not None:
                     self._commit_hook()
+                # The rename addresses the staging file by name;
+                # re-verify its identity immediately before publishing
+                # so a swapped-in foreign file is never published.
+                self._verify_temp_name(pfd, temp_name, temp_identity)
+                # Cancellation gate AFTER the identity verification:
+                # the stat inside it can block past the deadline, and a
+                # request_timeout already returned to the client must
+                # exclude the publish (cancel-before-commit).
                 token.check()
                 os.rename(temp_name, name, src_dir_fd=pfd, dst_dir_fd=pfd)
             except BaseException:
-                try:
-                    os.unlink(temp_name, dir_fd=pfd)
-                except OSError:
-                    pass  # identity stays registered; the orphan sweep retries
-                else:
-                    self._forget_staging(*temp_identity)
+                self._discard_temp(pfd, temp_name, temp_identity)
                 raise
             self._forget_staging(*temp_identity)
         finally:

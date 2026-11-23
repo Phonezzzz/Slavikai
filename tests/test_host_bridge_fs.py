@@ -959,6 +959,80 @@ def test_patch_preserves_mode(bridge: Path, work_root: Path) -> None:
         assert stat.S_IMODE(script.stat().st_mode) == mode
 
 
+def test_patch_staging_substitution_refused_before_publish(
+    registry: RootsRegistry, tmp_path: Path, work_root: Path
+) -> None:
+    # N1 (seventh review): _patch published its staging file by name
+    # without verifying identity. Moving the staging file away and a
+    # user file onto its name before the rename published the foreign
+    # content as applied=true. Publish must verify st_dev/st_ino and
+    # refuse, leaving the original and the user file intact.
+    _seed(work_root, "code.txt", "a\nb\nc\n")
+    patch = "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"
+    swapped: list[str] = []
+
+    def substitute() -> None:
+        temps = [p.name for p in work_root.iterdir() if ".hb-" in p.name]
+        assert len(temps) == 1
+        (work_root / temps[0]).rename(work_root / "moved-staging.txt")
+        (work_root / temps[0]).write_text("USER DATA", encoding="utf-8")
+        swapped.append(temps[0])
+
+    service = HostFsService(registry, trash_root=tmp_path / "Trash", commit_hook=substitute)
+    with pytest.raises(Exception) as excinfo:
+        service.handle(
+            BridgeRequest(
+                version=1,
+                request_id="p1",
+                capability="host.fs.patch",
+                params={"root_id": "work", "path": "code.txt", "patch": patch},
+            ),
+            CancelToken(),
+        )
+    assert getattr(excinfo.value, "code", None) == "path_outside_root"
+    assert (work_root / "code.txt").read_text(encoding="utf-8") == "a\nb\nc\n"
+    assert (work_root / swapped[0]).read_text(encoding="utf-8") == "USER DATA"
+    assert (work_root / "moved-staging.txt").read_text(encoding="utf-8") == "a\nB\nc\n"
+
+
+def test_patch_cancel_after_staging_substitution_keeps_user_file(
+    registry: RootsRegistry, tmp_path: Path, work_root: Path
+) -> None:
+    # N1, cancel path: with the staging name substituted and the
+    # request cancelled before publish, the cleanup unlink must not
+    # permanently delete the substituted user file (trash-only).
+    _seed(work_root, "code.txt", "a\nb\nc\n")
+    patch = "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"
+    token = CancelToken()
+    swapped: list[str] = []
+
+    def substitute_and_cancel() -> None:
+        temps = [p.name for p in work_root.iterdir() if ".hb-" in p.name]
+        assert len(temps) == 1
+        (work_root / temps[0]).rename(work_root / "moved-staging.txt")
+        (work_root / temps[0]).write_text("USER DATA", encoding="utf-8")
+        swapped.append(temps[0])
+        token.cancel()
+
+    service = HostFsService(
+        registry, trash_root=tmp_path / "Trash", commit_hook=substitute_and_cancel
+    )
+    with pytest.raises(fs_module.FsError) as excinfo:
+        service.handle(
+            BridgeRequest(
+                version=1,
+                request_id="p2",
+                capability="host.fs.patch",
+                params={"root_id": "work", "path": "code.txt", "patch": patch},
+            ),
+            token,
+        )
+    assert excinfo.value.code == "path_outside_root"
+    assert (work_root / "code.txt").read_text(encoding="utf-8") == "a\nb\nc\n"
+    assert (work_root / swapped[0]).read_text(encoding="utf-8") == "USER DATA"
+    assert (work_root / "moved-staging.txt").read_text(encoding="utf-8") == "a\nB\nc\n"
+
+
 def test_list_long_names_frame_budget_with_cursor(bridge: Path, work_root: Path) -> None:
     # P2: 500 entries with ~192-char names at limit=500 — the frame
     # budget must include the actual next_cursor; the client gets
