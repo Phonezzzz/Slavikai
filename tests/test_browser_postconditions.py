@@ -277,6 +277,30 @@ def test_failed_browser_change_is_not_confirmed() -> None:
     assert result.error == "locator timeout"
 
 
+def test_failed_click_after_successful_setup_is_failed() -> None:
+    # Дефект E02-T08 (фаза 3): успешный setup (navigate, self-verified)
+    # не должен скрывать упавшее последнее state-changing действие.
+    # Обе проверки обязаны вернуть FAILED с исходной ошибкой, а не
+    # PASSED по успешному setup.
+    failed_click = _call(
+        "click",
+        {},
+        ok=False,
+        error="locator timeout",
+        args={"selector": "#publish"},
+    )
+    calls = [_navigate(), failed_click]
+
+    desktop = VerifierRuntime().verify_desktop_observations(calls)
+    assert desktop.status == VerificationStatus.FAILED
+    assert desktop.error == "locator timeout"
+
+    browser = VerifierRuntime().verify_browser_postconditions(calls)
+    assert browser is not None
+    assert browser.status == VerificationStatus.FAILED
+    assert browser.error == "locator timeout"
+
+
 # --- canonical combination: semantics B ----------------------------------
 
 
@@ -992,6 +1016,43 @@ def test_desktop_runtime_failed_click_then_unconfirmed_click_is_unverified(
     assert outcome.canonical_outcome.is_full_done is False
 
 
+def test_desktop_runtime_failed_click_after_successful_setup_is_failed(
+    tmp_path: Path,
+) -> None:
+    # Регрессия дефекта E02-T08 (фаза 3): navigate успешен
+    # (self-verified), click падает с locator timeout, модель
+    # завершает «Готово». Успешный setup не должен давать DONE:
+    # прогон — FAILED с исходной ошибкой в тексте и без final_success.
+    outcome = _run_desktop_browser(
+        tmp_path,
+        [
+            ToolCall(
+                id="nav-1",
+                name="desktop_browser",
+                arguments={"operation": "navigate", "url": "https://example.test/"},
+            ),
+            ToolCall(
+                id="click-1",
+                name="desktop_browser",
+                arguments={"operation": "click", "selector": "#publish"},
+            ),
+        ],
+        [_allow_rule("click", "#publish", "external_side_effect")],
+        handler=_failing_click_handler,
+    )
+
+    assert outcome.loop_result.error == "locator timeout"
+    assert not outcome.verification.ok
+    assert "locator timeout" in outcome.text
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.terminal_reason is TerminalReason.FAILED
+    assert outcome.canonical_outcome.ui_label == "FAILED"
+    assert outcome.canonical_outcome.is_full_done is False
+    assert outcome.canonical_outcome.communication_class == "final_failure"
+    # Исходная ошибка сохранена в каноническом outcome.
+    assert outcome.canonical_outcome.verification.checks[0].detail == "locator timeout"
+
+
 # --- Пользовательский ответ Desktop из канонического outcome ---------------
 # Регрессия аудита на d7d5982: click -> snapshot давал canonical
 # UNVERIFIED, но пользователю уходили «Готово» и verifier status ok из
@@ -1151,6 +1212,50 @@ def test_desktop_user_response_failed_click_keeps_original_error(
     assert "locator timeout" in user_text
     assert report["verifier"]["status"] == "fail"
     assert "canonical=FAILED" in report["execution_summary"]
+
+
+@pytest.mark.parametrize("entry", ["sync", "stream", "resume"])
+def test_desktop_user_response_failed_click_after_setup_keeps_original_error(
+    tmp_path,
+    monkeypatch,
+    entry,  # noqa: ANN001
+) -> None:
+    # Регрессия дефекта E02-T08 (фаза 3) в проекции: успешный navigate
+    # перед упавшим click не должен превращать ответ в «Готово» +
+    # Verifier OK. Пользователь видит FAILED с исходной ошибкой во
+    # всех путях (sync/streaming/resume), без final_success.
+    response, first_delta = _run_desktop_agent_response(
+        tmp_path,
+        monkeypatch,
+        [
+            ToolCall(
+                id="nav-1",
+                name="desktop_browser",
+                arguments={"operation": "navigate", "url": "https://example.test/"},
+            ),
+            _click_call(),
+        ],
+        entry,
+        [_allow_rule("click", "#publish", "external_side_effect")],
+        handler=_failing_click_handler,
+    )
+
+    outcome = response.runtime_result
+    canonical = outcome.canonical_outcome
+    assert canonical is not None
+    assert canonical.ui_label == "FAILED"
+    assert canonical.is_full_done is False
+    assert canonical.communication_class != "final_success"
+
+    user_text, report = _split_user_response(response.text)
+    assert "locator timeout" in user_text
+    assert user_text != "Готово"
+    assert report["verifier"]["status"] == "fail"
+    assert "canonical=FAILED" in report["execution_summary"]
+    if first_delta is not None:
+        delta_text, delta_report = _split_user_response(first_delta)
+        assert "locator timeout" in delta_text
+        assert delta_report["verifier"]["status"] == "fail"
 
 
 @pytest.mark.parametrize("entry", ["sync", "stream"])

@@ -375,6 +375,15 @@ class VerifierRuntime:
             for index, name, args, result in change_attempts
             if result.ok
         ]
+        if change_attempts and not change_attempts[-1][3].ok:
+            # Последнее state-changing действие упало и не исправлено
+            # последующим успешным: успешный setup не скрывает отказ
+            # выполнения (дефект E02-T08, фаза 3).
+            return _desktop_observation_result(
+                status=VerificationStatus.FAILED,
+                reason=change_attempts[-1][3].error or "desktop_state_change_failed",
+                duration_seconds=time.monotonic() - start,
+            )
         if successful_changes:
             for index, name, args, result in successful_changes:
                 later = calls[index + 1 :]
@@ -432,6 +441,10 @@ class VerifierRuntime:
         - setup-операции без self-verification (open/new_tab пустой
           вкладки) подтверждаются последующей observation той же
           страницы — как в desktop-семантике.
+        - упавшее последнее state-changing действие (не исправлено
+          последующим успешным) — FAILED с исходной ошибкой: успешный
+          setup не подтверждает целевое состояние вместо упавшего
+          действия (дефект E02-T08, фаза 3).
         - нет state-changing browser-вызовов -> ``None``: browser
           postcondition неприменим и не блокирует DONE.
         """
@@ -454,6 +467,12 @@ class VerifierRuntime:
             return _desktop_observation_result(
                 status=VerificationStatus.FAILED,
                 reason=last_error,
+                duration_seconds=time.monotonic() - start,
+            )
+        if not change_attempts[-1][2].ok:
+            return _desktop_observation_result(
+                status=VerificationStatus.FAILED,
+                reason=change_attempts[-1][2].error or "browser_state_change_failed",
                 duration_seconds=time.monotonic() - start,
             )
         for index, args, result in successful_changes:
