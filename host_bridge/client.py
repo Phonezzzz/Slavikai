@@ -28,6 +28,18 @@ from host_bridge.protocol import (
 
 _DEFAULT_TIMEOUT_S: Final[float] = 5.0
 
+# Typed rejections the daemon emits before a request ID could be
+# extracted -- the frame was rejected before parsing
+# (``frame_too_large``), the frame was not a JSON object
+# (``malformed_request``), or the request ID itself was invalid
+# (``invalid_request_id``) -- carry ``request_id: null`` by design.
+# The client surfaces their typed code instead of masking them as a
+# correlation failure. Successful responses and errors echoing an ID
+# keep strict correlation.
+_PRE_ID_ERROR_CODES: Final[frozenset[str]] = frozenset(
+    {"frame_too_large", "invalid_request_id", "malformed_request"}
+)
+
 
 class BridgeClientError(Exception):
     """Typed bridge failure; ``code`` is the wire error code."""
@@ -94,20 +106,18 @@ def call(
     response_rid = payload.get("request_id")
     if response_rid != rid:
         error = payload.get("error")
-        if (
-            response_rid is None
-            and payload.get("ok") is False
-            and isinstance(error, dict)
-            and error.get("code") == "invalid_request_id"
-        ):
-            # The daemon could not echo an ID because the request ID
-            # itself was invalid; surface the typed error instead of
-            # masking it as a correlation failure.
-            message = error.get("message")
-            raise BridgeClientError(
-                "invalid_request_id",
-                message if isinstance(message, str) else "bridge rejected the request ID",
-            )
+        if response_rid is None and payload.get("ok") is False and isinstance(error, dict):
+            code = error.get("code")
+            if isinstance(code, str) and code in _PRE_ID_ERROR_CODES:
+                # The daemon rejected the frame before an ID could be
+                # extracted (or the ID itself was invalid), so there is
+                # nothing to correlate; surface the typed error instead
+                # of masking it as a correlation failure.
+                message = error.get("message")
+                raise BridgeClientError(
+                    code,
+                    message if isinstance(message, str) else "bridge rejected the request",
+                )
         raise BridgeClientError(
             "malformed_response", "bridge response request_id does not match the request"
         )

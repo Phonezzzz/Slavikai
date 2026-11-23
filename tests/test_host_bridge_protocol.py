@@ -414,3 +414,119 @@ def test_client_overlong_request_id_surfaces_typed_error(bridge: Path) -> None:
     with pytest.raises(client.BridgeClientError) as excinfo:
         client.call(bridge, "bridge.ping", request_id="x" * (MAX_REQUEST_ID_CHARS + 1))
     assert excinfo.value.code == "invalid_request_id"
+
+
+# --- pre-ID typed rejections keep their code (PR #195 rework round 2) ---
+
+
+def test_client_oversized_request_surfaces_frame_too_large(bridge: Path) -> None:
+    # The daemon rejects the frame before extracting an ID and answers
+    # frame_too_large with request_id: null; the client must surface
+    # that typed code, not mask it as malformed_response.
+    with pytest.raises(client.BridgeClientError) as excinfo:
+        client.call(
+            bridge,
+            "bridge.ping",
+            request_id="r",
+            params={"x": "a" * MAX_FRAME_BYTES},
+        )
+    assert excinfo.value.code == "frame_too_large"
+
+
+def _serve_once(socket_path: Path, response: bytes) -> threading.Thread:
+    """Fake bridge peer: accept one connection, answer with ``response``."""
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(socket_path))
+    server.listen(1)
+
+    def run() -> None:
+        try:
+            conn, _ = server.accept()
+            with conn:
+                conn.settimeout(5.0)
+                conn.makefile("rb").readline(MAX_FRAME_BYTES + 2)
+                conn.sendall(response)
+        finally:
+            server.close()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread
+
+
+def test_client_mismatched_success_request_id_is_malformed(tmp_path: Path) -> None:
+    # Correlation is not weakened: a successful response echoing a
+    # different request ID is still a malformed response.
+    socket_path = tmp_path / "fake.sock"
+    thread = _serve_once(socket_path, encode_success({"pong": True}, "someone-else"))
+    with pytest.raises(client.BridgeClientError) as excinfo:
+        client.call(socket_path, "bridge.ping", request_id="req-1")
+    assert excinfo.value.code == "malformed_response"
+    thread.join(timeout=2.0)
+
+
+def test_client_mismatched_error_request_id_is_malformed(tmp_path: Path) -> None:
+    # An error echoing a different request ID is still a correlation
+    # failure, not a typed rejection for this request.
+    socket_path = tmp_path / "fake.sock"
+    frame = (
+        _frame(
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": "someone-else",
+                "ok": False,
+                "error": {"code": "unknown_capability", "message": "nope"},
+            }
+        )
+        + b"\n"
+    )
+    thread = _serve_once(socket_path, frame)
+    with pytest.raises(client.BridgeClientError) as excinfo:
+        client.call(socket_path, "bridge.ping", request_id="req-1")
+    assert excinfo.value.code == "malformed_response"
+    thread.join(timeout=2.0)
+
+
+def test_client_null_id_non_pre_id_error_is_malformed(tmp_path: Path) -> None:
+    # The null-ID exception covers exactly the pre-ID rejections; an
+    # unknown_capability (only emitted after ID extraction) with a
+    # null ID is a malformed response, not a typed rejection.
+    socket_path = tmp_path / "fake.sock"
+    frame = (
+        _frame(
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": None,
+                "ok": False,
+                "error": {"code": "unknown_capability", "message": "nope"},
+            }
+        )
+        + b"\n"
+    )
+    thread = _serve_once(socket_path, frame)
+    with pytest.raises(client.BridgeClientError) as excinfo:
+        client.call(socket_path, "bridge.ping", request_id="req-1")
+    assert excinfo.value.code == "malformed_response"
+    thread.join(timeout=2.0)
+
+
+def test_client_null_id_malformed_request_surfaces_typed(tmp_path: Path) -> None:
+    # malformed_request is emitted before ID extraction (frame not a
+    # JSON object), so its null-ID form surfaces typed.
+    socket_path = tmp_path / "fake.sock"
+    frame = (
+        _frame(
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": None,
+                "ok": False,
+                "error": {"code": "malformed_request", "message": "request is not valid JSON"},
+            }
+        )
+        + b"\n"
+    )
+    thread = _serve_once(socket_path, frame)
+    with pytest.raises(client.BridgeClientError) as excinfo:
+        client.call(socket_path, "bridge.ping", request_id="req-1")
+    assert excinfo.value.code == "malformed_request"
+    thread.join(timeout=2.0)
