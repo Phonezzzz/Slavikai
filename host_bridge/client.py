@@ -1,15 +1,18 @@
-"""Minimal client for the Owner Host Bridge (E03-T02).
+"""Minimal client for the Owner Host Bridge (E03-T03 schema).
 
 One request per connection: connect to the AF_UNIX socket, send one
-capability line, read one response line. Used by tests today; the
-SlavikAI server becomes the real client when ``owner_host`` is adopted
-as an execution target (later E03 tickets).
+versioned request frame (protocol version, client-generated request ID,
+capability, optional attribution fields), read one response frame and
+validate it against the schema (protocol version, echoed request ID).
+Used by tests today; the SlavikAI server becomes the real client when
+``owner_host`` is adopted as an execution target (later E03 tickets).
 """
 
 from __future__ import annotations
 
 import json
 import socket
+import uuid
 from pathlib import Path
 from typing import Final
 
@@ -17,8 +20,10 @@ from host_bridge.protocol import (
     CAPABILITY_CAPABILITIES,
     CAPABILITY_PING,
     CAPABILITY_VERSION,
-    MAX_FRAME_BYTES,
+    PROTOCOL_VERSION,
+    FrameTooLargeError,
     encode_request,
+    read_frame,
 )
 
 _DEFAULT_TIMEOUT_S: Final[float] = 5.0
@@ -37,29 +42,59 @@ def call(
     capability: str,
     *,
     timeout: float = _DEFAULT_TIMEOUT_S,
+    request_id: str | None = None,
+    principal_id: str | None = None,
+    run_id: str | None = None,
+    params: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Send one capability request and return its result object."""
+    rid = request_id if request_id is not None else uuid.uuid4().hex
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
             conn.settimeout(timeout)
             conn.connect(str(socket_path))
-            conn.sendall(encode_request(capability))
+            conn.sendall(
+                encode_request(
+                    capability,
+                    request_id=rid,
+                    principal_id=principal_id,
+                    run_id=run_id,
+                    params=params,
+                )
+            )
             reader = conn.makefile("rb")
-            line = reader.readline(MAX_FRAME_BYTES + 1)
+            frame = read_frame(reader)
+    except TimeoutError as exc:
+        raise BridgeClientError(
+            "request_timeout", "bridge did not answer within the timeout"
+        ) from exc
+    except FrameTooLargeError as exc:
+        raise BridgeClientError(
+            "malformed_response", "bridge response exceeds the frame limit"
+        ) from exc
     except (BrokenPipeError, ConnectionResetError) as exc:
         raise BridgeClientError(
             "connection_closed", "bridge closed the connection without a response"
         ) from exc
-    if not line:
+    if frame is None:
         raise BridgeClientError(
             "connection_closed", "bridge closed the connection without a response"
         )
     try:
-        payload = json.loads(line.decode("utf-8"))
+        payload = json.loads(frame.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise BridgeClientError("malformed_response", "bridge response is not valid JSON") from exc
     if not isinstance(payload, dict):
         raise BridgeClientError("malformed_response", "bridge response must be a JSON object")
+    version = payload.get("version")
+    if isinstance(version, bool) or version != PROTOCOL_VERSION:
+        raise BridgeClientError(
+            "malformed_response", f"bridge response carries unsupported version: {version!r}"
+        )
+    if payload.get("request_id") != rid:
+        raise BridgeClientError(
+            "malformed_response", "bridge response request_id does not match the request"
+        )
     if payload.get("ok") is True:
         result = payload.get("result")
         if not isinstance(result, dict):

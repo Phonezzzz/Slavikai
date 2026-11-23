@@ -1,9 +1,9 @@
-"""Owner Host Bridge daemon (E03-T02).
+"""Owner Host Bridge daemon (E03-T02, protocol validation E03-T03).
 
 AF_UNIX stream daemon implementing the ADR-0013 trust model for the
 lifecycle/auth slice only: ``bridge.ping`` / ``bridge.version`` /
 ``bridge.capabilities``, no dangerous operations. Filesystem and process
-capabilities are E03-T04/T05; protocol validation is E03-T03.
+capabilities are E03-T04/T05.
 
 Trust-model points enforced here (ADR-0013):
 - AF_UNIX only, no TCP listener.
@@ -20,6 +20,12 @@ Trust-model points enforced here (ADR-0013):
 - Single instance: an existing socket with a live listener refuses
   startup; only a provably stale socket file (connection refused) is
   replaced, and shutdown unlinks only the socket this instance created.
+- Protocol validation (E03-T03): every frame is checked against the
+  versioned schema in ``host_bridge.protocol`` (frame limit, protocol
+  version, request ID, unknown fields); dispatch runs under a
+  per-request deadline (``request_timeout``). ``principal_id`` /
+  ``run_id`` in a request are attribution data only and are never used
+  for authorization (ADR-0013 §4).
 """
 
 from __future__ import annotations
@@ -40,14 +46,17 @@ from host_bridge.protocol import (
     CAPABILITY_CAPABILITIES,
     CAPABILITY_PING,
     CAPABILITY_VERSION,
-    MAX_FRAME_BYTES,
     PROTOCOL_VERSION,
     BridgeProtocolError,
+    BridgeRequest,
+    FrameTooLargeError,
     MalformedRequestError,
+    RequestTimeoutError,
     UnknownCapabilityError,
     decode_request,
     encode_error,
     encode_success,
+    read_frame,
 )
 
 SOCKET_DIR_NAME: Final[str] = "slavikai"
@@ -56,6 +65,10 @@ _DIR_MODE: Final[int] = 0o700
 _SOCKET_MODE: Final[int] = 0o600
 _ACCEPT_TIMEOUT_S: Final[float] = 0.2
 _PROBE_TIMEOUT_S: Final[float] = 2.0
+
+# Per-request deadline (E03-T03): dispatch must finish within this bound
+# or the request fails with request_timeout and the connection closes.
+DEFAULT_REQUEST_TIMEOUT_S: Final[float] = 5.0
 
 
 class BridgeConfigError(Exception):
@@ -126,10 +139,16 @@ class HostBridgeDaemon:
         *,
         expected_uid: int | None = None,
         peer_cred_fn: Callable[[socket.socket], PeerCred] | None = None,
+        request_timeout_s: float = DEFAULT_REQUEST_TIMEOUT_S,
+        dispatch_fn: Callable[[BridgeRequest], dict[str, object]] | None = None,
     ) -> None:
         self._socket_path = socket_path
         self._expected_uid = os.getuid() if expected_uid is None else expected_uid
         self._peer_cred_fn = read_peer_cred if peer_cred_fn is None else peer_cred_fn
+        self._request_timeout_s = request_timeout_s
+        self._dispatch_fn: Callable[[BridgeRequest], dict[str, object]] = (
+            dispatch_fn if dispatch_fn is not None else self._dispatch
+        )
         self._listener: socket.socket | None = None
         self._socket_identity: tuple[int, int] | None = None
         self._stop = threading.Event()
@@ -218,6 +237,15 @@ class HostBridgeDaemon:
         except OSError:
             pass
 
+    @staticmethod
+    def _send(conn: socket.socket, payload: bytes) -> bool:
+        """Send one response frame; False when the peer is gone."""
+        try:
+            conn.sendall(payload)
+        except OSError:
+            return False
+        return True
+
     def _handle(self, conn: socket.socket) -> None:
         with conn:
             try:
@@ -229,37 +257,76 @@ class HostBridgeDaemon:
                 # deterministic refusal before any protocol bytes
                 self._close_gracefully(conn)
                 return
+            conn.settimeout(self._request_timeout_s)
             reader = conn.makefile("rb")
             while not self._stop.is_set():
-                line = reader.readline(MAX_FRAME_BYTES + 1)
-                if not line:
+                try:
+                    frame = read_frame(reader)
+                except FrameTooLargeError as exc:
+                    self._send(conn, encode_error(exc))
                     return
-                if len(line) > MAX_FRAME_BYTES:
-                    conn.sendall(
-                        encode_error(
-                            BridgeProtocolError(
-                                "frame_too_large", "request line exceeds the frame bound"
-                            )
-                        )
-                    )
+                except (TimeoutError, OSError):
+                    return
+                if frame is None:
                     return
                 try:
-                    capability = decode_request(line)
-                    result = self._dispatch(capability)
+                    request = decode_request(frame)
+                    result = self._dispatch_with_deadline(request)
                 except MalformedRequestError as exc:
-                    conn.sendall(encode_error(exc))
+                    # peer does not speak the protocol: answer, then close
+                    self._send(conn, encode_error(exc))
                     return
-                except UnknownCapabilityError as exc:
-                    conn.sendall(encode_error(exc))
+                except RequestTimeoutError as exc:
+                    # handler was abandoned; its state is unknown: close
+                    self._send(conn, encode_error(exc))
+                    return
+                except BridgeProtocolError as exc:
+                    # semantic rejection (unknown capability/version/field,
+                    # invalid request ID): framing is intact, stay usable
+                    if not self._send(conn, encode_error(exc)):
+                        return
                     continue
-                conn.sendall(encode_success(result))
+                if not self._send(conn, encode_success(result, request.request_id)):
+                    return
+
+    def _dispatch_with_deadline(self, request: BridgeRequest) -> dict[str, object]:
+        """Run dispatch in a worker thread bounded by the request deadline.
+
+        A handler that overruns is abandoned (daemon thread) and the
+        request fails with request_timeout; the caller closes the
+        connection because the abandoned handler's state is unknown.
+        """
+        outcome: dict[str, object] = {}
+
+        def run() -> None:
+            try:
+                outcome["result"] = self._dispatch_fn(request)
+            except BaseException as exc:  # re-raised in the connection thread
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        worker.join(self._request_timeout_s)
+        if worker.is_alive():
+            raise RequestTimeoutError(request_id=request.request_id)
+        error = outcome.get("error")
+        if isinstance(error, BaseException):
+            raise error
+        result = outcome.get("result")
+        if not isinstance(result, dict):
+            raise BridgeProtocolError(
+                "internal_error",
+                "dispatch returned no result",
+                request_id=request.request_id,
+            )
+        return result
 
     @staticmethod
-    def _dispatch(capability: str) -> dict[str, object]:
-        if capability == CAPABILITY_PING:
+    def _dispatch(request: BridgeRequest) -> dict[str, object]:
+        if request.capability == CAPABILITY_PING:
             return {"pong": True}
-        if capability == CAPABILITY_VERSION:
+        if request.capability == CAPABILITY_VERSION:
             return {"protocol": PROTOCOL_VERSION, "bridge": BRIDGE_VERSION}
-        if capability == CAPABILITY_CAPABILITIES:
+        if request.capability == CAPABILITY_CAPABILITIES:
             return {"capabilities": list(CAPABILITIES)}
-        raise UnknownCapabilityError(capability)
+        raise UnknownCapabilityError(request.capability, request_id=request.request_id)

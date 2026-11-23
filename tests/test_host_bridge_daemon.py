@@ -1,10 +1,12 @@
-"""Owner Host Bridge daemon (E03-T02, ADR-0013).
+"""Owner Host Bridge daemon (E03-T02, ADR-0013; wire schema E03-T03).
 
-Lifecycle/auth slice only: AF_UNIX socket in a 0700 directory with a 0600
+Lifecycle/auth slice: AF_UNIX socket in a 0700 directory with a 0600
 socket file, SO_PEERCRED UID check before any protocol bytes, and the
-three ``bridge.*`` capabilities. Wrong-UID rejection is simulated with an
-injected peer-cred reader (tests run as a single UID); the same-UID path
-uses the real SO_PEERCRED.
+three ``bridge.*`` capabilities over the versioned E03-T03 schema.
+Wrong-UID rejection is simulated with an injected peer-cred reader
+(tests run as a single UID); the same-UID path uses the real
+SO_PEERCRED. Schema validation itself is covered in
+tests/test_host_bridge_protocol.py.
 """
 
 from __future__ import annotations
@@ -202,13 +204,19 @@ def test_unknown_capability_keeps_connection_usable(bridge: Path) -> None:
         conn.settimeout(5.0)
         conn.connect(str(bridge))
         reader = conn.makefile("rb")
-        conn.sendall(b'{"capability": "host.process.run"}\n')
+        conn.sendall(b'{"version": 1, "request_id": "r-1", "capability": "host.process.run"}\n')
         rejected = json.loads(reader.readline(MAX_FRAME_BYTES + 1))
         assert rejected["ok"] is False
         assert rejected["error"]["code"] == "unknown_capability"
-        conn.sendall(b'{"capability": "bridge.ping"}\n')
+        assert rejected["request_id"] == "r-1"
+        conn.sendall(b'{"version": 1, "request_id": "r-2", "capability": "bridge.ping"}\n')
         accepted = json.loads(reader.readline(MAX_FRAME_BYTES + 1))
-        assert accepted == {"ok": True, "result": {"pong": True}}
+        assert accepted == {
+            "version": 1,
+            "request_id": "r-2",
+            "ok": True,
+            "result": {"pong": True},
+        }
 
 
 def test_malformed_json_is_typed_rejection(bridge: Path) -> None:
@@ -216,10 +224,11 @@ def test_malformed_json_is_typed_rejection(bridge: Path) -> None:
     payload = json.loads(line)
     assert payload["ok"] is False
     assert payload["error"]["code"] == "malformed_request"
+    assert payload["request_id"] is None  # nothing extractable to echo
 
 
 def test_missing_capability_field_is_malformed(bridge: Path) -> None:
-    line = _raw_roundtrip(bridge, b'{"run_id": "x"}\n')
+    line = _raw_roundtrip(bridge, b'{"version": 1, "request_id": "r-1"}\n')
     payload = json.loads(line)
     assert payload["error"]["code"] == "malformed_request"
 
@@ -246,7 +255,7 @@ def test_wrong_uid_peer_gets_no_response(tmp_path: Path) -> None:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
             conn.settimeout(5.0)
             conn.connect(str(socket_path))
-            conn.sendall(b'{"capability": "bridge.ping"}\n')
+            conn.sendall(b'{"version": 1, "request_id": "r-1", "capability": "bridge.ping"}\n')
             assert conn.recv(4096) == b""  # closed before any protocol bytes
     finally:
         daemon.shutdown()
