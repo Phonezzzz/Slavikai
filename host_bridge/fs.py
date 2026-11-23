@@ -599,6 +599,13 @@ class _WriteSession:
     # pwrite can never land after commit published the inode.
     lock: threading.Lock = field(default_factory=threading.Lock)
     finished: bool = False
+    # Range [dirty_start, dirty_end) that a failed chunk may have
+    # partially overwritten in the staging file. While set, commit is
+    # refused: publishing would expose bytes from a chunk the client
+    # saw fail. Cleared only by a successful chunk write that fully
+    # covers the range (or by abort/expiry discarding the session).
+    dirty_start: int | None = None
+    dirty_end: int = 0
 
 
 def _type_name(mode: int) -> str:
@@ -1414,10 +1421,32 @@ class HostFsService:
                     tfd = self._open_staging(fd, session, os.O_WRONLY)
                     try:
                         _pwrite_all(tfd, data, offset)
+                    except OSError:
+                        # The chunk may be partially on disk while the
+                        # client only sees io_error. Poison the range
+                        # so a later commit cannot publish bytes from
+                        # a chunk that never succeeded; the session
+                        # recovers only when a successful chunk write
+                        # fully covers the poisoned range.
+                        if session.dirty_start is None:
+                            session.dirty_start = offset
+                            session.dirty_end = offset + len(data)
+                        else:
+                            session.dirty_start = min(session.dirty_start, offset)
+                            session.dirty_end = max(session.dirty_end, offset + len(data))
+                        session.last_touch = self._clock()
+                        raise
                     finally:
                         os.close(tfd)
                     session.size = max(session.size, offset + len(data))
                     session.last_touch = self._clock()
+                    if (
+                        session.dirty_start is not None
+                        and offset <= session.dirty_start
+                        and offset + len(data) >= session.dirty_end
+                    ):
+                        session.dirty_start = None
+                        session.dirty_end = 0
                 elif offset > session.size:
                     raise _invalid_params("offset leaves a gap in the write session")
                 if not commit:
@@ -1428,6 +1457,17 @@ class HostFsService:
                         "bytes_written": len(data),
                         "write_id": write_id,
                     }
+                if session.dirty_start is not None:
+                    # A previous chunk failed partway and was never
+                    # fully rewritten: the staging file holds bytes
+                    # from a chunk the client saw fail. Refuse to
+                    # publish them; the client must rewrite the
+                    # failed range in full or abort the session.
+                    raise FsError(
+                        "write_incomplete",
+                        "a previous chunk failed partway; "
+                        "rewrite it in full or abort the write session",
+                    )
                 # Commit: fsync the temp, then the cancellation gate, then
                 # exactly one publish syscall. After the gate passes, a
                 # lost response means outcome-unknown (documented); the

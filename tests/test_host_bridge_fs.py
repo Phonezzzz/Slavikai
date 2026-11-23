@@ -1420,6 +1420,139 @@ def test_write_short_pwrite_loops_until_complete(
     assert (work_root / "looped.txt").read_text(encoding="utf-8") == "abcdefgh"
 
 
+def test_write_partial_chunk_failure_poisons_commit(
+    bridge: Path, work_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # P2: a chunk that fails partway (ENOSPC/EFBIG after some bytes
+    # landed in the staging file) leaves the session active with
+    # partially modified content. Without poisoning, a later empty
+    # commit would publish the rejected chunk's partial bytes
+    # ("1234efgh") as a successful write. Commit must refuse with a
+    # typed error until the failed range is rewritten in full.
+    _seed(work_root, "keep.txt", "previous-full")
+    begin = _fs(
+        bridge,
+        "host.fs.write",
+        root_id="work",
+        path="keep.txt",
+        mode="overwrite",
+        content="abcdefgh",
+    )
+    write_id = begin["write_id"]
+    real_pwrite = os.pwrite
+
+    def limited_pwrite(fd: int, data: bytes, offset: int) -> int:
+        if offset >= 4:
+            raise OSError(errno.EFBIG, "simulated file size limit")
+        return real_pwrite(fd, data[:4], offset)
+
+    monkeypatch.setattr(os, "pwrite", limited_pwrite)
+    assert (
+        _fs_error(
+            bridge,
+            "host.fs.write",
+            root_id="work",
+            path="keep.txt",
+            content="12345678",
+            offset=0,
+            write_id=write_id,
+        )
+        == "io_error"
+    )
+    monkeypatch.undo()
+    assert (
+        _fs_error(
+            bridge,
+            "host.fs.write",
+            root_id="work",
+            path="keep.txt",
+            write_id=write_id,
+            commit=True,
+        )
+        == "write_incomplete"
+    )
+    assert (work_root / "keep.txt").read_text(encoding="utf-8") == "previous-full"
+    _fs(
+        bridge,
+        "host.fs.write",
+        root_id="work",
+        path="keep.txt",
+        write_id=write_id,
+        abort=True,
+    )
+    assert (work_root / "keep.txt").read_text(encoding="utf-8") == "previous-full"
+
+
+def test_write_partial_chunk_failure_recovery_by_full_rewrite(
+    bridge: Path, work_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # P2 (recovery side): the poison clears only when a successful
+    # chunk write fully covers the failed range. Partial coverage
+    # keeps commit refused; a full rewrite restores committability
+    # with exactly the rewritten content.
+    begin = _fs(
+        bridge,
+        "host.fs.write",
+        root_id="work",
+        path="recover.txt",
+        content="abcdefgh",
+    )
+    write_id = begin["write_id"]
+    real_pwrite = os.pwrite
+
+    def limited_pwrite(fd: int, data: bytes, offset: int) -> int:
+        if offset >= 4:
+            raise OSError(errno.EFBIG, "simulated file size limit")
+        return real_pwrite(fd, data[:4], offset)
+
+    monkeypatch.setattr(os, "pwrite", limited_pwrite)
+    assert (
+        _fs_error(
+            bridge,
+            "host.fs.write",
+            root_id="work",
+            path="recover.txt",
+            content="12345678",
+            offset=0,
+            write_id=write_id,
+        )
+        == "io_error"
+    )
+    monkeypatch.undo()
+    _fs(
+        bridge,
+        "host.fs.write",
+        root_id="work",
+        path="recover.txt",
+        content="12",
+        offset=0,
+        write_id=write_id,
+    )
+    assert (
+        _fs_error(
+            bridge,
+            "host.fs.write",
+            root_id="work",
+            path="recover.txt",
+            write_id=write_id,
+            commit=True,
+        )
+        == "write_incomplete"
+    )
+    result = _fs(
+        bridge,
+        "host.fs.write",
+        root_id="work",
+        path="recover.txt",
+        content="12345678",
+        offset=0,
+        write_id=write_id,
+        commit=True,
+    )
+    assert result["committed"] is True
+    assert (work_root / "recover.txt").read_text(encoding="utf-8") == "12345678"
+
+
 def test_delete_creates_home_trash_on_fresh_home(registry: RootsRegistry, work_root: Path) -> None:
     # P2: on a fresh home ~/.local/share/Trash does not exist yet.
     # The device must be taken from an existing ancestor and the
