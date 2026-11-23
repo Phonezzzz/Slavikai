@@ -1854,6 +1854,8 @@ class _StateFakePage:
         self.transient_busy_reads = 0
         self.busy = False
         self.cancelled_flag = False
+        # Отмена приходит во время чтения токена документа в захвате «до».
+        self.cancel_on_token_read = False
         # Селектор -> entity_id, на которую он фактически указывает
         # (модель выхода селектора за пределы entity, например xpath ..).
         self.escape_selectors: dict[str, str] = {}
@@ -1915,6 +1917,8 @@ class _StateFakePage:
         if expression.strip() == "() => true":
             return _StateFakeJSHandle(True)
         if "__slavikai_document_token__" in expression:
+            if self.cancel_on_token_read:
+                self.cancelled_flag = True
             return _StateFakeJSHandle(self.document_token)
         if "querySelectorAll" in expression:
             assert isinstance(arg, str) and arg.startswith('[id="') and arg.endswith('"]')
@@ -2154,6 +2158,31 @@ def test_backend_cancel_during_poll_stops_without_match(tmp_path: Path) -> None:
     facts = result.data["browser_state"]
     assert isinstance(facts, dict)
     assert facts["after_matches_after"] is False
+
+
+def test_backend_cancel_during_capture_prevents_action(tmp_path: Path) -> None:
+    """Отмена во время захвата «до» не должна приводить к click/submit.
+
+    Захват выполняет многосекундные чтения Playwright; отмена,
+    пришедшая во время чтения токена документа, обязана остановить
+    действие до его начала: ни click, ни submit не выполняются,
+    результат — failure «cancelled», состояние записи не меняется.
+    """
+    for operation in ("click", "submit"):
+        page = _StateFakePage({"order-X": "Черновик"})
+        page.cancel_on_token_read = True
+        page.on_action(
+            "#pay-x",
+            after_polls=1,
+            effect=lambda p: p.records.update({"order-X": "Оплачено"}),
+        )
+        backend = _state_backend(tmp_path, page, cancelled=lambda p=page: p.cancelled_flag)
+
+        result = backend.handle(ToolRequest("desktop_browser", _state_args(operation)))
+
+        assert not result.ok, (operation, result.data)
+        assert page.records == {"order-X": "Черновик"}, operation
+        assert page._pending == [], operation
 
 
 def test_backend_escaping_status_selector_is_not_captured(tmp_path: Path) -> None:

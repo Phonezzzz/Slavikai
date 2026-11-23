@@ -416,6 +416,10 @@ class PlaywrightBrowserBackend:
             click_timeout = _timeout_ms(request)
             if declaration is not None:
                 click_timeout = max(1.0, (deadline - time.monotonic()) * 1000)
+            # Захват «до» мог занять секунды: отмена, пришедшая во
+            # время чтений, обязана остановить действие до его начала.
+            if self._cancelled():
+                return ToolResult.failure("Browser operation cancelled.")
             _locator(page, request).click(timeout=click_timeout)
             url_after = before_url
             settled = True
@@ -525,6 +529,10 @@ class PlaywrightBrowserBackend:
             submit_timeout = _timeout_ms(request)
             if declaration is not None:
                 submit_timeout = max(1.0, (deadline - time.monotonic()) * 1000)
+            # Захват «до» мог занять секунды: отмена, пришедшая во
+            # время чтений, обязана остановить действие до его начала.
+            if self._cancelled():
+                return ToolResult.failure("Browser operation cancelled.")
             _locator(page, request).press("Enter", timeout=submit_timeout)
             url_after = before_url
             settled = True
