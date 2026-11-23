@@ -1,4 +1,4 @@
-"""Minimal client for the Owner Host Bridge (E03-T03 schema).
+"""Minimal client for the Owner Host Bridge (E03-T03 schema, E03-T04 FS).
 
 One request per connection: connect to the AF_UNIX socket, send one
 versioned request frame (protocol version, client-generated request ID,
@@ -6,6 +6,14 @@ capability, optional attribution fields), read one response frame and
 validate it against the schema (protocol version, echoed request ID).
 Used by tests today; the SlavikAI server becomes the real client when
 ``owner_host`` is adopted as an execution target (later E03 tickets).
+
+Timeout semantics (E03-T04): the client never retries. A
+``request_timeout`` on a mutation means the outcome is unknown — the
+daemon guarantees cancel-before-commit (a timed-out mutation never
+publishes late), but if the publish syscall already ran when the
+response was lost, the mutation may have taken effect. Callers must
+verify the outcome (e.g. ``host.fs.stat``) instead of blindly
+retrying.
 """
 
 from __future__ import annotations
@@ -22,6 +30,7 @@ from host_bridge.protocol import (
     CAPABILITY_VERSION,
     PROTOCOL_VERSION,
     FrameTooLargeError,
+    capability_deadline,
     encode_request,
     read_frame,
 )
@@ -53,17 +62,23 @@ def call(
     socket_path: Path,
     capability: str,
     *,
-    timeout: float = _DEFAULT_TIMEOUT_S,
+    timeout: float | None = None,
     request_id: str | None = None,
     principal_id: str | None = None,
     run_id: str | None = None,
     params: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    """Send one capability request and return its result object."""
+    """Send one capability request and return its result object.
+
+    ``timeout=None`` uses the per-capability deadline shared with the
+    daemon (``host_bridge.protocol.capability_deadline``) so the two
+    sides stay aligned.
+    """
+    effective_timeout = timeout if timeout is not None else capability_deadline(capability)
     rid = request_id if request_id is not None else uuid.uuid4().hex
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
-            conn.settimeout(timeout)
+            conn.settimeout(effective_timeout)
             conn.connect(str(socket_path))
             conn.sendall(
                 encode_request(
@@ -137,15 +152,15 @@ def call(
     raise BridgeClientError("malformed_response", "bridge response carries no result or error")
 
 
-def ping(socket_path: Path, *, timeout: float = _DEFAULT_TIMEOUT_S) -> dict[str, object]:
+def ping(socket_path: Path, *, timeout: float | None = None) -> dict[str, object]:
     return call(socket_path, CAPABILITY_PING, timeout=timeout)
 
 
-def version(socket_path: Path, *, timeout: float = _DEFAULT_TIMEOUT_S) -> dict[str, object]:
+def version(socket_path: Path, *, timeout: float | None = None) -> dict[str, object]:
     return call(socket_path, CAPABILITY_VERSION, timeout=timeout)
 
 
-def capabilities(socket_path: Path, *, timeout: float = _DEFAULT_TIMEOUT_S) -> list[str]:
+def capabilities(socket_path: Path, *, timeout: float | None = None) -> list[str]:
     result = call(socket_path, CAPABILITY_CAPABILITIES, timeout=timeout)
     raw = result.get("capabilities")
     if not isinstance(raw, list):
@@ -156,3 +171,17 @@ def capabilities(socket_path: Path, *, timeout: float = _DEFAULT_TIMEOUT_S) -> l
             raise BridgeClientError("malformed_response", "capabilities must be a list of strings")
         names.append(item)
     return names
+
+
+def roots(socket_path: Path, *, timeout: float | None = None) -> list[dict[str, object]]:
+    """Approved filesystem roots as ``{id, mode}`` (host paths never leak)."""
+    result = call(socket_path, CAPABILITY_CAPABILITIES, timeout=timeout)
+    raw = result.get("roots")
+    if not isinstance(raw, list):
+        raise BridgeClientError("malformed_response", "roots must be a list")
+    entries: list[dict[str, object]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise BridgeClientError("malformed_response", "roots must be a list of objects")
+        entries.append(item)
+    return entries

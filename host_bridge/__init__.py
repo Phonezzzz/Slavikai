@@ -3,12 +3,13 @@
 E03-T02 implements lifecycle/auth only (``bridge.ping`` /
 ``bridge.version`` / ``bridge.capabilities``) per ADR-0013; E03-T03
 adds the versioned protocol validation (schema, frame limit, request
-ID, timeout). Filesystem and process capabilities land in E03-T04/T05.
+ID, timeout); E03-T04 adds the bounded host filesystem API
+(``host.fs.*``). Process capabilities land in E03-T05.
 """
 
 from __future__ import annotations
 
-from host_bridge.client import BridgeClientError, call, capabilities, ping, version
+from host_bridge.client import BridgeClientError, call, capabilities, ping, roots, version
 from host_bridge.daemon import (
     DEFAULT_REQUEST_TIMEOUT_S,
     BridgeConfigError,
@@ -57,5 +58,6 @@ __all__ = [
     "ping",
     "read_peer_cred",
     "resolve_socket_path",
+    "roots",
     "version",
 ]

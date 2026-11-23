@@ -1,9 +1,10 @@
-"""Owner Host Bridge daemon (E03-T02, protocol validation E03-T03).
+"""Owner Host Bridge daemon (E03-T02, protocol validation E03-T03,
+bounded host FS API E03-T04).
 
-AF_UNIX stream daemon implementing the ADR-0013 trust model for the
-lifecycle/auth slice only: ``bridge.ping`` / ``bridge.version`` /
-``bridge.capabilities``, no dangerous operations. Filesystem and process
-capabilities are E03-T04/T05.
+AF_UNIX stream daemon implementing the ADR-0013 trust model:
+``bridge.ping`` / ``bridge.version`` / ``bridge.capabilities`` plus the
+bounded ``host.fs.*`` capabilities (enforced daemon-side in
+``host_bridge.fs``). Process capabilities are E03-T05.
 
 Trust-model points enforced here (ADR-0013):
 - AF_UNIX only, no TCP listener.
@@ -35,17 +36,21 @@ import socket
 import stat
 import struct
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from host_bridge.fs import CancelToken, HostFsService
 from host_bridge.protocol import (
     BRIDGE_VERSION,
     CAPABILITIES,
     CAPABILITY_CAPABILITIES,
     CAPABILITY_PING,
     CAPABILITY_VERSION,
+    FS_CAPABILITIES,
+    MAX_FRAME_BYTES,
     PROTOCOL_VERSION,
     BridgeProtocolError,
     BridgeRequest,
@@ -53,10 +58,14 @@ from host_bridge.protocol import (
     MalformedRequestError,
     RequestTimeoutError,
     UnknownCapabilityError,
+    capability_deadline,
     decode_request,
     encode_error,
     encode_success,
     read_frame,
+)
+from host_bridge.protocol import (
+    BridgeConfigError as BridgeConfigError,
 )
 
 SOCKET_DIR_NAME: Final[str] = "slavikai"
@@ -69,10 +78,6 @@ _PROBE_TIMEOUT_S: Final[float] = 2.0
 # Per-request deadline (E03-T03): dispatch must finish within this bound
 # or the request fails with request_timeout and the connection closes.
 DEFAULT_REQUEST_TIMEOUT_S: Final[float] = 5.0
-
-
-class BridgeConfigError(Exception):
-    """The daemon cannot start with the given configuration (fail-closed)."""
 
 
 @dataclass(frozen=True)
@@ -131,7 +136,7 @@ def read_peer_cred(conn: socket.socket) -> PeerCred:
 
 
 class HostBridgeDaemon:
-    """AF_UNIX daemon serving the bridge.* lifecycle capabilities."""
+    """AF_UNIX daemon serving bridge.* lifecycle + host.fs.* capabilities."""
 
     def __init__(
         self,
@@ -141,13 +146,20 @@ class HostBridgeDaemon:
         peer_cred_fn: Callable[[socket.socket], PeerCred] | None = None,
         request_timeout_s: float = DEFAULT_REQUEST_TIMEOUT_S,
         dispatch_fn: Callable[[BridgeRequest], dict[str, object]] | None = None,
+        fs_service: HostFsService | None = None,
+        capability_deadlines: Mapping[str, float] | None = None,
     ) -> None:
         self._socket_path = socket_path
         self._expected_uid = os.getuid() if expected_uid is None else expected_uid
         self._peer_cred_fn = read_peer_cred if peer_cred_fn is None else peer_cred_fn
         self._request_timeout_s = request_timeout_s
-        self._dispatch_fn: Callable[[BridgeRequest], dict[str, object]] = (
-            dispatch_fn if dispatch_fn is not None else self._dispatch
+        self._custom_dispatch = dispatch_fn is not None
+        self._dispatch_fn: Callable[[BridgeRequest], dict[str, object]] | None = dispatch_fn
+        self._capability_deadlines = capability_deadlines
+        self._fs_service = (
+            fs_service
+            if fs_service is not None
+            else HostFsService.default(home=Path.home(), socket_dir=socket_path.parent)
         )
         self._listener: socket.socket | None = None
         self._socket_identity: tuple[int, int] | None = None
@@ -286,8 +298,26 @@ class HostBridgeDaemon:
                     if not self._send(conn, encode_error(exc)):
                         return
                     continue
-                if not self._send(conn, encode_success(result, request.request_id)):
+                payload = encode_success(result, request.request_id)
+                if len(payload) - 1 > MAX_FRAME_BYTES:
+                    # Backstop: handlers budget their own output, but a
+                    # success frame must never exceed the frame limit.
+                    payload = encode_error(
+                        BridgeProtocolError(
+                            "internal_error",
+                            "response exceeds the frame limit",
+                            request_id=request.request_id,
+                        )
+                    )
+                if not self._send(conn, payload):
                     return
+
+    def _deadline_for(self, capability: str) -> float:
+        """Per-capability deadline (E03-T04): 30 s for tree walks/moves,
+        ``request_timeout_s`` otherwise; an explicit override map wins."""
+        if self._capability_deadlines is not None:
+            return self._capability_deadlines.get(capability, self._request_timeout_s)
+        return capability_deadline(capability, default=self._request_timeout_s)
 
     def _dispatch_with_deadline(self, request: BridgeRequest) -> dict[str, object]:
         """Run dispatch in a worker thread bounded by the request deadline.
@@ -295,19 +325,29 @@ class HostBridgeDaemon:
         A handler that overruns is abandoned (daemon thread) and the
         request fails with request_timeout; the caller closes the
         connection because the abandoned handler's state is unknown.
+        The request's CancelToken is cancelled when the deadline fires:
+        FS handlers check it immediately before any publish syscall,
+        so a timed-out mutation never commits late (E03-T04).
         """
+        deadline = self._deadline_for(request.capability)
+        token = CancelToken(deadline=time.monotonic() + deadline, request_id=request.request_id)
         outcome: dict[str, object] = {}
 
         def run() -> None:
             try:
-                outcome["result"] = self._dispatch_fn(request)
+                if self._custom_dispatch:
+                    assert self._dispatch_fn is not None
+                    outcome["result"] = self._dispatch_fn(request)
+                else:
+                    outcome["result"] = self._dispatch(request, token)
             except BaseException as exc:  # re-raised in the connection thread
                 outcome["error"] = exc
 
         worker = threading.Thread(target=run, daemon=True)
         worker.start()
-        worker.join(self._request_timeout_s)
+        worker.join(deadline)
         if worker.is_alive():
+            token.cancel()
             raise RequestTimeoutError(request_id=request.request_id)
         error = outcome.get("error")
         if isinstance(error, BaseException):
@@ -321,12 +361,16 @@ class HostBridgeDaemon:
             )
         return result
 
-    @staticmethod
-    def _dispatch(request: BridgeRequest) -> dict[str, object]:
+    def _dispatch(self, request: BridgeRequest, token: CancelToken) -> dict[str, object]:
         if request.capability == CAPABILITY_PING:
             return {"pong": True}
         if request.capability == CAPABILITY_VERSION:
             return {"protocol": PROTOCOL_VERSION, "bridge": BRIDGE_VERSION}
         if request.capability == CAPABILITY_CAPABILITIES:
-            return {"capabilities": list(CAPABILITIES)}
+            return {
+                "capabilities": list(CAPABILITIES),
+                "roots": self._fs_service.roots_description(),
+            }
+        if request.capability in FS_CAPABILITIES:
+            return self._fs_service.handle(request, token)
         raise UnknownCapabilityError(request.capability, request_id=request.request_id)

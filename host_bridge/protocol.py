@@ -58,10 +58,60 @@ BRIDGE_VERSION: Final[str] = "0.1.0"
 CAPABILITY_PING: Final[str] = "bridge.ping"
 CAPABILITY_VERSION: Final[str] = "bridge.version"
 CAPABILITY_CAPABILITIES: Final[str] = "bridge.capabilities"
+
+# Bounded host filesystem API (E03-T04). Wire schema for the params of
+# each capability lives in host_bridge.fs; the envelope is unchanged.
+CAPABILITY_FS_STAT: Final[str] = "host.fs.stat"
+CAPABILITY_FS_LIST: Final[str] = "host.fs.list"
+CAPABILITY_FS_READ: Final[str] = "host.fs.read"
+CAPABILITY_FS_WRITE: Final[str] = "host.fs.write"
+CAPABILITY_FS_PATCH: Final[str] = "host.fs.patch"
+CAPABILITY_FS_MOVE: Final[str] = "host.fs.move"
+CAPABILITY_FS_DELETE: Final[str] = "host.fs.delete"
+CAPABILITY_FS_SEARCH: Final[str] = "host.fs.search"
+
 CAPABILITIES: Final[tuple[str, ...]] = (
     CAPABILITY_PING,
     CAPABILITY_VERSION,
     CAPABILITY_CAPABILITIES,
+    CAPABILITY_FS_STAT,
+    CAPABILITY_FS_LIST,
+    CAPABILITY_FS_READ,
+    CAPABILITY_FS_WRITE,
+    CAPABILITY_FS_PATCH,
+    CAPABILITY_FS_MOVE,
+    CAPABILITY_FS_DELETE,
+    CAPABILITY_FS_SEARCH,
+)
+
+# Per-capability daemon deadlines (E03-T04): tree walks and moves over
+# large trees legitimately exceed the 5 s default. The daemon enforces
+# these; the client uses the same map for its default timeout so the
+# two sides stay aligned.
+DEFAULT_CAPABILITY_DEADLINE_S: Final[float] = 5.0
+CAPABILITY_DEADLINES: Final[dict[str, float]] = {
+    CAPABILITY_FS_SEARCH: 30.0,
+    CAPABILITY_FS_MOVE: 30.0,
+    CAPABILITY_FS_DELETE: 30.0,
+}
+
+
+def capability_deadline(capability: str, default: float = DEFAULT_CAPABILITY_DEADLINE_S) -> float:
+    """Daemon deadline for a capability (seconds)."""
+    return CAPABILITY_DEADLINES.get(capability, default)
+
+
+FS_CAPABILITIES: Final[frozenset[str]] = frozenset(
+    {
+        CAPABILITY_FS_STAT,
+        CAPABILITY_FS_LIST,
+        CAPABILITY_FS_READ,
+        CAPABILITY_FS_WRITE,
+        CAPABILITY_FS_PATCH,
+        CAPABILITY_FS_MOVE,
+        CAPABILITY_FS_DELETE,
+        CAPABILITY_FS_SEARCH,
+    }
 )
 
 # Formal frame limit (E03-T03): maximum bytes of one JSON frame,
@@ -87,6 +137,10 @@ def _bounded_echo(text: str) -> str:
     if len(text) <= MAX_ERROR_ECHO_CHARS:
         return text
     return text[: MAX_ERROR_ECHO_CHARS - 1] + "…"
+
+
+class BridgeConfigError(Exception):
+    """Fatal host-bridge configuration problem (daemon refuses to start)."""
 
 
 class BridgeProtocolError(Exception):

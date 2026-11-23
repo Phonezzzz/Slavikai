@@ -190,12 +190,20 @@ def test_capabilities(bridge: Path) -> None:
         "bridge.ping",
         "bridge.version",
         "bridge.capabilities",
+        "host.fs.stat",
+        "host.fs.list",
+        "host.fs.read",
+        "host.fs.write",
+        "host.fs.patch",
+        "host.fs.move",
+        "host.fs.delete",
+        "host.fs.search",
     ]
 
 
 def test_unknown_capability_is_typed_rejection(bridge: Path) -> None:
     with pytest.raises(client.BridgeClientError) as excinfo:
-        client.call(bridge, "host.fs.read")
+        client.call(bridge, "host.fs.bogus")
     assert excinfo.value.code == "unknown_capability"
 
 

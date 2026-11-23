@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from shared.models import JSONValue, ToolRequest, ToolResult
+from shared.patch import apply_unified_patch, validate_patch_contract
 from shared.sandbox import (
     crosses_nested_mount,
     is_private_runtime_path,
@@ -148,84 +149,12 @@ def _is_allowed_workspace_file(path: Path) -> bool:
     return path.suffix.lower() in ALLOWED_EXTENSIONS
 
 
-def _validate_patch_contract(diff_text: str) -> str | None:
-    lines = diff_text.splitlines()
-    if any(line.startswith(prefix) for line in lines for prefix in ("diff --git ", "--- ", "+++ ")):
-        return (
-            "workspace_patch поддерживает только single-file hunk patch "
-            "(без diff --git/---/+++ заголовков)."
-        )
-    if not any(line.startswith("@@") for line in lines):
-        return "Patch должен содержать хотя бы один hunk (@@ ... @@)."
-    return None
-
-
-def _apply_unified_patch(original: str, diff_text: str) -> str:
-    """
-    Простейшее применение unified diff к одному файлу.
-    Без поддержки переименований/бинарных файлов.
-    """
-    lines = original.splitlines(keepends=True)
-    diff_lines = diff_text.splitlines()
-
-    def parse_hunk_header(header: str) -> tuple[int, int]:
-        # @@ -l,s +l,s @@
-        parts = header.strip("@ ").split()
-        minus = parts[0]  # -l,s
-        plus = parts[1]  # +l,s
-        start_old = int(minus.split(",")[0].lstrip("-"))
-        start_new = int(plus.split(",")[0].lstrip("+"))
-        return start_old, start_new
-
-    new_lines: list[str] = []
-    idx = 0  # current position in original
-    it: Iterator[str] = iter(diff_lines)
-    for line in it:
-        if not line.startswith("@@"):
-            continue
-        start_old, _ = parse_hunk_header(line)
-        # copy unchanged section before hunk
-        target_index = start_old - 1
-        if target_index < idx or target_index > len(lines):
-            raise ValueError("Hunk не соответствует файлу.")
-        new_lines.extend(lines[idx:target_index])
-        idx = target_index
-        # process hunk lines
-        for hunk_line in it:
-            if hunk_line.startswith("@@"):
-                # next hunk, push back by restarting loop
-                # but we already consumed line; use recursion-like approach
-                # easiest: process by resetting iterator with current line
-                it = _prepend(hunk_line, it)
-                break
-            if not hunk_line:
-                continue
-            prefix = hunk_line[0]
-            content = hunk_line[1:]
-            if prefix == " ":
-                if idx >= len(lines) or lines[idx].rstrip("\n") != content.rstrip("\n"):
-                    raise ValueError("Hunk не совпадает с оригиналом.")
-                new_lines.append(lines[idx])
-                idx += 1
-            elif prefix == "-":
-                if idx >= len(lines) or lines[idx].rstrip("\n") != content.rstrip("\n"):
-                    raise ValueError("Hunk не совпадает с оригиналом.")
-                idx += 1  # skip (delete)
-            elif prefix == "+":
-                new_lines.append(content + ("\n" if content and not content.endswith("\n") else ""))
-            elif prefix == "\\":
-                # "\ No newline" -- ignore
-                continue
-            else:
-                raise ValueError("Неизвестный префикс патча.")
-    # append remaining original
-    new_lines.extend(lines[idx:])
-    return "".join(new_lines)
-
-
-def _prepend(first: str, iterator: Iterator[str]) -> Iterator[str]:
-    yield first
-    yield from iterator
+# Patch application lives in shared.patch (E03-T04 extraction): one
+# implementation for the sandbox workspace_patch tool and the Owner
+# Host Bridge host.fs.patch capability. Private aliases keep the
+# historical import surface of this module.
+_validate_patch_contract = validate_patch_contract
+_apply_unified_patch = apply_unified_patch
 
 
 class ListFilesTool:

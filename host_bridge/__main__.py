@@ -2,21 +2,26 @@
 
 from __future__ import annotations
 
+import os
 import signal
 import sys
 import threading
 import types
 
 from host_bridge.daemon import BridgeConfigError, HostBridgeDaemon, resolve_socket_path
+from host_bridge.fs import HostFsService, load_registry
 
 
 def main() -> int:
     try:
         socket_path = resolve_socket_path()
+        # Roots config is read once at startup; changing roots requires
+        # a daemon restart (no protocol surface for roots, E03-T04).
+        registry = load_registry(env=os.environ, socket_dir=socket_path.parent)
     except BridgeConfigError as exc:
         print(f"host-bridge: {exc}", file=sys.stderr)
         return 2
-    daemon = HostBridgeDaemon(socket_path)
+    daemon = HostBridgeDaemon(socket_path, fs_service=HostFsService(registry))
     stop = threading.Event()
 
     def _request_stop(signum: int, frame: types.FrameType | None) -> None:
