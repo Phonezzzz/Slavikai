@@ -1766,6 +1766,9 @@ class _StateFakeLocator:
         del timeout
         if self._page.closed:
             raise RuntimeError("Target page, context or browser has been closed")
+        if self._page.transient_busy_reads > 0:
+            self._page.transient_busy_reads -= 1
+            raise PlaywrightTimeoutError("Locator.element_handle: Timeout exceeded.")
         if self._page.busy:
             raise PlaywrightTimeoutError("Locator.element_handle: Timeout exceeded.")
         if self._empty or self._resolved_entity_id not in self._page.records:
@@ -1776,6 +1779,25 @@ class _StateFakeLocator:
                 f'locator("[id=\\"{self._entity_id}\\"]") resolved to 2 elements'
             )
         return _StateFakeElementHandle()
+
+    def wait_for(self, state: str | None = None, timeout: float | None = None) -> None:
+        del timeout
+        assert state == "detached"
+        if self._page.closed:
+            raise RuntimeError("Target page, context or browser has been closed")
+        if self._page.transient_busy_reads > 0:
+            self._page.transient_busy_reads -= 1
+            raise PlaywrightTimeoutError("Locator.wait_for: Timeout exceeded.")
+        if self._page.busy:
+            raise PlaywrightTimeoutError("Locator.wait_for: Timeout exceeded.")
+        if self._entity_id is not None and self._entity_id in self._page.duplicate_ids:
+            raise PlaywrightError(
+                "Locator.wait_for: Error: strict mode violation: "
+                f'locator("[id=\\"{self._entity_id}\\"]") resolved to 2 elements'
+            )
+        if not self._empty and self._resolved_entity_id in self._page.records:
+            raise PlaywrightTimeoutError("Locator.wait_for: Timeout exceeded.")
+        return None
 
     def inner_text(self, timeout: float | None = None) -> str:
         del timeout
@@ -1822,6 +1844,14 @@ class _StateFakePage:
         self.records = dict(records)
         self.duplicate_ids: set[str] = set()
         self.time_origin = 1000.0
+        # Токен непрерывности документа, запечатанный init-скриптом:
+        # меняется при навигации на новый документ. time_origin —
+        # значение performance.timeOrigin, которое страница может
+        # подменить одинаковым на обоих документах.
+        self.document_token = "doc-token-1"
+        # Сколько следующих строгих чтений (element_handle/wait_for)
+        # падает по timeout, как при временно занятом основном потоке.
+        self.transient_busy_reads = 0
         self.busy = False
         self.cancelled_flag = False
         # Селектор -> entity_id, на которую он фактически указывает
@@ -1884,6 +1914,8 @@ class _StateFakePage:
             raise PlaywrightTimeoutError("Page.wait_for_function: Timeout exceeded.")
         if expression.strip() == "() => true":
             return _StateFakeJSHandle(True)
+        if "__slavikai_document_token__" in expression:
+            return _StateFakeJSHandle(self.document_token)
         if "querySelectorAll" in expression:
             assert isinstance(arg, str) and arg.startswith('[id="') and arg.endswith('"]')
             entity_id = arg[len('[id="') : -2].replace('\\"', '"').replace("\\\\", "\\")
@@ -2078,6 +2110,7 @@ def test_backend_navigation_breaks_continuity(tmp_path: Path) -> None:
     def navigate(p: _StateFakePage) -> None:
         p.records.update({"order-X": "Оплачено"})
         p.time_origin += 1.0
+        p.document_token = "doc-token-2"
 
     page = _StateFakePage({"order-X": "Черновик"})
     page.on_action("#pay-x", after_polls=1, effect=navigate)
@@ -2288,6 +2321,57 @@ def test_backend_duplicate_creation_is_not_confirmed(tmp_path: Path) -> None:
     assert isinstance(facts, dict)
     assert facts["before_count"] == 0
     assert facts["after_count"] == 2
+
+
+def test_backend_count_timeout_is_not_proof_of_absence(tmp_path: Path) -> None:
+    """Timeout первого probe не фабрикует before_count=0.
+
+    Основной поток занят дольше probe: element_handle падает по
+    timeout даже для существующего элемента, страница освобождается
+    к следующим чтениям. Отсутствие подтверждается защищённым
+    DOM-чтением (wait_for detached), а не выводится из timeout:
+    сущность существовала до клика и клик ничего не создал —
+    захвата нет (UNVERIFIED), а не DONE для «появившейся» записи.
+    """
+    page = _StateFakePage({"order-X": "Черновик", "order-Z": "Новая"})
+    page.transient_busy_reads = 1
+    backend = _state_backend(tmp_path, page)
+    args = _state_args()
+    args["browser_state"] = {"entity_id": "order-Z", "expect": {"kind": "count", "after": 1}}
+    args["timeout_seconds"] = 3
+
+    result = backend.handle(ToolRequest("desktop_browser", args))
+
+    assert result.ok, result.data
+    assert "browser_state" not in result.data
+
+
+def test_backend_spoofed_time_origin_does_not_fake_continuity(tmp_path: Path) -> None:
+    """Одинаковый подменённый timeOrigin не склеивает два документа.
+
+    Обе страницы задают performance.timeOrigin одинаковым значением
+    через Object.defineProperty: чтение токена в main world вернуло
+    бы одинаковое значение до и после навигации, и захват принял бы
+    статус одноимённого элемента уже в другом документе. Токен
+    запечатывается init-скриптом до скриптов страницы: навигация
+    меняет его, непрерывности нет — фактов нет (UNVERIFIED).
+    """
+
+    def navigate(p: _StateFakePage) -> None:
+        p.records.update({"order-X": "Оплачено"})
+        p.url = "https://example.test/other"
+        p.document_token = "doc-token-2"
+        # time_origin намеренно не меняется: страница подменила его
+        # одинаковым значением на обоих документах.
+
+    page = _StateFakePage({"order-X": "Черновик"})
+    page.on_action("#pay-x", after_polls=1, effect=navigate)
+    backend = _state_backend(tmp_path, page)
+
+    result = backend.handle(ToolRequest("desktop_browser", _state_args()))
+
+    assert result.ok, result.data
+    assert "browser_state" not in result.data
 
 
 def test_backend_finish_capture_after_deadline_returns_no_facts(tmp_path: Path) -> None:

@@ -9,6 +9,9 @@
 сценариями. Отдельный сценарий: скрипт страницы переопределяет
 ``document.querySelectorAll`` и фабрикует создание сущности —
 подсчёт через движок селекторов драйвера подмене не подвержен.
+Ещё сценарий: обе страницы подменяют ``performance.timeOrigin``
+одинаковым значением — запечатанный init-скриптом токен документа
+всё равно меняется при навигации, непрерывности нет.
 Подтверждённый захват проходит штатный
 ``VerifierRuntime.verify_browser_postconditions``.
 
@@ -83,6 +86,23 @@ _SPOOF_HTML = """<!doctype html><html><body>
 </body></html>"""
 
 
+_TOKEN_A_HTML = """<!doctype html><html><body>
+<div id="order-X"><span class="status">Черновик</span></div>
+<button id="nav-token">Перейти</button>
+<script>
+  try { Object.defineProperty(performance, 'timeOrigin', {value: 1}); } catch (e) {}
+  document.getElementById('nav-token').onclick = () => { location.href = '/token-b'; };
+</script>
+</body></html>"""
+
+_TOKEN_B_HTML = """<!doctype html><html><body>
+<div id="order-X"><span class="status">Оплачено</span></div>
+<script>
+  try { Object.defineProperty(performance, 'timeOrigin', {value: 1}); } catch (e) {}
+</script>
+</body></html>"""
+
+
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - http.server naming
         if self.path == "/":
@@ -91,6 +111,10 @@ class _Handler(BaseHTTPRequestHandler):
             body = _OTHER_HTML
         elif self.path == "/spoof":
             body = _SPOOF_HTML
+        elif self.path == "/token-a":
+            body = _TOKEN_A_HTML
+        elif self.path == "/token-b":
+            body = _TOKEN_B_HTML
         else:
             self.send_response(404)
             self.end_headers()
@@ -263,6 +287,48 @@ def test_browser_state_navigation_breaks_continuity(tmp_path: Path) -> None:
             "operation": "click",
             "selector_type": "css",
             "selector": "#nav-x",
+            "timeout_seconds": 5,
+            "browser_state": _text_declaration(),
+        }
+        result = tool.handle(ToolRequest("desktop_browser", args))
+        assert result.ok, result.data
+        assert "browser_state" not in result.data
+        assert _verify(args, result) == VerificationStatus.FAILED
+    finally:
+        tool.close()
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.skipif(
+    os.environ.get("SLAVIK_RUN_BROWSER_PERSISTENCE_E2E") != "1",
+    reason="real-browser E2E is opt-in (SLAVIK_RUN_BROWSER_PERSISTENCE_E2E=1)",
+)
+def test_browser_state_spoofed_time_origin_breaks_continuity(tmp_path: Path) -> None:
+    # Обе страницы подменяют performance.timeOrigin одинаковым
+    # значением: токен, прочитанный в main world, совпал бы до и
+    # после навигации, и захват принял бы статус одноимённого
+    # элемента уже в другом документе. Токен запечатывается
+    # init-скриптом до скриптов страницы и уникален для документа:
+    # навигация ломает непрерывность — захвата нет (UNVERIFIED).
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    origin = f"http://127.0.0.1:{server.server_address[1]}"
+    tool = DesktopBrowserTool(
+        _security(tmp_path),
+        profile=BrowserProfile(profile_id="default", owner_id="local"),
+        profile_root=tmp_path / "profiles",
+    )
+    try:
+        opened = tool.handle(
+            ToolRequest("desktop_browser", {"operation": "open", "url": f"{origin}/token-a"})
+        )
+        assert opened.ok, opened.data
+
+        args: dict[str, JSONValue] = {
+            "operation": "click",
+            "selector_type": "css",
+            "selector": "#nav-token",
             "timeout_seconds": 5,
             "browser_state": _text_declaration(),
         }

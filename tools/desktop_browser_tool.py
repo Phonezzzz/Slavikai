@@ -75,12 +75,25 @@ BROWSER_STATE_COUNT_PROBE_MS = 500
 # timeout и неограниченно висят на фрейме с заблокированным основным
 # потоком (проверено на Playwright 1.62), а чтение запечатанного
 # значения через ``wait_for_function`` ограничено timeout драйвера.
+# E02-T10 rework round 3: тем же init-скриптом запечатывается токен
+# непрерывности документа. ``performance.timeOrigin`` страница может
+# переопределить одинаковым значением на исходном и целевом
+# документах — чтение в main world вернуло бы одинаковый токен для
+# разных документов и склеило бы наблюдение через навигацию. Токен
+# генерируется при создании документа до скриптов страницы и
+# уникален для каждого документа; same-document изменения URL
+# (pushState/hash) init-скрипт не перезапускают — токен стабилен.
 _DOCUMENT_ORIGIN_PROPERTY = "__slavikai_document_origin__"
+_DOCUMENT_TOKEN_PROPERTY = "__slavikai_document_token__"
 _DOCUMENT_ORIGIN_INIT_SCRIPT = (
     "try { Object.defineProperty(window, "
     f'"{_DOCUMENT_ORIGIN_PROPERTY}", '
     "{ value: window.origin, configurable: false, writable: false, "
-    "enumerable: false }); } catch (e) {}"
+    "enumerable: false }); } catch (e) {} "
+    "try { Object.defineProperty(window, "
+    f'"{_DOCUMENT_TOKEN_PROPERTY}", '
+    "{ value: String(performance.timeOrigin) + ':' + Math.random() + ':' + Math.random(), "
+    "configurable: false, writable: false, enumerable: false }); } catch (e) {}"
 )
 
 # E02-T04: Playwright aria_snapshot печатает value текстовых полей, включая
@@ -1054,25 +1067,29 @@ class PlaywrightBrowserBackend:
             "the edit was not executed and policy must be re-evaluated."
         )
 
-    def _document_token(self, page: Page) -> float | None:
-        """Токен непрерывности документа (``performance.timeOrigin``).
+    def _document_token(self, page: Page) -> str | None:
+        """Токен непрерывности документа (запечатанный init-скриптом).
 
-        Меняется при навигации на новый документ и не меняется при
-        same-document изменениях URL (pushState/hash). Читается через
-        ``wait_for_function`` с timeout драйвера: на зависшей странице
-        — None (fail-closed), а не неограниченное ожидание evaluate.
+        Уникален для каждого документа: меняется при навигации на
+        новый документ и не меняется при same-document изменениях URL
+        (pushState/hash). Читается значение, зафиксированное
+        init-скриптом контекста до скриптов страницы (см.
+        ``_DOCUMENT_ORIGIN_INIT_SCRIPT``): ``performance.timeOrigin``
+        страница может переопределить одинаковым значением на обоих
+        документах, и чтение в main world склеило бы наблюдение
+        через навигацию. Чтение через ``wait_for_function`` с
+        timeout драйвера: на зависшей странице — None (fail-closed),
+        а не неограниченное ожидание evaluate.
         """
         try:
             handle = page.wait_for_function(
-                "() => performance.timeOrigin",
+                f"() => window.{_DOCUMENT_TOKEN_PROPERTY}",
                 timeout=FRESH_URL_TIMEOUT_MS,
             )
             value = handle.json_value()
         except Exception:  # noqa: BLE001 - захват не должен ронять действие
             return None
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        return float(value)
+        return value if isinstance(value, str) and value else None
 
     def _entity_selector(self, entity_id: str) -> str:
         escaped = entity_id.replace("\\", "\\\\").replace('"', '\\"')
@@ -1122,21 +1139,6 @@ class PlaywrightBrowserBackend:
         except Exception:  # noqa: BLE001 - захват не должен ронять действие
             return None
 
-    def _page_responsive(self, page: Page, *, timeout_ms: float) -> bool:
-        """Жив ли основной поток страницы (bounded, без DOM-API страницы).
-
-        ``wait_for_function("() => true")`` не вызывает переопределяемых
-        страницей DOM-методов: на зависшей странице драйвер прерывает
-        ожидание по timeout, на живой — возвращается сразу. Используется
-        только чтобы отличить «элемента нет» от «страница зависла» при
-        подсчёте сущностей; само значение ничего не доказывает.
-        """
-        try:
-            page.wait_for_function("() => true", timeout=timeout_ms)
-            return True
-        except Exception:  # noqa: BLE001 - захват не должен ронять действие
-            return False
-
     def _read_entity_count(
         self, page: Page, declaration: dict[str, JSONValue], *, timeout_ms: float
     ) -> int | None:
@@ -1152,18 +1154,32 @@ class PlaywrightBrowserBackend:
         выводится из ограниченных по времени строгих чтений:
         ``element_handle`` возвращает handle ровно при одном совпадении,
         при нескольких сразу падает strict mode violation, при нуле или
-        зависшей странице — TimeoutError по истечении probe; ноль от
-        зависшей страницы отличает bounded liveness-проба. Больше
-        одного совпадения кодируется как 2: verifier подтверждает
-        только 0 -> 1. Любая иная ошибка — None (захват недоступен →
-        UNVERIFIED).
+        зависшей странице — TimeoutError по истечении probe. Timeout
+        сам по себе отсутствие не доказывает: основной поток мог быть
+        занят дольше probe, и liveness-проба после него не доказывает,
+        что элемента не было во время чтения. Отсутствие подтверждает
+        отдельное защищённое чтение ``wait_for(state="detached")``: оно
+        возвращается только если резолв селектора реально выполнился и
+        ничего не нашёл; на занятой странице оно тоже падает по
+        timeout — результат неизвестен (None → UNVERIFIED), а не
+        вымышленный ноль. Больше одного совпадения кодируется как 2:
+        verifier подтверждает только 0 -> 1. Любая иная ошибка — None
+        (захват недоступен → UNVERIFIED).
         """
         probe_ms = min(timeout_ms, float(BROWSER_STATE_COUNT_PROBE_MS))
         entity = self._entity_locator(page, str(declaration["entity_id"]))
         try:
             handle = entity.element_handle(timeout=probe_ms)
         except PlaywrightTimeoutError:
-            if not self._page_responsive(page, timeout_ms=probe_ms):
+            try:
+                entity.wait_for(state="detached", timeout=probe_ms)
+            except PlaywrightTimeoutError:
+                return None
+            except PlaywrightError as exc:
+                if "strict mode violation" in str(exc):
+                    return 2
+                return None
+            except Exception:  # noqa: BLE001 - захват не должен ронять действие
                 return None
             return 0
         except PlaywrightError as exc:
@@ -1172,7 +1188,7 @@ class PlaywrightBrowserBackend:
             return None
         except Exception:  # noqa: BLE001 - захват не должен ронять действие
             return None
-        return 1 if handle is not None else 0
+        return 1 if handle is not None else None
 
     def _begin_browser_state_capture(
         self,
@@ -1181,7 +1197,7 @@ class PlaywrightBrowserBackend:
         declaration: dict[str, JSONValue],
         *,
         deadline: float,
-    ) -> tuple[str | int, float] | None:
+    ) -> tuple[str | int, str] | None:
         """Захват «до» и токена документа перед click/submit (E02-T10).
 
         None — захват недоступен (неоднозначная идентичность, строгая
@@ -1219,7 +1235,7 @@ class PlaywrightBrowserBackend:
         page: Page,
         declaration: dict[str, JSONValue],
         before: str | int,
-        token: float,
+        token: str,
         *,
         deadline: float,
     ) -> dict[str, JSONValue] | None:
