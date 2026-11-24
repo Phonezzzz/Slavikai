@@ -153,8 +153,14 @@ _ACCESS_BITS: dict[str, int] = {
         | _LL_MAKE_SYM
         | _LL_REFER
     ),
-    # Read-only directory operations: list only.
-    "rdir": _LL_READ_DIR,
+    # Read-only directory operations: list + traversal. REFER lets a
+    # rename/link name this directory as a party, but REFER alone
+    # enables no mutation — a rename or link still needs
+    # REMOVE_FILE/MAKE_* on the directories involved, which "rdir"
+    # does not carry. Ancestors of protected subtrees get "rdir"
+    # instead of "dir": Landlock rules union, so a mutating grant on
+    # an ancestor would leak into the protected subtree.
+    "rdir": _LL_READ_DIR | _LL_REFER,
 }
 
 # Access bits that apply to a single file (or device node). The

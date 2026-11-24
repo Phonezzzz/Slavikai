@@ -789,7 +789,24 @@ def _compute_cwd_grants(
     symlink would hand out whatever it points to). Write-exclusion
     is per path: a subtree the FS API refuses to write (config
     ``write_excluded`` or a SlavikAI checkout) is granted read-only,
-    never ``rw`` (ADR-0013 §9).
+    never ``rw`` (ADR-0013 §9). Landlock rules union within one
+    ruleset: a mutating (``dir``) grant on a directory also covers
+    every protected subtree beneath it, because the protected
+    directory's own read-only rule does not cancel the ancestor's
+    REMOVE_FILE/REMOVE_DIR/MAKE_* bits — so before this fix a profile
+    could delete a file inside a write-excluded subdirectory or
+    create entries inside an excluded checkout even though the FS API
+    returns ``write_excluded`` for the same path. A directory that is
+    an ancestor of a protected subtree therefore gets the
+    non-mutating ``rdir`` grant instead; only directories with no
+    protected descendants keep ``dir``. Each allowed directory keeps
+    its own ``dir`` grant, so legitimate create/remove/rename inside
+    allowed siblings still works, and listdir/traversal still works
+    everywhere (``rdir`` carries READ_DIR + REFER). A downgraded
+    directory loses create/remove/rename on its own entries: when the
+    cwd itself is such an ancestor, even an O_CREAT-only create there
+    is refused without leaving an empty entry (before, the empty
+    entry appeared and only the open/read failed).
 
     Verified live on the host (not by reasoning alone): with
     directory-operations-only rules a profile can listdir('.') and
@@ -805,7 +822,12 @@ def _compute_cwd_grants(
     file lands but the new inode is not covered by the inode-bound
     file rule, so the updated file is unreadable/unwritable to the
     profile afterwards (in-place writes to granted files still
-    work). The design that would remove both limits — an isolated
+    work). A third limit, also by Landlock design (no deny rules):
+    a protected FILE directly inside an allowed directory can still
+    be unlinked or renamed over through that directory's own
+    operations — only whole protected subtrees are fully isolated by
+    the ancestor downgrade, not individual files nested in an allowed
+    directory. The design that would remove these limits — an isolated
     filesystem view (mount namespace + bind mounts of only the
     granted files) — is a design decision for the owner, not part
     of this ticket.
@@ -831,7 +853,21 @@ def _compute_cwd_grants(
         if lexical in mount_points:
             raise ProcessError("spawn_failed", "cwd crosses a nested mount")
 
-    def walk(directory: Path, depth: int, access: str) -> list[Grant]:
+    def walk(directory: Path, depth: int, access: str) -> tuple[list[Grant], bool]:
+        """Walk one directory; return (grants, has_protected_subtree).
+
+        ``has_protected_subtree`` is True when a protected subtree
+        sits beneath this directory: a write-excluded directory, a
+        directory ``_classify()`` denies, or a descendant of either.
+        Mount points and symlinks do not count: Landlock rules do not
+        cross a mount boundary (the mounted tree is a different
+        dentry tree) and a symlink's target is checked on its resolved
+        path, so an ancestor's mutating bits cannot reach inside them.
+        A protected FILE does not count either: its parent's own
+        directory grant is what would let a profile unlink it (see the
+        docstring) — only whole subtrees are isolated by downgrading
+        ancestors.
+        """
         nonlocal entries_seen
         if depth > GRANT_WALK_MAX_DEPTH:
             raise ProcessError("spawn_failed", "grant walk too deep")
@@ -849,12 +885,8 @@ def _compute_cwd_grants(
             # followed into a directory outside the root.
             raise ProcessError("spawn_failed", "cwd is not a directory")
         base_dev = st.st_dev
-        # The directory itself gets directory-operation rights only
-        # ("dir" for a writable tree, "rdir" for a read-only one):
-        # never file-content rights, or a file created beneath it
-        # after the walk would inherit them.
-        dir_access = "dir" if access == "rw" else "rdir"
-        grants: list[Grant] = [Grant(directory, dir_access, dev=st.st_dev, ino=st.st_ino)]
+        child_grants: list[Grant] = []
+        has_protected = False
         try:
             with os.scandir(directory) as it:
                 children = list(it)
@@ -882,16 +914,26 @@ def _compute_cwd_grants(
                 continue  # nested mount: not granted, not descended
             classification = fs_service._classify(entry_path, mutation=False)
             if classification != "normal":
-                continue  # protected: never granted
+                # Protected: never granted. A protected directory is
+                # still a protected subtree beneath this one, so the
+                # ancestor downgrade applies to it.
+                if entry.is_dir(follow_symlinks=False):
+                    has_protected = True
+                continue
             # Write-exclusion is per path: a writable parent may hold
             # an excluded child, whose subtree is read-only.
             entry_access = access
             if access == "rw" and fs_service.is_write_excluded(root, entry_path):
                 entry_access = "r"
             if entry.is_dir(follow_symlinks=False):
-                grants.extend(walk(entry_path, depth + 1, entry_access))
+                sub_grants, sub_protected = walk(entry_path, depth + 1, entry_access)
+                child_grants.extend(sub_grants)
+                if sub_protected or (entry_access == "r" and access == "rw"):
+                    # A write-excluded child is itself a protected
+                    # subtree beneath this directory.
+                    has_protected = True
             else:
-                grants.append(
+                child_grants.append(
                     Grant(
                         entry_path,
                         entry_access,
@@ -899,7 +941,22 @@ def _compute_cwd_grants(
                         ino=entry_st.st_ino,
                     )
                 )
-        return grants
+        # The directory itself gets directory-operation rights only
+        # ("dir" for a writable tree, "rdir" for a read-only one):
+        # never file-content rights, or a file created beneath it
+        # after the walk would inherit them. And "dir" only when no
+        # protected subtree sits beneath it: Landlock rules union
+        # within one ruleset, so a mutating grant on an ancestor
+        # would hand REMOVE_FILE/REMOVE_DIR/MAKE_* to the protected
+        # subtree too — its own read-only rule does not cancel the
+        # ancestor's bits. Such an ancestor gets the non-mutating
+        # "rdir" grant instead (list + traversal); each allowed
+        # directory keeps its own "dir" grant.
+        dir_access = "dir" if access == "rw" and not has_protected else "rdir"
+        return (
+            [Grant(directory, dir_access, dev=st.st_dev, ino=st.st_ino)] + child_grants,
+            has_protected,
+        )
 
     # The walk classifies every child, but never the cwd itself: a
     # profile with cwd="credentials" would get one rw grant over the
@@ -913,7 +970,8 @@ def _compute_cwd_grants(
         raise ProcessError("spawn_failed", f"cwd cannot be classified: {exc}") from exc
     if cwd_classification != "normal":
         raise ProcessError("spawn_failed", "cwd is protected by host policy")
-    grants.extend(walk(cwd, 0, access))
+    cwd_grants, _ = walk(cwd, 0, access)
+    grants.extend(cwd_grants)
     if len(grants) > GRANT_WALK_MAX_GRANTS:
         raise ProcessError("spawn_failed", "too many Landlock grants")
     return grants

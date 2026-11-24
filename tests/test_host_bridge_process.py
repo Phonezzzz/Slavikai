@@ -749,6 +749,69 @@ def test_cwd_grants_split_write_excluded_subtree(home: Path, tmp_path: Path) -> 
     )
 
 
+def test_cwd_grants_downgrade_ancestors_of_protected_subtrees(home: Path, tmp_path: Path) -> None:
+    """Landlock rules union: a mutating ("dir") grant on a directory
+    also covers every protected subtree beneath it, because the
+    subtree's own read-only rule does not cancel the ancestor's
+    REMOVE_FILE/REMOVE_DIR/MAKE_* bits. An ancestor of a protected
+    subtree therefore gets the non-mutating ("rdir") grant instead;
+    only directories with no protected descendants keep "dir"."""
+    work = home / "Project" / "work"
+    excluded = work / "excluded"
+    excluded.mkdir()
+    (excluded / "source.py").write_text("x\n", encoding="utf-8")
+    deep = work / "mid" / "deep"
+    deep.mkdir(parents=True)
+    (deep / "deep.txt").write_text("d\n", encoding="utf-8")
+    checkout = work / "checkout"
+    (checkout / "host_bridge").mkdir(parents=True)
+    (checkout / "docs").mkdir(parents=True)
+    (checkout / "host_bridge" / "daemon.py").write_text("# fake\n", encoding="utf-8")
+    (checkout / "docs" / "runtime_contract_claims.json").write_text("{}\n", encoding="utf-8")
+    creds = work / "credentials"
+    creds.mkdir()
+    (creds / "token.txt").write_text("SECRET\n", encoding="utf-8")
+    allowed = work / "allowed"
+    allowed.mkdir()
+    (allowed / "file.txt").write_text("y\n", encoding="utf-8")
+    (work / "open.txt").write_text("open\n", encoding="utf-8")
+    registry = _registry_with_exclusions(home, (excluded.resolve(), deep.resolve()))
+    fs = HostFsService(registry, trash_root=tmp_path / "Trash")
+    spawner = FakeSpawner()
+    svc = _service_with_spawner(fs, registry, tmp_path, spawner)
+    try:
+        _run(svc, "true", "req-ancestor-downgrade")
+    finally:
+        svc.shutdown()
+    grants = spawner.spawns[-1]["grants"]
+    by_path = {str(g["path"]): g for g in grants}
+    # Ancestors of protected subtrees are non-mutating (list only):
+    # the cwd itself (ancestor of all three) and mid (ancestor of deep).
+    assert by_path[str(work)]["access"] == "rdir"
+    assert by_path[str(work / "mid")]["access"] == "rdir"
+    # The protected subtrees themselves are read-only, never "dir".
+    assert by_path[str(excluded)]["access"] == "rdir"
+    assert by_path[str(excluded / "source.py")]["access"] == "r"
+    assert by_path[str(deep)]["access"] == "rdir"
+    assert by_path[str(deep / "deep.txt")]["access"] == "r"
+    assert by_path[str(checkout)]["access"] == "rdir"
+    assert by_path[str(checkout / "host_bridge" / "daemon.py")]["access"] == "r"
+    assert by_path[str(checkout / "docs" / "runtime_contract_claims.json")]["access"] == "r"
+    # A deny-classified directory is never granted at all.
+    assert str(creds) not in by_path
+    assert str(creds / "token.txt") not in by_path
+    # Allowed siblings keep their mutating grants.
+    assert by_path[str(allowed)]["access"] == "dir"
+    assert by_path[str(allowed / "file.txt")]["access"] == "rw"
+    assert by_path[str(work / "notes.txt")]["access"] == "rw"
+    assert by_path[str(work / "open.txt")]["access"] == "rw"
+    # No "dir" grant covers any protected path.
+    for protected in (excluded, deep, checkout, creds):
+        assert not any(
+            g["access"] == "dir" and protected.is_relative_to(Path(str(g["path"]))) for g in grants
+        )
+
+
 def test_cwd_grants_carry_identity(home: Path, tmp_path: Path) -> None:
     """Every grant the daemon computes is bound to the (dev, ino)
     of the object it saw: the helper refuses a path whose object
@@ -2304,6 +2367,118 @@ def test_landlock_dir_ops_allow_listdir_and_granted_file(tmp_path: Path) -> None
     assert "secret:refused" in out
 
 
+def test_landlock_ancestor_grants_do_not_leak_into_excluded_subtree(
+    tmp_path: Path,
+) -> None:
+    """Landlock rules union, so a "dir" grant on the cwd used to hand
+    REMOVE_FILE/REMOVE_DIR/MAKE_* to a write-excluded subdirectory
+    and to a checkout beneath it: the profile could delete
+    excluded/source.py and create entries inside the excluded
+    checkout. With the ancestor downgrade the cwd (and every
+    ancestor of a protected subtree) holds only "rdir", so those
+    mutations are refused while listdir/traversal and legitimate
+    operations in allowed siblings still work."""
+    from host_bridge.fs import CancelToken
+    from host_bridge.process import _compute_cwd_grants, _grants_wire
+    from host_bridge.spawn_helper import landlock_abi
+
+    if landlock_abi() is None:
+        pytest.skip("Landlock is unavailable in this environment")
+    fake_home = tmp_path / "home"
+    work = fake_home / "Project" / "work"
+    excluded = work / "excluded"
+    excluded.mkdir(parents=True)
+    (excluded / "source.py").write_text("x\n", encoding="utf-8")
+    checkout = work / "checkout"
+    (checkout / "host_bridge").mkdir(parents=True)
+    (checkout / "docs").mkdir(parents=True)
+    (checkout / "host_bridge" / "daemon.py").write_text("# fake\n", encoding="utf-8")
+    (checkout / "docs" / "runtime_contract_claims.json").write_text("{}\n", encoding="utf-8")
+    creds = work / "credentials"
+    creds.mkdir()
+    (creds / "token.txt").write_text("SECRET\n", encoding="utf-8")
+    allowed = work / "allowed"
+    allowed.mkdir()
+    (allowed / "file.txt").write_text("y\n", encoding="utf-8")
+    (allowed / "del.txt").write_text("gone\n", encoding="utf-8")
+    (work / "notes.txt").write_text("hello\n", encoding="utf-8")
+    config = _write_config(fake_home, _profiles())
+    registry = RootsRegistry(
+        roots=(Root(id="work", path=work.resolve(), mode="rw"),),
+        write_excluded=(excluded.resolve(),),
+        home=fake_home.resolve(),
+        config_path=config,
+        socket_dir=None,
+    )
+    fs = HostFsService(registry, trash_root=tmp_path / "Trash")
+    profile = next(p for p in load_profiles(registry) if p.id == "true")
+    grants = _compute_cwd_grants(fs, registry, profile, token=CancelToken())
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    spec = _supervisor_spec(
+        run_dir,
+        work,
+        "import os\n"
+        "def t(name, fn):\n"
+        "    try:\n"
+        "        fn()\n"
+        "        print(name + ':allowed')\n"
+        "    except OSError as e:\n"
+        "        print(name + ':refused:%d' % e.errno)\n"
+        "t('unlink-excluded', lambda: os.unlink('excluded/source.py'))\n"
+        "t('mkdir-excluded', lambda: os.mkdir('excluded/newdir'))\n"
+        "t('create-excluded', lambda: open('excluded/new.txt', 'w'))\n"
+        "t('unlink-checkout', lambda: os.unlink('checkout/host_bridge/daemon.py'))\n"
+        "t('create-checkout', lambda: open('checkout/new.txt', 'w'))\n"
+        "t('unlink-creds', lambda: os.unlink('credentials/token.txt'))\n"
+        "t('listdir-excluded', lambda: os.listdir('excluded'))\n"
+        "t('listdir-checkout', lambda: os.listdir('checkout'))\n"
+        "t('listdir-creds', lambda: os.listdir('credentials'))\n"
+        "t('read-notes', lambda: open('notes.txt').read())\n"
+        "t('unlink-allowed', lambda: os.unlink('allowed/del.txt'))\n"
+        "t('rename-allowed', lambda: os.rename('allowed/file.txt', 'allowed/moved.txt'))\n"
+        "t('mkdir-allowed', lambda: os.mkdir('allowed/newdir'))\n"
+        "t('create-cwd', lambda: os.open('cwd-new.txt', os.O_CREAT | os.O_RDONLY))\n"
+        "t('listdir-cwd', lambda: os.listdir('.'))\n",
+    )
+    spec["grants"] = [*spec["grants"], *_grants_wire(grants)]
+    code, _ = _run_supervisor(spec, run_dir)
+    assert code == 0
+    out = (run_dir / "stdout").read_bytes().decode("utf-8")
+    for marker in (
+        "unlink-excluded:refused",
+        "mkdir-excluded:refused",
+        "create-excluded:refused",
+        "unlink-checkout:refused",
+        "create-checkout:refused",
+        "unlink-creds:refused",
+        "listdir-excluded:allowed",
+        "listdir-checkout:allowed",
+        "listdir-creds:allowed",
+        "read-notes:allowed",
+        "unlink-allowed:allowed",
+        "rename-allowed:allowed",
+        "mkdir-allowed:allowed",
+        # Direct create in the cwd itself is refused once the cwd is
+        # an ancestor of a protected subtree: even an O_CREAT-only
+        # create fails without leaving an entry (it used to leave an
+        # empty file behind and fail only at open/read); new content
+        # still goes in $TMPDIR and is hard-linked in.
+        "create-cwd:refused",
+        "listdir-cwd:allowed",
+    ):
+        assert marker in out, out
+    assert (excluded / "source.py").exists()
+    assert not (excluded / "new.txt").exists()
+    assert not (excluded / "newdir").exists()
+    assert not (checkout / "new.txt").exists()
+    assert (creds / "token.txt").exists()
+    assert not (work / "cwd-new.txt").exists()
+    assert (allowed / "moved.txt").exists()
+    assert not (allowed / "del.txt").exists()
+    assert (allowed / "newdir").is_dir()
+
+
 def test_landlock_late_file_unreadable(tmp_path: Path) -> None:
     """A file created under a granted directory after the rules were
     installed stays unreadable and unwritable: the directory rule
@@ -2792,6 +2967,37 @@ def _live_profiles(work: Path, bin_dir: Path) -> list[dict[str, object]]:
             "cwd": {"root_id": "work", "path": "clean"},
         }
     )
+    profiles.append(
+        {
+            "id": "py_excl",
+            "binary": _PY,
+            "argv_prefix": [
+                "-c",
+                "import os\n"
+                "def t(name, fn):\n"
+                "    try:\n"
+                "        fn()\n"
+                "        print(name + ':allowed')\n"
+                "    except OSError as e:\n"
+                "        print(name + ':refused:%d' % e.errno)\n"
+                "t('unlink-excluded', lambda: os.unlink('excluded/source.py'))\n"
+                "t('mkdir-excluded', lambda: os.mkdir('excluded/newdir'))\n"
+                "t('create-excluded', lambda: open('excluded/new.txt', 'w'))\n"
+                "t('unlink-checkout', lambda: os.unlink('checkout/host_bridge/daemon.py'))\n"
+                "t('create-checkout', lambda: open('checkout/new.txt', 'w'))\n"
+                "t('unlink-creds', lambda: os.unlink('credentials/token.txt'))\n"
+                "t('listdir-excluded', lambda: os.listdir('excluded'))\n"
+                "t('listdir-checkout', lambda: os.listdir('checkout'))\n"
+                "t('read-notes', lambda: open('notes.txt').read())\n"
+                "t('unlink-allowed', lambda: os.unlink('allowed/del.txt'))\n"
+                "t('rename-allowed', lambda: os.rename('allowed/file.txt', 'allowed/moved.txt'))\n"
+                "t('mkdir-allowed', lambda: os.mkdir('allowed/newdir'))\n"
+                "t('create-cwd', lambda: os.open('cwd-new.txt', os.O_CREAT | os.O_RDONLY))\n"
+                "t('listdir-cwd', lambda: os.listdir('.'))\n",
+            ],
+            "cwd": {"root_id": "work", "path": "."},
+        }
+    )
     return profiles
 
 
@@ -2814,6 +3020,64 @@ def live(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[HostProcess
             Root(id="docs", path=(home / "Documents" / "docs").resolve(), mode="ro"),
         ),
         write_excluded=(),
+        home=home.resolve(),
+        config_path=config,
+        socket_dir=None,
+    )
+    fs_service = HostFsService(registry, trash_root=base / "Trash")
+    svc = HostProcessService(
+        fs_service,
+        registry,
+        runtime_dir=base / "run",
+        profiles=load_profiles(registry),
+    )
+    probe = svc.probe()
+    if not probe.available:
+        svc.shutdown()
+        pytest.skip(f"enforcement probe failed: {probe.reason}: {probe.checks}")
+    try:
+        yield svc, work
+    finally:
+        svc.shutdown()
+
+
+@pytest.fixture(scope="module")
+def live_excluded(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[tuple[HostProcessService, Path]]:
+    """Like ``live`` but the cwd holds a write-excluded subdirectory,
+    a structural SlavikAI checkout and a deny-classified directory."""
+    base = tmp_path_factory.mktemp("live_excluded")
+    home = base / "home"
+    work = home / "Project" / "work"
+    excluded = work / "excluded"
+    excluded.mkdir(parents=True)
+    (excluded / "source.py").write_text("x\n", encoding="utf-8")
+    checkout = work / "checkout"
+    (checkout / "host_bridge").mkdir(parents=True)
+    (checkout / "docs").mkdir(parents=True)
+    (checkout / "host_bridge" / "daemon.py").write_text("# fake\n", encoding="utf-8")
+    (checkout / "docs" / "runtime_contract_claims.json").write_text("{}\n", encoding="utf-8")
+    creds = work / "credentials"
+    creds.mkdir()
+    (creds / "token.txt").write_text("SECRET\n", encoding="utf-8")
+    allowed = work / "allowed"
+    allowed.mkdir()
+    (allowed / "file.txt").write_text("y\n", encoding="utf-8")
+    (allowed / "del.txt").write_text("gone\n", encoding="utf-8")
+    (home / "Documents" / "docs").mkdir(parents=True)
+    (work / "notes.txt").write_text("hello\nworld\n", encoding="utf-8")
+    (work / ".env").write_text("SECRET=do-not-leak\n", encoding="utf-8")
+    bin_dir = base / "bin"
+    bin_dir.mkdir()
+    shutil.copy(_TRUE, bin_dir / "tool")
+    config = _write_config(home, _live_profiles(work, bin_dir))
+    registry = RootsRegistry(
+        roots=(
+            Root(id="work", path=work.resolve(), mode="rw"),
+            Root(id="docs", path=(home / "Documents" / "docs").resolve(), mode="ro"),
+        ),
+        write_excluded=(excluded.resolve(),),
         home=home.resolve(),
         config_path=config,
         socket_dir=None,
@@ -3101,3 +3365,44 @@ def test_live_late_secret_denied(live: tuple[HostProcessService, Path]) -> None:
     final = _live_wait(svc, run["process_id"], "exited")
     assert "refused" in final["stdout"], final
     assert "LATE-SECRET" not in final["stdout"], final
+
+
+def test_live_excluded_subtree_isolated(
+    live_excluded: tuple[HostProcessService, Path],
+) -> None:
+    """N1 through the real service: with a write-excluded subdirectory
+    (and a structural checkout, and a deny-classified directory) in
+    the cwd, the profile cannot delete or create inside any of them —
+    the ancestors hold only non-mutating grants — while listdir,
+    traversal and legitimate operations in allowed siblings work."""
+    svc, work = live_excluded
+    run = _run(svc, "py_excl", "live-excluded")
+    final = _live_wait(svc, run["process_id"], "exited")
+    assert final["exit_code"] == 0, final
+    out = final["stdout"]
+    for marker in (
+        "unlink-excluded:refused",
+        "mkdir-excluded:refused",
+        "create-excluded:refused",
+        "unlink-checkout:refused",
+        "create-checkout:refused",
+        "unlink-creds:refused",
+        "listdir-excluded:allowed",
+        "listdir-checkout:allowed",
+        "read-notes:allowed",
+        "unlink-allowed:allowed",
+        "rename-allowed:allowed",
+        "mkdir-allowed:allowed",
+        "create-cwd:refused",
+        "listdir-cwd:allowed",
+    ):
+        assert marker in out, out
+    assert (work / "excluded" / "source.py").exists()
+    assert not (work / "excluded" / "new.txt").exists()
+    assert not (work / "excluded" / "newdir").exists()
+    assert not (work / "checkout" / "new.txt").exists()
+    assert (work / "credentials" / "token.txt").exists()
+    assert not (work / "cwd-new.txt").exists()
+    assert (work / "allowed" / "moved.txt").exists()
+    assert not (work / "allowed" / "del.txt").exists()
+    assert (work / "allowed" / "newdir").is_dir()
