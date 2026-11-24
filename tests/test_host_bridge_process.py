@@ -807,6 +807,71 @@ def test_cwd_symlink_outside_root_rejected(home: Path, tmp_path: Path) -> None:
     assert not spawner.spawns, "no spec may be built for a symlinked cwd"
 
 
+def test_cwd_grants_skip_bind_mounted_file(home: Path, tmp_path: Path) -> None:
+    """A file bind-mounted into the cwd (same device, so st_dev cannot
+    see it) gets no grant: the walk checks the real mount topology."""
+    work = home / "Project" / "work"
+    bound = work / "bound.txt"
+    bound.write_text("outside\n", encoding="utf-8")
+    (work / "open.txt").write_text("open\n", encoding="utf-8")
+    registry = _registry_with_exclusions(home, ())
+    fs = HostFsService(
+        registry,
+        trash_root=tmp_path / "Trash",
+        mount_bindings_fn=lambda: [(bound.resolve(), bound.resolve())],
+    )
+    spawner = FakeSpawner()
+    svc = _service_with_spawner(fs, registry, tmp_path, spawner)
+    try:
+        _run(svc, "true", "req-bind")
+    finally:
+        svc.shutdown()
+    grants = spawner.spawns[-1]["grants"]
+    assert not any(
+        bound == Path(str(g["path"])) or bound.is_relative_to(Path(str(g["path"]))) for g in grants
+    ), "a bind-mounted file must never be granted"
+    assert any(
+        g["access"] == "rw" and (work / "open.txt").is_relative_to(Path(str(g["path"])))
+        for g in grants
+    )
+
+
+def test_cwd_on_mount_point_rejected(home: Path, tmp_path: Path) -> None:
+    """A cwd that is itself a mount point is refused, not granted."""
+    work = home / "Project" / "work"
+    mnt = work / "mnt"
+    mnt.mkdir()
+    (mnt / "data.txt").write_text("data\n", encoding="utf-8")
+    profiles = _profiles(
+        [{"id": "inmount", "binary": _TRUE, "cwd": {"root_id": "work", "path": "mnt"}}]
+    )
+    config = _write_config(home, profiles)
+    registry = RootsRegistry(
+        roots=(
+            Root(id="work", path=work.resolve(), mode="rw"),
+            Root(id="docs", path=(home / "Documents" / "docs").resolve(), mode="ro"),
+        ),
+        write_excluded=(),
+        home=home.resolve(),
+        config_path=config,
+        socket_dir=None,
+    )
+    fs = HostFsService(
+        registry,
+        trash_root=tmp_path / "Trash",
+        mount_bindings_fn=lambda: [(mnt.resolve(), mnt.resolve())],
+    )
+    spawner = FakeSpawner()
+    svc = _service_with_spawner(fs, registry, tmp_path, spawner)
+    try:
+        with pytest.raises(ProcessError) as excinfo:
+            _run(svc, "inmount", "req-mnt")
+        assert excinfo.value.code == "spawn_failed"
+    finally:
+        svc.shutdown()
+    assert not spawner.spawns, "no spec may be built for a mounted cwd"
+
+
 def test_run_spec_carries_binary_identity(
     service: HostProcessService, spawner: FakeSpawner
 ) -> None:
@@ -933,6 +998,27 @@ def test_poll_frame_budget_keeps_source_byte_offsets(
     assert second["stdout_next_offset"] == first["stdout_next_offset"] + len(second["stdout"])
     assert second["stderr"]
     assert second["stderr_next_offset"] == first["stderr_next_offset"] + len(second["stderr"])
+
+
+def test_poll_chunk_eof_is_per_slice(service: HostProcessService, spawner: FakeSpawner) -> None:
+    """A max_bytes cut through a multibyte character must not consume
+    the incomplete prefix: EOF is a property of the byte slice, not
+    of the process state."""
+    result = _run(service, "true", "req-slice")
+    process_id = result["process_id"]
+    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    spawner.finish(handle, state="exited", exit_code=0, stdout="a€b".encode())
+    _wait_state(service, process_id, "exited")
+    first = _poll(service, process_id, max_bytes=3)
+    assert first["stdout"] == "a"
+    assert first["stdout_next_offset"] == 1
+    second = _poll(service, process_id, stdout_offset=first["stdout_next_offset"], max_bytes=3)
+    assert second["stdout"] == "€"
+    assert second["stdout_next_offset"] == 4
+    third = _poll(service, process_id, stdout_offset=second["stdout_next_offset"], max_bytes=3)
+    assert third["stdout"] == "b"
+    assert third["stdout_next_offset"] == 5
+    assert first["stdout"] + second["stdout"] + third["stdout"] == "a€b"
 
 
 def test_poll_unknown_process(service: HostProcessService) -> None:
@@ -1162,6 +1248,52 @@ def test_late_spawn_handle_is_destroyed_not_adopted(
                 handle.popen.kill()
 
 
+def test_shutdown_destroys_inflight_launch(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+) -> None:
+    """A handle that arrives after shutdown began is destroyed, not
+    adopted: no process may report running after the service stopped."""
+    spawner = _DelayedSpawner(delay=0.6)
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            _run(svc, "true", "req-shutdown")
+        except BaseException as exc:  # noqa: BLE001 - captured for the test
+            errors.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    try:
+        thread.start()
+        time.sleep(0.15)
+        svc.shutdown()
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "the launch did not return after shutdown"
+        assert errors and isinstance(errors[0], ProcessError)
+        assert errors[0].code == "spawn_failed"
+        process_id = svc._by_request_id["req-shutdown"]
+        record = svc._records[process_id]
+        assert record.final
+        assert record.state == "spawn_failed"
+        assert spawner.kill_calls == [f"slavikai-bridge-{process_id}.scope"]
+        handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+        deadline = time.monotonic() + 2.0
+        while (
+            handle.popen is not None and handle.popen.poll() is None and time.monotonic() < deadline
+        ):
+            time.sleep(0.05)
+        assert handle.popen is None or handle.popen.poll() is not None
+    finally:
+        svc.shutdown()
+        for unit in spawner.units.values():
+            handle = unit["handle"]
+            if handle.popen is not None and handle.popen.poll() is None:
+                handle.popen.kill()
+
+
 def test_run_rejects_missing_required_arg_after_optional(
     service: HostProcessService,
 ) -> None:
@@ -1219,6 +1351,37 @@ def test_failed_spawn_run_dir_is_cleaned(
             time.sleep(0.05)
         assert process_id not in svc._records
         assert not run_dir.exists()
+    finally:
+        svc.shutdown()
+
+
+def test_early_spawn_error_finalizes_immediately(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+) -> None:
+    """A spawn error raised before any process exists (here: the cwd
+    vanished) settles the record at once instead of holding an active
+    slot until the spawn timeout."""
+    work = registry.by_id("work")
+    assert work is not None
+    shutil.rmtree(work.path)
+    spawner = FakeSpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    try:
+        for i in range(4):
+            with pytest.raises(ProcessError) as excinfo:
+                _run(svc, "true", f"req-early-{i}")
+            assert excinfo.value.code == "spawn_failed"
+            record = svc._records[svc._by_request_id[f"req-early-{i}"]]
+            assert record.final
+            assert record.state == "spawn_failed"
+        assert not spawner.spawns, "no process may be created for a deleted cwd"
+        # The slots are free again: restore the cwd and run a valid profile.
+        work.path.mkdir(parents=True)
+        (work.path / "notes.txt").write_text("hello\nworld\n", encoding="utf-8")
+        result = _run(svc, "true", "req-early-ok")
+        assert result["state"] == "running"
     finally:
         svc.shutdown()
 
@@ -1453,6 +1616,14 @@ def _live_profiles(work: Path, bin_dir: Path) -> list[dict[str, object]]:
             "cwd": {"root_id": "work", "path": "."},
         }
     )
+    profiles.append(
+        {
+            "id": "py_chmod",
+            "binary": _PY,
+            "argv_prefix": ["-c", "import os; os.chmod('.env', 0o600)"],
+            "cwd": {"root_id": "work", "path": "."},
+        }
+    )
     return profiles
 
 
@@ -1524,6 +1695,7 @@ def test_live_probe_reports_all_layers(live: tuple[HostProcessService, Path]) ->
     assert probe.checks["protected"] == "refused"
     assert probe.checks["allowed"] == "read"
     assert probe.checks["signal"] == "refused"
+    assert probe.checks["metadata"] == "refused"
     assert probe.checks["uid"] == 0
     assert probe.checks["placement"] is True
     assert probe.checks["landlock_abi"] == 8
@@ -1659,6 +1831,22 @@ def test_live_rename_between_writable_subdirs(live: tuple[HostProcessService, Pa
     assert final["exit_code"] == 0, final["stderr"]
     assert (work / "b" / "file.txt").read_text(encoding="utf-8") == "moved\n"
     assert not (work / "a" / "file.txt").exists()
+
+
+def test_live_metadata_ops_denied(live: tuple[HostProcessService, Path]) -> None:
+    """A chmod on a file the profile cannot read is refused by the
+    seccomp metadata ban — Landlock does not restrict metadata ops."""
+    svc, work = live
+    env_path = work / ".env"
+    before = env_path.stat().st_mode
+    try:
+        run = _run(svc, "py_chmod", "live-chmod")
+        final = _live_wait(svc, run["process_id"], "exited")
+    finally:
+        os.chmod(env_path, before)
+    assert final["exit_code"] != 0
+    assert "Operation not permitted" in final["stderr"]
+    assert env_path.stat().st_mode == before
 
 
 def test_live_idempotent_retry(live: tuple[HostProcessService, Path]) -> None:

@@ -152,7 +152,7 @@ _PROBE_CODE = r"""
 import json, os, socket, sys, time
 result = {"tcp": "unknown", "udp": "unknown", "unix": "unknown",
           "protected": "unknown", "allowed": "unknown", "uid": None,
-          "signal": "unknown"}
+          "signal": "unknown", "metadata": "unknown"}
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(2)
@@ -189,6 +189,25 @@ try:
     result["signal"] = "allowed"
 except OSError as e:
     result["signal"] = "refused" if e.errno in (1, 13) else f"error:{e.errno}"
+# Metadata families (chmod/chown/setxattr/utime) are outside Landlock:
+# every one of them must be refused by the seccomp ban, or a profile
+# could chmod 000 a file it cannot even read.
+for _name, _op in (
+    ("chmod", lambda: os.chmod(sys.argv[2], 0o600)),
+    ("chown", lambda: os.chown(sys.argv[2], 0, -1)),
+    ("setxattr", lambda: os.setxattr(sys.argv[2], "user.probe", b"x")),
+    ("utime", lambda: os.utime(sys.argv[2], ns=(0, 0))),
+):
+    try:
+        _op()
+        result["metadata"] = f"allowed:{_name}"
+        break
+    except OSError as e:
+        if e.errno not in (1, 13):
+            result["metadata"] = f"error:{_name}:{e.errno}"
+            break
+else:
+    result["metadata"] = "refused"
 result["uid"] = os.getuid()
 print("PROBE:" + json.dumps(result), flush=True)
 time.sleep(2)
@@ -606,6 +625,19 @@ def _compute_cwd_grants(
     access = "rw" if root.mode == "rw" else "r"
     entries_seen = 0
     grants: list[Grant] = []
+    try:
+        mount_points = fs_service._mount_points()
+    except FsError as exc:
+        raise ProcessError("spawn_failed", f"mount topology unavailable: {exc}") from exc
+    # The cwd path itself must not cross a mount: a bind mount below
+    # the root would hand the target a foreign tree (the FS API
+    # refuses nested mount traversal the same way). The root itself
+    # is the anchor, so only components below it are checked.
+    lexical = root.path
+    for part in profile.cwd_parts:
+        lexical = lexical / part
+        if lexical in mount_points:
+            raise ProcessError("spawn_failed", "cwd crosses a nested mount")
 
     def walk(directory: Path, depth: int, access: str) -> tuple[list[Grant], bool]:
         nonlocal entries_seen
@@ -645,6 +677,13 @@ def _compute_cwd_grants(
             if entry.is_symlink():
                 continue  # never granted, never followed
             entry_path = directory / entry.name
+            if entry_path in mount_points:
+                # Bind mount (even same-device, so st_dev cannot see
+                # it): never granted, never descended — the FS API
+                # refuses nested mounts the same way, including the
+                # final file component.
+                dirty = True
+                continue
             if entry_st.st_dev != base_dev:
                 dirty = True  # nested mount: not granted, not descended
                 continue
@@ -844,9 +883,11 @@ def run_enforcement_probe(
 
     Verifies, in the daemon's real context, that a spawned process
     cannot open a TCP/UDP/pathname socket, cannot read a protected
-    file nested inside its allowed tree, CAN read an allowed file,
-    runs with the mapped uid, cannot signal processes outside its
-    Landlock domain, and is placed in its own scope cgroup.
+    file nested inside its allowed tree, cannot change file metadata
+    (chmod/chown/setxattr/utime — outside Landlock, closed by the
+    seccomp ban), CAN read an allowed file, runs with the mapped uid,
+    cannot signal processes outside its Landlock domain, and is
+    placed in its own scope cgroup.
     Any failure makes the process API unavailable (fail-closed).
     """
     probe_dir: Path | None = None
@@ -975,6 +1016,7 @@ def run_enforcement_probe(
                 "allowed": verdict.get("allowed"),
                 "uid": verdict.get("uid"),
                 "signal": verdict.get("signal"),
+                "metadata": verdict.get("metadata"),
                 "placement": placement_ok,
                 "landlock_abi": landlock_abi(),
             }
@@ -986,6 +1028,7 @@ def run_enforcement_probe(
                 and verdict.get("allowed") == "read"
                 and verdict.get("uid") == 0
                 and verdict.get("signal") == "refused"
+                and verdict.get("metadata") == "refused"
                 and placement_ok
             )
             if not ok:
@@ -1029,6 +1072,7 @@ class _Record:
     exit_signal: int | None = None
     started_mono: float = 0.0
     timeout_s: int = MAX_PROCESS_TIMEOUT_S
+    spawn_started: bool = False  # spawner.spawn() returned a handle
     kill_requested: bool = False
     kill_reason: str | None = None
     kill_deadline: float = 0.0
@@ -1238,7 +1282,17 @@ class HostProcessService:
         assert record is not None
         try:
             self._spawn(record, profile, args, token)
-        except (ProcessError, RequestTimeoutError):
+        except ProcessError:
+            # A failure before the spawner returned means no process
+            # was ever created: settle the record now instead of
+            # holding an active slot until the spawn timeout. A
+            # failure after the spawn started (or with unknown
+            # outcome) keeps the reaper/cleanup path: the tree may
+            # exist and must be killed, not just forgotten.
+            if not record.spawn_started:
+                self._finalize(record, "spawn_failed")
+            raise
+        except RequestTimeoutError:
             raise
         except BaseException as exc:
             self._finalize(record, "spawn_failed")
@@ -1312,19 +1366,29 @@ class HostProcessService:
             )
         except SpawnError as exc:
             raise ProcessError("spawn_failed", str(exc)) from exc
+        # The spawner returned: a tree may now exist, so every later
+        # failure keeps the reaper/cleanup path instead of an
+        # immediate finalize.
+        record.spawn_started = True
         with self._lock:
-            if record.final:
+            if record.final or self._stop.is_set():
                 # The reaper gave up on this launch while spawn() was
-                # still in flight: the tree exists now and nobody owns
-                # it. Destroy it before returning, or it would run
-                # outside the active-process accounting and without
-                # daemon timeout enforcement.
+                # still in flight, or the service is stopping: the
+                # tree exists now and nobody owns it. Destroy it
+                # before returning, or it would run outside the
+                # active-process accounting and without daemon
+                # timeout enforcement — or after shutdown.
                 late = True
             else:
                 record.handle = handle
                 late = False
         if late:
             self._spawner.kill_all(handle)
+            if self._stop.is_set():
+                # No reaper is left to settle this record (shutdown
+                # already joined it), so finalize it here instead of
+                # leaving it launching forever.
+                self._finalize(record, "spawn_failed")
             raise ProcessError("spawn_failed", "spawn did not confirm in time")
         # Wait for the helper to confirm enforcement + exec, bounded by
         # the request deadline (the token) and the spawn timeout.
@@ -1332,6 +1396,14 @@ class HostProcessService:
             time.monotonic() + SPAWN_START_TIMEOUT_S, time.monotonic() + token.remaining_s
         )
         while time.monotonic() < deadline:
+            if self._stop.is_set():
+                # The service is stopping while the launch is still
+                # confirming: never promote a dying launch to
+                # "running" after shutdown.
+                if record.handle is not None:
+                    self._spawner.kill_all(record.handle)
+                self._finalize(record, "spawn_failed")
+                raise ProcessError("spawn_failed", "service is shutting down")
             token.check()
             status = _read_status_file(run_dir)
             if status is not None:
@@ -1467,21 +1539,29 @@ class HostProcessService:
         else:
             elapsed_ms = 0
 
+        def decode_slice(raw: bytes, start: int, total: int) -> tuple[str, int]:
+            # EOF is a property of this byte slice, not of the
+            # process: a trailing incomplete sequence is held back
+            # (not consumed) unless the slice reaches the actual end
+            # of the stream — otherwise a max_bytes/frame-budget cut
+            # through a multibyte character corrupts the output.
+            eof = record.final and start + len(raw) >= total
+            return _decode_poll_chunk(raw, at_eof=eof)
+
         def chunk(
-            offset: int, total: int, retained_from: int, tail: bytes, at_eof: bool
+            offset: int, total: int, retained_from: int, tail: bytes
         ) -> tuple[str, bytes, int, int, bool]:
             start = max(offset, retained_from)
             truncated = offset < retained_from
             raw = tail[start - retained_from : start - retained_from + max_bytes]
-            text, consumed = _decode_poll_chunk(raw, at_eof=at_eof)
+            text, consumed = decode_slice(raw, start, total)
             return text, raw, start, start + consumed, truncated
 
-        at_eof = record.final
         stdout_text, stdout_raw, stdout_start, stdout_next, stdout_truncated = chunk(
-            stdout_offset, stdout_total, record.stdout_retained_from, stdout_tail, at_eof
+            stdout_offset, stdout_total, record.stdout_retained_from, stdout_tail
         )
         stderr_text, stderr_raw, stderr_start, stderr_next, stderr_truncated = chunk(
-            stderr_offset, stderr_total, record.stderr_retained_from, stderr_tail, at_eof
+            stderr_offset, stderr_total, record.stderr_retained_from, stderr_tail
         )
         result: dict[str, object] = {
             "process_id": record.process_id,
@@ -1507,11 +1587,11 @@ class HostProcessService:
         while not _frame_fits(result, request_id):
             if stdout_text and len(stdout_text) >= len(stderr_text):
                 stdout_raw = stdout_raw[: max(1, len(stdout_raw) // 2)]
-                stdout_text, stdout_consumed = _decode_poll_chunk(stdout_raw, at_eof=at_eof)
+                stdout_text, stdout_consumed = decode_slice(stdout_raw, stdout_start, stdout_total)
                 stdout_next = stdout_start + stdout_consumed
             elif stderr_text:
                 stderr_raw = stderr_raw[: max(1, len(stderr_raw) // 2)]
-                stderr_text, stderr_consumed = _decode_poll_chunk(stderr_raw, at_eof=at_eof)
+                stderr_text, stderr_consumed = decode_slice(stderr_raw, stderr_start, stderr_total)
                 stderr_next = stderr_start + stderr_consumed
             else:
                 break

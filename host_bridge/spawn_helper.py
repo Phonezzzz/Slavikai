@@ -26,7 +26,9 @@ multithreaded and ``preexec_fn`` is documented-unsafe there):
    specific approved binary with ``EXECUTE``), a seccomp socket ban
    (``socket``/``socketpair``/``connect``/``bind``/``listen``/
    ``accept``/``accept4`` and the rest of the socket family, plus
-   ``io_uring`` and the mount/ptrace families), ``PDEATHSIG``,
+   ``io_uring`` and the mount/ptrace families) and a seccomp metadata
+   ban (the ``chmod``/``chown``/``setxattr``/``utime`` families, which
+   Landlock does not restrict), ``PDEATHSIG``,
    its own process group, and finally ``execve`` of
    ``/proc/self/fd/<fd>`` on the already open binary fd — identity is
    bound to the open file, so a binary swapped after the check cannot
@@ -137,8 +139,13 @@ _SCMP_ACT_ERRNO = 0x00050000
 # family (no socket of any kind can be created), io_uring (an alternate
 # path to socket operations), the mount family (no new mounts inside
 # the user namespace), and ptrace/process_vm (no inspection of other
-# processes). Landlock + the empty network namespace are the other
-# layers; the seccomp ban is mandatory (owner correction 2026-11-24).
+# processes). Landlock does NOT restrict the metadata families
+# (chmod/chown/setxattr/utime — see /usr/include/linux/landlock.h),
+# so they are denied here too: without this a profile could chmod 000
+# the daemon config or source code it cannot even read. The startup
+# probe verifies the metadata ban live. Landlock + the empty network
+# namespace are the other layers; the seccomp bans are mandatory
+# (owner correction 2026-11-24).
 _DENIED_SYSCALLS: tuple[str, ...] = (
     "socket",
     "socketpair",
@@ -165,6 +172,25 @@ _DENIED_SYSCALLS: tuple[str, ...] = (
     "bpf",
     "open_by_handle_at",
     "name_to_handle_at",
+    # Metadata families (not restricted by Landlock):
+    "chmod",
+    "fchmod",
+    "fchmodat",
+    "fchmodat2",
+    "chown",
+    "fchown",
+    "lchown",
+    "fchownat",
+    "setxattr",
+    "lsetxattr",
+    "fsetxattr",
+    "removexattr",
+    "lremovexattr",
+    "fremovexattr",
+    "utime",
+    "utimes",
+    "futimesat",
+    "utimensat",
 )
 
 TAIL_BYTES = 256 * 1024
