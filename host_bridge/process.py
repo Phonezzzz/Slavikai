@@ -159,7 +159,8 @@ result = {"tcp": "unknown", "udp": "unknown", "unix": "unknown",
           "protected": "unknown", "allowed": "unknown", "uid": None,
           "signal": "unknown", "metadata": "unknown", "prlimit": "unknown",
           "fifo": "unknown", "setpriority": "unknown", "late": "unknown",
-          "scheduler": "unknown", "affinity": "unknown"}
+          "scheduler": "unknown", "affinity": "unknown",
+          "xattrat": "unknown", "ioprio": "unknown"}
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(2)
@@ -377,6 +378,78 @@ finally:
         pass
     try:
         os.waitpid(_child4, 0)
+    except OSError:
+        pass
+# setxattrat/removexattrat are the at-variants of the classic
+# setxattr family: Landlock does not control metadata changes, so
+# both must be refused by the seccomp ban, or a profile could set a
+# POSIX ACL on a file it cannot read and lock the daemon/server out
+# of its own config. Raw syscalls (463/466 on x86_64, no stdlib
+# wrapper); ENOSYS means this kernel has no such syscall, so there
+# is nothing to exploit. A removexattrat that finds no attribute
+# returns ENODATA, which proves the call got through seccomp, so it
+# counts as allowed.
+_libc.syscall.argtypes = [ctypes.c_long, ctypes.c_int, ctypes.c_char_p,
+                          ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t,
+                          ctypes.c_int]
+def _setxattrat():
+    return _libc.syscall(463, -100, sys.argv[2].encode(),
+                         b"user.probe", b"x", 1, 0)
+def _removexattrat():
+    _libc.syscall.argtypes = [ctypes.c_long, ctypes.c_int, ctypes.c_char_p,
+                              ctypes.c_char_p, ctypes.c_int]
+    return _libc.syscall(466, -100, sys.argv[2].encode(), b"user.probe", 0)
+for _name, _op in (
+    ("setxattrat", _setxattrat),
+    ("removexattrat", _removexattrat),
+):
+    _ret = _op()
+    if _ret == 0:
+        result["xattrat"] = f"allowed:{_name}"
+        break
+    _errno = ctypes.get_errno()
+    if _errno == 38:  # ENOSYS: no such syscall on this kernel
+        result["xattrat"] = "refused"
+        break
+    if _errno == 61 and _name == "removexattrat":  # ENODATA: call executed
+        result["xattrat"] = "allowed:removexattrat"
+        break
+    if _errno not in (1, 13):
+        result["xattrat"] = f"error:{_name}:{_errno}"
+        break
+else:
+    result["xattrat"] = "refused"
+# ioprio_set is outside Landlock and signal scope, like
+# setpriority: with no PID namespace and matching kernel
+# credentials, the target must not move another process to
+# IOPRIO_CLASS_IDLE — under disk contention the victim starves,
+# and the change persists after the profile ends. Fork a
+# sacrificial child and try to idle it; the child is killed right
+# after, so a missing ban cannot hurt a real process. Raw syscall
+# (251 on x86_64, no stdlib wrapper); ENOSYS means this kernel has
+# no such syscall, so there is nothing to exploit.
+_libc.syscall.argtypes = [ctypes.c_long, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+_child5 = os.fork()
+if _child5 == 0:
+    time.sleep(2)
+    os._exit(0)
+try:
+    _ret = _libc.syscall(251, 1, _child5, 3 << 13)  # WHO_PROCESS, IOPRIO_CLASS_IDLE
+    if _ret == 0:
+        result["ioprio"] = "allowed"
+    else:
+        _errno = ctypes.get_errno()
+        if _errno == 38:  # ENOSYS: no such syscall on this kernel
+            result["ioprio"] = "refused"
+        else:
+            result["ioprio"] = "refused" if _errno in (1, 13) else f"error:{_errno}"
+finally:
+    try:
+        os.kill(_child5, 9)
+    except OSError:
+        pass
+    try:
+        os.waitpid(_child5, 0)
     except OSError:
         pass
 result["uid"] = os.getuid()
@@ -1317,6 +1390,8 @@ def run_enforcement_probe(
                 "setpriority": verdict.get("setpriority"),
                 "scheduler": verdict.get("scheduler"),
                 "affinity": verdict.get("affinity"),
+                "xattrat": verdict.get("xattrat"),
+                "ioprio": verdict.get("ioprio"),
                 "placement": placement_ok,
                 "landlock_abi": landlock_abi(),
             }
@@ -1335,6 +1410,8 @@ def run_enforcement_probe(
                 and verdict.get("setpriority") == "refused"
                 and verdict.get("scheduler") == "refused"
                 and verdict.get("affinity") == "refused"
+                and verdict.get("xattrat") == "refused"
+                and verdict.get("ioprio") == "refused"
                 and placement_ok
             )
             if not ok:

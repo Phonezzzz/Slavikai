@@ -2763,6 +2763,97 @@ def test_seccomp_sched_setaffinity_foreign_pid_denied(tmp_path: Path) -> None:
     assert (run_dir / "stdout").read_bytes() == b"refused\n"
 
 
+def test_seccomp_setxattrat_denied(tmp_path: Path) -> None:
+    """setxattrat/removexattrat are refused by the seccomp ban: the
+    at-variants are new syscalls (kernel 6.10+) for the same metadata
+    change as the classic setxattr family, and the classic ban does
+    not close them — a profile could otherwise set a POSIX ACL on a
+    file it cannot read and lock the daemon/server out of its own
+    config. Raw syscalls (463/466 on x86_64, no stdlib wrapper)."""
+    from host_bridge.spawn_helper import landlock_abi
+
+    if landlock_abi() is None:
+        pytest.skip("Landlock is unavailable in this environment")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    spec = _supervisor_spec(
+        run_dir,
+        work,
+        "import ctypes, os\n"
+        "libc = ctypes.CDLL('libc.so.6', use_errno=True)\n"
+        "libc.syscall.restype = ctypes.c_long\n"
+        "with open('target.txt', 'w') as fh:\n"
+        "    fh.write('x')\n"
+        "libc.syscall.argtypes = [ctypes.c_long, ctypes.c_int, ctypes.c_char_p,\n"
+        "                         ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t,\n"
+        "                         ctypes.c_int]\n"
+        "ret = libc.syscall(463, -100, b'target.txt', b'user.probe', b'x', 1, 0)\n"
+        "_e = ctypes.get_errno()\n"
+        "_r = 'allowed' if ret == 0 else 'refused' if _e in (1, 13) else 'error:%d' % _e\n"
+        "print('setxattrat:' + _r)\n"
+        "libc.syscall.argtypes = [ctypes.c_long, ctypes.c_int, ctypes.c_char_p,\n"
+        "                         ctypes.c_char_p, ctypes.c_int]\n"
+        "ret = libc.syscall(466, -100, b'target.txt', b'user.probe', 0)\n"
+        "_e = ctypes.get_errno()\n"
+        "_r = 'allowed' if ret == 0 else 'refused' if _e in (1, 13) else 'error:%d' % _e\n"
+        "print('removexattrat:' + _r)\n",
+    )
+    spec["grants"] = [
+        *spec["grants"],
+        {"path": str(work), "access": "rw"},
+    ]
+    code, _ = _run_supervisor(spec, run_dir)
+    assert code == 0
+    assert (run_dir / "stdout").read_bytes() == (b"setxattrat:refused\nremovexattrat:refused\n")
+
+
+def test_seccomp_ioprio_set_foreign_pid_denied(tmp_path: Path) -> None:
+    """ioprio_set on another process is refused by the seccomp ban:
+    with no PID namespace and matching kernel credentials, a profile
+    could otherwise move the daemon/server to IOPRIO_CLASS_IDLE and
+    leave it starved under disk contention after the profile ends
+    (the setpriority/scheduler bans do not close this separate
+    syscall). Raw syscall (251 on x86_64, no stdlib wrapper)."""
+    from host_bridge.spawn_helper import landlock_abi
+
+    if landlock_abi() is None:
+        pytest.skip("Landlock is unavailable in this environment")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    spec = _supervisor_spec(
+        run_dir,
+        work,
+        "import ctypes, os, time\n"
+        "libc = ctypes.CDLL('libc.so.6', use_errno=True)\n"
+        "libc.syscall.restype = ctypes.c_long\n"
+        "libc.syscall.argtypes = [ctypes.c_long, ctypes.c_int, ctypes.c_int, ctypes.c_int]\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    time.sleep(2)\n"
+        "    os._exit(0)\n"
+        "try:\n"
+        "    ret = libc.syscall(251, 1, pid, 3 << 13)\n"
+        "    _e = ctypes.get_errno()\n"
+        "    print('allowed' if ret == 0 else 'refused' if _e in (1, 13) else 'error:%d' % _e)\n"
+        "finally:\n"
+        "    try:\n"
+        "        os.kill(pid, 9)\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    try:\n"
+        "        os.waitpid(pid, 0)\n"
+        "    except OSError:\n"
+        "        pass\n",
+    )
+    code, _ = _run_supervisor(spec, run_dir)
+    assert code == 0
+    assert (run_dir / "stdout").read_bytes() == b"refused\n"
+
+
 def test_supervisor_status_carries_generation(tmp_path: Path) -> None:
     """Every status publication bumps the generation counter the
     daemon uses to bind a tail to its counters (see
@@ -2962,6 +3053,65 @@ def _live_profiles(work: Path, bin_dir: Path) -> list[dict[str, object]]:
                 "    print('allowed')\n"
                 "except OSError as e:\n"
                 "    print('refused' if e.errno in (1, 13) else 'error:%d' % e.errno)\n"
+                "finally:\n"
+                "    try:\n"
+                "        os.kill(pid, 9)\n"
+                "    except OSError:\n"
+                "        pass\n"
+                "    try:\n"
+                "        os.waitpid(pid, 0)\n"
+                "    except OSError:\n"
+                "        pass\n",
+            ],
+            "cwd": {"root_id": "work", "path": "."},
+        }
+    )
+    profiles.append(
+        {
+            "id": "py_xattrat",
+            "binary": _PY,
+            "argv_prefix": [
+                "-c",
+                "import ctypes\n"
+                "libc = ctypes.CDLL('libc.so.6', use_errno=True)\n"
+                "libc.syscall.restype = ctypes.c_long\n"
+                "libc.syscall.argtypes = [ctypes.c_long, ctypes.c_int, ctypes.c_char_p,\n"
+                "                         ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t,\n"
+                "                         ctypes.c_int]\n"
+                "ret = libc.syscall(463, -100, b'.env', b'user.probe', b'x', 1, 0)\n"
+                "_e = ctypes.get_errno()\n"
+                "_r = 'allowed' if ret == 0 else 'refused' if _e in (1, 13) else 'error:%d' % _e\n"
+                "print('setxattrat:' + _r)\n"
+                "libc.syscall.argtypes = [ctypes.c_long, ctypes.c_int, ctypes.c_char_p,\n"
+                "                         ctypes.c_char_p, ctypes.c_int]\n"
+                "ret = libc.syscall(466, -100, b'.env', b'user.probe', 0)\n"
+                "_e = ctypes.get_errno()\n"
+                "_r = 'allowed' if ret == 0 else 'refused' if _e in (1, 13) else 'error:%d' % _e\n"
+                "print('removexattrat:' + _r)\n",
+            ],
+            "cwd": {"root_id": "work", "path": "."},
+        }
+    )
+    profiles.append(
+        {
+            "id": "py_ioprio",
+            "binary": _PY,
+            "argv_prefix": [
+                "-c",
+                "import ctypes, os, time\n"
+                "libc = ctypes.CDLL('libc.so.6', use_errno=True)\n"
+                "libc.syscall.restype = ctypes.c_long\n"
+                "libc.syscall.argtypes = [ctypes.c_long, ctypes.c_int,\n"
+                "                         ctypes.c_int, ctypes.c_int]\n"
+                "pid = os.fork()\n"
+                "if pid == 0:\n"
+                "    time.sleep(2)\n"
+                "    os._exit(0)\n"
+                "try:\n"
+                "    ret = libc.syscall(251, 1, pid, 3 << 13)\n"
+                "    _e = ctypes.get_errno()\n"
+                "    _r = 'refused' if _e in (1, 13) else 'error:%d' % _e\n"
+                "    print('allowed' if ret == 0 else _r)\n"
                 "finally:\n"
                 "    try:\n"
                 "        os.kill(pid, 9)\n"
@@ -3205,6 +3355,8 @@ def test_live_probe_reports_all_layers(live: tuple[HostProcessService, Path]) ->
     assert probe.checks["setpriority"] == "refused"
     assert probe.checks["scheduler"] == "refused"
     assert probe.checks["affinity"] == "refused"
+    assert probe.checks["xattrat"] == "refused"
+    assert probe.checks["ioprio"] == "refused"
     assert probe.checks["uid"] == 0
     assert probe.checks["placement"] is True
     assert probe.checks["landlock_abi"] == 8
@@ -3404,6 +3556,28 @@ def test_live_sched_setaffinity_foreign_pid_denied(live: tuple[HostProcessServic
     ban alone does not close the affinity syscall)."""
     svc, _ = live
     run = _run(svc, "py_affinity", "live-affinity")
+    final = _live_wait(svc, run["process_id"], "exited")
+    assert "refused" in final["stdout"], final
+
+
+def test_live_setxattrat_denied(live: tuple[HostProcessService, Path]) -> None:
+    """A profile cannot change metadata via the at-variants: both
+    setxattrat and removexattrat are banned by seccomp (the classic
+    setxattr ban alone does not close these new syscalls)."""
+    svc, _ = live
+    run = _run(svc, "py_xattrat", "live-xattrat")
+    final = _live_wait(svc, run["process_id"], "exited")
+    assert "setxattrat:refused" in final["stdout"], final
+    assert "removexattrat:refused" in final["stdout"], final
+
+
+def test_live_ioprio_set_foreign_pid_denied(live: tuple[HostProcessService, Path]) -> None:
+    """A profile cannot move another process to IOPRIO_CLASS_IDLE:
+    ioprio_set is banned by seccomp (same family as setpriority —
+    the scheduler/affinity bans do not close the I/O-priority
+    syscall)."""
+    svc, _ = live
+    run = _run(svc, "py_ioprio", "live-ioprio")
     final = _live_wait(svc, run["process_id"], "exited")
     assert "refused" in final["stdout"], final
 

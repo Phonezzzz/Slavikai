@@ -180,7 +180,12 @@ _SCMP_ACT_ERRNO = 0x00050000
 # processes). Landlock does NOT restrict the metadata families
 # (chmod/chown/setxattr/utime — see /usr/include/linux/landlock.h),
 # so they are denied here too: without this a profile could chmod 000
-# the daemon config or source code it cannot even read. prlimit64 is
+# the daemon config or source code it cannot even read. That ban
+# covers the at-variants as well: setxattrat/removexattrat are new
+# syscalls (kernel 6.10+) for the same metadata change, and the
+# classic setxattr ban does not close them — a profile could
+# otherwise set a POSIX ACL on a file it cannot read and lock the
+# daemon/server out of its own config. prlimit64 is
 # denied for the same reason Landlock's signal scope exists: with no
 # PID namespace and matching kernel credentials, a profile that knows
 # the daemon/server PID could zero its RLIMIT_NOFILE and deny it files
@@ -192,9 +197,12 @@ _SCMP_ACT_ERRNO = 0x00050000
 # daemon/server to SCHED_IDLE and leave it starved under CPU
 # contention after the profile ends. sched_setaffinity is banned for
 # the same reason: a profile could otherwise pin the daemon/server
-# to a busy CPU and leave it degraded after the profile ends. The
+# to a busy CPU and leave it degraded after the profile ends.
+# ioprio_set is banned for the same reason: a profile could
+# otherwise move the daemon/server to IOPRIO_CLASS_IDLE and leave
+# it starved under disk contention after the profile ends. The
 # startup probe verifies the metadata, prlimit, setpriority,
-# scheduler and affinity bans live. Landlock
+# scheduler, affinity and ioprio bans live. Landlock
 # + the empty network
 # namespace are the
 # other layers; the seccomp bans are mandatory (owner correction
@@ -227,6 +235,7 @@ _DENIED_SYSCALLS: tuple[str, ...] = (
     "sched_setscheduler",
     "sched_setattr",
     "sched_setaffinity",
+    "ioprio_set",
     "bpf",
     "open_by_handle_at",
     "name_to_handle_at",
@@ -242,9 +251,11 @@ _DENIED_SYSCALLS: tuple[str, ...] = (
     "setxattr",
     "lsetxattr",
     "fsetxattr",
+    "setxattrat",
     "removexattr",
     "lremovexattr",
     "fremovexattr",
+    "removexattrat",
     "utime",
     "utimes",
     "futimesat",
