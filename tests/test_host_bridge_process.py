@@ -35,6 +35,7 @@ from host_bridge.process import (
     HostProcessService,
     ProbeResult,
     ProcessError,
+    SpawnError,
     SpawnHandle,
     load_profiles,
 )
@@ -122,6 +123,22 @@ def _profiles(extra: list[dict[str, object]] | None = None) -> list[dict[str, ob
             "id": "py_env",
             "binary": _PY,
             "argv_prefix": ["-c", _ENV_CODE],
+            "cwd": {"root_id": "work", "path": "."},
+        },
+        {
+            # Optional slot before a required one: the required slot
+            # must still be enforced when it is skipped.
+            "id": "optreq",
+            "binary": _TRUE,
+            "args": [
+                {
+                    "name": "mode",
+                    "kind": "enum",
+                    "required": False,
+                    "values": ["ok", "no"],
+                },
+                {"name": "count", "kind": "int", "required": True, "min": 0, "max": 10},
+            ],
             "cwd": {"root_id": "work", "path": "."},
         },
     ]
@@ -374,6 +391,39 @@ def _token(deadline_s: float = 5.0) -> CancelToken:
     return CancelToken(deadline=time.monotonic() + deadline_s, request_id="test-req")
 
 
+def _service_with_spawner(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+    spawner: object,
+) -> HostProcessService:
+    """A service like the ``service`` fixture, but with a custom spawner."""
+    svc = HostProcessService(
+        fs_service,
+        registry,
+        runtime_dir=tmp_path / "run",
+        profiles=load_profiles(registry),
+        spawner=spawner,  # type: ignore[arg-type]
+    )
+    # Unit tests drive the service logic, not the enforcement probe.
+    svc._probe = ProbeResult(available=True, checks={}, reason="unit-test")
+    return svc
+
+
+def _registry_with_exclusions(home: Path, write_excluded: tuple[Path, ...]) -> RootsRegistry:
+    config = _write_config(home, _profiles())
+    return RootsRegistry(
+        roots=(
+            Root(id="work", path=(home / "Project" / "work").resolve(), mode="rw"),
+            Root(id="docs", path=(home / "Documents" / "docs").resolve(), mode="ro"),
+        ),
+        write_excluded=write_excluded,
+        home=home.resolve(),
+        config_path=config,
+        socket_dir=None,
+    )
+
+
 def _run(
     svc: HostProcessService, profile_id: str, request_id: str, **params: object
 ) -> dict[str, object]:
@@ -422,6 +472,7 @@ def test_load_profiles_ok(registry: RootsRegistry) -> None:
         "sleep",
         "py_spawn",
         "py_env",
+        "optreq",
     }
     assert by_id["grep"].args[0].form == "after_dashdash"
     assert by_id["sleep"].args[0].minimum == 1
@@ -643,6 +694,119 @@ def test_run_spec_grants_exclude_protected_file(
     assert {"path": "/usr", "access": "rx"} not in spec["grants"]
 
 
+def _no_rw_grant_covers(grants: list[dict[str, object]], target: Path) -> None:
+    """No ``rw`` grant may be an ancestor of (or equal to) ``target``."""
+    for grant in grants:
+        if grant["access"] != "rw":
+            continue
+        grant_path = Path(str(grant["path"]))
+        assert not (target == grant_path or target.is_relative_to(grant_path)), (
+            f"rw grant {grant_path} covers write-excluded {target}"
+        )
+
+
+def _is_read_only_covered(grants: list[dict[str, object]], target: Path) -> bool:
+    """True when ``target`` is covered by an ``r`` grant on itself or
+    an ancestor (a clean excluded directory may be granted as one
+    read-only rule instead of per-file rules)."""
+    for grant in grants:
+        if grant["access"] != "r":
+            continue
+        grant_path = Path(str(grant["path"]))
+        if target == grant_path or target.is_relative_to(grant_path):
+            return True
+    return False
+
+
+def test_cwd_grants_split_write_excluded_subtree(home: Path, tmp_path: Path) -> None:
+    """A configured write_excluded subtree never gets a covering rw grant."""
+    keep = home / "Project" / "work" / "keep"
+    keep.mkdir()
+    (keep / "data.txt").write_text("keep\n", encoding="utf-8")
+    (home / "Project" / "work" / "open.txt").write_text("open\n", encoding="utf-8")
+    registry = _registry_with_exclusions(home, (keep.resolve(),))
+    fs = HostFsService(registry, trash_root=tmp_path / "Trash")
+    spawner = FakeSpawner()
+    svc = _service_with_spawner(fs, registry, tmp_path, spawner)
+    try:
+        _run(svc, "true", "req-excl")
+    finally:
+        svc.shutdown()
+    spec = spawner.spawns[-1]
+    grants = spec["grants"]
+    _no_rw_grant_covers(grants, keep / "data.txt")
+    assert _is_read_only_covered(grants, keep / "data.txt")
+    # The rest of the tree is still writable.
+    assert any(
+        g["access"] == "rw"
+        and (home / "Project" / "work" / "open.txt").is_relative_to(Path(str(g["path"])))
+        for g in grants
+    )
+
+
+def test_cwd_grants_split_nested_checkout(home: Path, tmp_path: Path) -> None:
+    """A SlavikAI checkout nested inside the root is not rw-granted."""
+    clone = home / "Project" / "work" / "clone"
+    (clone / "host_bridge").mkdir(parents=True)
+    (clone / "docs").mkdir()
+    (clone / "host_bridge" / "daemon.py").write_text("x\n", encoding="utf-8")
+    (clone / "docs" / "runtime_contract_claims.json").write_text("{}\n", encoding="utf-8")
+    (clone / "code.py").write_text("code\n", encoding="utf-8")
+    registry = _registry_with_exclusions(home, ())
+    fs = HostFsService(registry, trash_root=tmp_path / "Trash")
+    spawner = FakeSpawner()
+    svc = _service_with_spawner(fs, registry, tmp_path, spawner)
+    try:
+        _run(svc, "true", "req-clone")
+    finally:
+        svc.shutdown()
+    grants = spawner.spawns[-1]["grants"]
+    _no_rw_grant_covers(grants, clone / "code.py")
+    assert _is_read_only_covered(grants, clone / "code.py")
+
+
+def test_cwd_symlink_outside_root_rejected(home: Path, tmp_path: Path) -> None:
+    """A cwd that is a symlink to a directory outside the root is refused."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / ".env").write_text("SECRET=x\n", encoding="utf-8")
+    (outside / "data.txt").write_text("data\n", encoding="utf-8")
+    link = home / "Project" / "work" / "link"
+    link.symlink_to(outside, target_is_directory=True)
+    config = _write_config(
+        home,
+        _profiles(
+            [
+                {
+                    "id": "linked",
+                    "binary": _TRUE,
+                    "cwd": {"root_id": "work", "path": "link"},
+                }
+            ]
+        ),
+    )
+    registry = RootsRegistry(
+        roots=(
+            Root(id="work", path=(home / "Project" / "work").resolve(), mode="rw"),
+            Root(id="docs", path=(home / "Documents" / "docs").resolve(), mode="ro"),
+        ),
+        write_excluded=(),
+        home=home.resolve(),
+        config_path=config,
+        socket_dir=None,
+    )
+    fs = HostFsService(registry, trash_root=tmp_path / "Trash")
+    spawner = FakeSpawner()
+    svc = _service_with_spawner(fs, registry, tmp_path, spawner)
+    try:
+        with pytest.raises(ProcessError) as excinfo:
+            _run(svc, "linked", "req-link")
+        assert excinfo.value.code == "spawn_failed"
+    finally:
+        svc.shutdown()
+    assert not spawner.spawns, "no spec may be built for a symlinked cwd"
+
+
 def test_run_spec_carries_binary_identity(
     service: HostProcessService, spawner: FakeSpawner
 ) -> None:
@@ -718,6 +882,57 @@ def test_poll_utf8_replacement(service: HostProcessService, spawner: FakeSpawner
     spawner.set_output(handle, stdout=b"\xff\xfe hello")
     chunk = _poll(service, process_id)
     assert chunk["stdout"] == "\ufffd\ufffd hello"
+
+
+def test_poll_pairs_tail_with_consistent_counters(
+    service: HostProcessService, spawner: FakeSpawner
+) -> None:
+    """A tail newer than its status counters never yields an offset
+    past the reported total (the next poll would fail with
+    offset_out_of_range), and no bytes are lost between polls."""
+    result = _run(service, "true", "req-snap")
+    process_id = result["process_id"]
+    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    # The helper flushed a 6-byte tail; the status still says 3.
+    spawner.set_output(handle, stdout=b"abcdef", stdout_total=3)
+    first = _poll(service, process_id, stdout_offset=0)
+    assert first["stdout_next_offset"] <= first["stdout_total_bytes"]
+    assert first["stdout_next_offset"] > 0
+    # The poll handed out above is usable as the next offset, and
+    # the two polls together deliver every byte exactly once.
+    spawner.set_output(handle, stdout=b"abcdef", stdout_total=6)
+    second = _poll(service, process_id, stdout_offset=first["stdout_next_offset"])
+    assert second["stdout_next_offset"] == 6
+    assert first["stdout"] + second["stdout"] == "abcdef"
+
+
+def test_poll_frame_budget_keeps_source_byte_offsets(
+    service: HostProcessService, spawner: FakeSpawner
+) -> None:
+    """Trimming by the frame budget must not miscount consumed source
+    bytes: one 0xff byte decodes to one U+FFFD, not three UTF-8 bytes."""
+    result = _run(service, "true", "req-bytes")
+    process_id = result["process_id"]
+    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    spawner.set_output(handle, stdout=b"\xff" * 40_000, stderr=b"\xff" * 40_000)
+    first = _poll(service, process_id, max_bytes=32 * 1024)
+    assert 0 < first["stdout_next_offset"] < 40_000
+    assert first["stdout_next_offset"] == len(first["stdout"])
+    assert 0 < first["stderr_next_offset"] < 40_000
+    assert first["stderr_next_offset"] == len(first["stderr"])
+    # No bytes are skipped: the next chunk continues exactly where
+    # the first one stopped, on both streams.
+    second = _poll(
+        service,
+        process_id,
+        stdout_offset=first["stdout_next_offset"],
+        stderr_offset=first["stderr_next_offset"],
+        max_bytes=32 * 1024,
+    )
+    assert second["stdout"]
+    assert second["stdout_next_offset"] == first["stdout_next_offset"] + len(second["stdout"])
+    assert second["stderr"]
+    assert second["stderr_next_offset"] == first["stderr_next_offset"] + len(second["stderr"])
 
 
 def test_poll_unknown_process(service: HostProcessService) -> None:
@@ -821,6 +1036,193 @@ def test_cancel_at_launch_boundary(
     assert len(spawner.spawns) == 1
 
 
+class _ExitingLeaderSpawner:
+    """Spawn returns a handle whose leader exits at once without ever
+    writing a status file: ``_spawn`` finalizes the launch as
+    ``spawn_failed`` through its ``leader_done()`` branch — and that
+    finalization needs the service lock."""
+
+    def __init__(self) -> None:
+        self.spawns: list[dict[str, object]] = []
+        self.units: dict[str, dict[str, object]] = {}
+        self.kill_calls: list[str] = []
+        self.signal_calls: list[tuple[str, int]] = []
+
+    def spawn(self, spec_path: Path, *, unit_name: str, run_dir: Path) -> SpawnHandle:
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        self.spawns.append(spec)
+        leader = subprocess.Popen(
+            ["sleep", "0.5"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        handle = SpawnHandle(popen=leader, unit_name=unit_name, cgroup_path=None, run_dir=run_dir)
+        self.units[unit_name] = {"handle": handle, "procs": [str(leader.pid)]}
+        return handle
+
+    def signal_tree(self, handle: SpawnHandle, sig: int) -> None:
+        self.signal_calls.append((handle.unit_name, sig))
+
+    def kill_all(self, handle: SpawnHandle) -> None:
+        self.kill_calls.append(handle.unit_name)
+        if handle.popen is not None and handle.popen.poll() is None:
+            handle.popen.kill()
+
+    def cgroup_empty(self, handle: SpawnHandle) -> bool:
+        return True
+
+
+def test_retry_run_does_not_hold_lock_while_waiting(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+) -> None:
+    """A retry that waits for a launch in flight must not hold the
+    service lock: the failing launch finalizes through that lock."""
+    spawner = _ExitingLeaderSpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    errors: list[BaseException] = []
+    results: list[dict[str, object]] = []
+
+    def first_run() -> None:
+        try:
+            _run(svc, "true", "req-lock")
+        except BaseException as exc:  # noqa: BLE001 - captured for the test
+            errors.append(exc)
+
+    def retry_run() -> None:
+        token = CancelToken(deadline=time.monotonic() + 2.0, request_id="req-lock")
+        try:
+            results.append(
+                svc.handle("host.process.run", {"profile_id": "true"}, "req-lock", token)
+            )
+        except BaseException as exc:  # noqa: BLE001 - captured for the test
+            errors.append(exc)
+
+    try:
+        first = threading.Thread(target=first_run, daemon=True)
+        first.start()
+        # The first launch is in flight (its leader exits at 0.5 s);
+        # the retry arrives while it is still launching.
+        time.sleep(0.1)
+        retry = threading.Thread(target=retry_run, daemon=True)
+        retry.start()
+        retry.join(timeout=1.5)
+        assert not retry.is_alive(), "retry is still waiting: it holds the lock _finalize needs"
+        assert results and results[0]["state"] == "spawn_failed"
+        first.join(timeout=5.0)
+        assert errors and isinstance(errors[0], ProcessError)
+        assert errors[0].code == "spawn_failed"
+    finally:
+        svc.shutdown()
+
+
+class _DelayedSpawner(FakeSpawner):
+    """FakeSpawner whose spawn() returns late (after the launch timeout)."""
+
+    def __init__(self, delay: float) -> None:
+        super().__init__()
+        self.spawn_delay = delay
+
+    def spawn(self, spec_path: Path, *, unit_name: str, run_dir: Path) -> SpawnHandle:
+        time.sleep(self.spawn_delay)
+        return super().spawn(spec_path, unit_name=unit_name, run_dir=run_dir)
+
+
+def test_late_spawn_handle_is_destroyed_not_adopted(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A handle that arrives after the reaper gave up on the launch is
+    destroyed, not adopted into the final record."""
+    monkeypatch.setattr(process_module, "SPAWN_START_TIMEOUT_S", 0.2)
+    spawner = _DelayedSpawner(delay=0.6)
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    try:
+        with pytest.raises(ProcessError) as excinfo:
+            _run(svc, "true", "req-late")
+        assert excinfo.value.code == "spawn_failed"
+        process_id = svc._by_request_id["req-late"]
+        record = svc._records[process_id]
+        assert record.final
+        assert record.state == "spawn_failed"
+        assert spawner.kill_calls == [f"slavikai-bridge-{process_id}.scope"]
+        handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+        assert handle.popen is None or handle.popen.poll() is not None
+        # No resurrection: the record stays spawn_failed.
+        time.sleep(0.5)
+        assert svc._records[process_id].state == "spawn_failed"
+    finally:
+        svc.shutdown()
+        for unit in spawner.units.values():
+            handle = unit["handle"]
+            if handle.popen is not None and handle.popen.poll() is None:
+                handle.popen.kill()
+
+
+def test_run_rejects_missing_required_arg_after_optional(
+    service: HostProcessService,
+) -> None:
+    """An optional slot before a required one must not swallow the
+    required arg: args=['ok'] leaves the required int slot empty."""
+    with pytest.raises(ProcessError) as excinfo:
+        _run(service, "optreq", "req-opt-missing", args=["ok"])
+    assert excinfo.value.code == "invalid_args"
+    result = _run(service, "optreq", "req-opt-ok", args=["ok", "3"])
+    assert result["state"] == "running"
+
+
+class _RaisingSpawner:
+    """spawn() always fails before any handle exists."""
+
+    def __init__(self) -> None:
+        self.spawns: list[dict[str, object]] = []
+
+    def spawn(self, spec_path: Path, *, unit_name: str, run_dir: Path) -> SpawnHandle:
+        raise SpawnError("scope creation failed")
+
+    def signal_tree(self, handle: SpawnHandle, sig: int) -> None:
+        raise AssertionError("signal_tree must not be called without a handle")
+
+    def kill_all(self, handle: SpawnHandle) -> None:
+        raise AssertionError("kill_all must not be called without a handle")
+
+    def cgroup_empty(self, handle: SpawnHandle) -> bool:
+        return True
+
+
+def test_failed_spawn_run_dir_is_cleaned(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run directory left by a spawn that failed before the handle
+    is still removed when the record is swept."""
+    monkeypatch.setattr(process_module, "SPAWN_START_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(process_module, "FINISHED_RETENTION_S", 0.0)
+    spawner = _RaisingSpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    try:
+        with pytest.raises(ProcessError) as excinfo:
+            _run(svc, "true", "req-nodir")
+        assert excinfo.value.code == "spawn_failed"
+        process_id = svc._by_request_id["req-nodir"]
+        run_dir = svc._run_base / process_id
+        assert (run_dir / "spec.json").exists()
+        assert (run_dir / "tmp").is_dir()
+        # The reaper finalizes the stalled launch, then sweeps it.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and process_id in svc._records:
+            time.sleep(0.05)
+        assert process_id not in svc._records
+        assert not run_dir.exists()
+    finally:
+        svc.shutdown()
+
+
 # --- wire: capabilities visibility + dispatch ------------------------------
 
 
@@ -903,6 +1305,126 @@ def test_wire_run_poll_kill(bridge: Path) -> None:
     assert polled["state"] == "killed"
 
 
+def test_wire_fs_validator_error_keeps_request_id(bridge: Path) -> None:
+    """Errors from the shared FS validators keep their request_id, so
+    the client reports invalid_params instead of malformed_response."""
+    with pytest.raises(client.BridgeClientError) as excinfo:
+        client.call(
+            bridge,
+            "host.process.kill",
+            params={"process_id": 42, "extra": 1},
+            request_id="wire-fs-err",
+        )
+    assert excinfo.value.code == "invalid_params"
+
+
+# --- supervisor (spawn_helper, direct) -------------------------------------
+
+
+def _supervisor_spec(
+    run_dir: Path, cwd: Path, code: str, *, timeout_s: int = 10
+) -> dict[str, object]:
+    """A minimal spec for running ``_Supervisor`` directly (no systemd)."""
+    from host_bridge.process import _BASE_ENV, _exec_grants, _system_grants
+
+    binary = Path(_PY).resolve()
+    st = binary.stat()
+    grants = _system_grants() + _exec_grants(binary)
+    return {
+        "version": 1,
+        "process_id": "supervisor-test",
+        "binary": str(binary),
+        "binary_dev": st.st_dev,
+        "binary_ino": st.st_ino,
+        "binary_size": st.st_size,
+        "binary_mtime_ns": st.st_mtime_ns,
+        "argv": [str(binary), "-c", code],
+        "env": dict(_BASE_ENV),
+        "cwd": str(cwd),
+        "timeout_s": timeout_s,
+        "run_dir": str(run_dir),
+        "grants": [{"path": str(g.path), "access": g.access} for g in grants],
+        "outer_uid": os.getuid(),
+        "outer_gid": os.getgid(),
+    }
+
+
+def _run_supervisor(spec: dict[str, object], run_dir: Path) -> tuple[int, float]:
+    """Run ``_Supervisor`` in the main thread (it installs signal
+    handlers); return (exit code, elapsed s)."""
+    import signal as _signal
+
+    from host_bridge.spawn_helper import _Supervisor
+
+    supervisor = _Supervisor(spec, run_dir)
+    saved = {sig: _signal.getsignal(sig) for sig in (_signal.SIGTERM, _signal.SIGINT)}
+    started = time.monotonic()
+    try:
+        code = supervisor.run()
+    finally:
+        for sig, handler in saved.items():
+            _signal.signal(sig, handler)
+    return code, time.monotonic() - started
+
+
+def test_supervisor_no_busy_loop_when_streams_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child that closes both streams but keeps running must not
+    spin the supervisor on wait4 + tail flushes with fsync."""
+    from host_bridge.spawn_helper import _Supervisor, landlock_abi
+
+    if landlock_abi() is None:
+        pytest.skip("Landlock is unavailable in this environment")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    spec = _supervisor_spec(
+        run_dir, cwd, "import os, time; os.close(1); os.close(2); time.sleep(3)"
+    )
+    calls: list[int] = []
+    original = _Supervisor._flush_tails
+
+    def counting(self: _Supervisor) -> None:
+        calls.append(1)
+        original(self)
+
+    monkeypatch.setattr(_Supervisor, "_flush_tails", counting)
+    code, elapsed = _run_supervisor(spec, run_dir)
+    assert code == 0
+    assert elapsed >= 2.5, "the supervisor returned before the child finished"
+    assert len(calls) < 50, f"supervisor flushed tails {len(calls)} times in {elapsed:.1f} s"
+
+
+def test_supervisor_keeps_reading_after_leader_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A descendant that outlives the leader still gets its output
+    read: the supervisor must not close the pipes on wait4(leader)."""
+    from host_bridge.spawn_helper import landlock_abi
+
+    if landlock_abi() is None:
+        pytest.skip("Landlock is unavailable in this environment")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    code = (
+        "import os, time; pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    time.sleep(0.7)\n"
+        "    os.write(1, b'descendant-output\\n')\n"
+        "    os._exit(0)\n"
+        "os._exit(0)\n"
+    )
+    spec = _supervisor_spec(run_dir, cwd, code)
+    exit_code, elapsed = _run_supervisor(spec, run_dir)
+    assert exit_code == 0
+    assert elapsed >= 0.6, "the supervisor returned before the descendant wrote"
+    assert (run_dir / "stdout").read_bytes() == b"descendant-output\n"
+
+
 # --- integration: real spawner + helper (skipped when the probe fails) ---
 
 
@@ -920,6 +1442,14 @@ def _live_profiles(work: Path, bin_dir: Path) -> list[dict[str, object]]:
         {
             "id": "tool",
             "binary": str(bin_dir / "tool"),
+            "cwd": {"root_id": "work", "path": "."},
+        }
+    )
+    profiles.append(
+        {
+            "id": "py_rename",
+            "binary": _PY,
+            "argv_prefix": ["-c", "import os; os.rename('a/file.txt', 'b/file.txt')"],
             "cwd": {"root_id": "work", "path": "."},
         }
     )
@@ -993,6 +1523,7 @@ def test_live_probe_reports_all_layers(live: tuple[HostProcessService, Path]) ->
     assert probe.checks["unix"] == "refused"
     assert probe.checks["protected"] == "refused"
     assert probe.checks["allowed"] == "read"
+    assert probe.checks["signal"] == "refused"
     assert probe.checks["uid"] == 0
     assert probe.checks["placement"] is True
     assert probe.checks["landlock_abi"] == 8
@@ -1114,6 +1645,20 @@ def test_live_timeout_tree_kill(live: tuple[HostProcessService, Path]) -> None:
     final = _live_wait(svc, process_id, "timeout", timeout_s=15.0)
     assert final["state"] == "timeout"
     assert _no_tree_child(), "a descendant survived the timeout tree kill"
+
+
+def test_live_rename_between_writable_subdirs(live: tuple[HostProcessService, Path]) -> None:
+    """A rename between two subdirs of one granted rw tree works
+    (Landlock REFER); without it the move fails with EXDEV."""
+    svc, work = live
+    (work / "a").mkdir(exist_ok=True)
+    (work / "b").mkdir(exist_ok=True)
+    (work / "a" / "file.txt").write_text("moved\n", encoding="utf-8")
+    run = _run(svc, "py_rename", "live-rename")
+    final = _live_wait(svc, run["process_id"], "exited")
+    assert final["exit_code"] == 0, final["stderr"]
+    assert (work / "b" / "file.txt").read_text(encoding="utf-8") == "moved\n"
+    assert not (work / "a" / "file.txt").exists()
 
 
 def test_live_idempotent_retry(live: tuple[HostProcessService, Path]) -> None:

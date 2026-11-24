@@ -91,12 +91,22 @@ _LL_REMOVE_FILE = 32
 _LL_MAKE_DIR = 128
 _LL_MAKE_REG = 256
 _LL_MAKE_SYM = 4096
+_LL_REFER = 8192
 _LL_TRUNCATE = 16384
+
+# Landlock scoping (ABI 6+; the host reports ABI 8): a restricted
+# process may only signal processes in its own Landlock domain, so
+# the daemon, the server and other owner processes are unreachable
+# by kill() from a profile (ADR-0013 §10).
+_LL_SCOPE_SIGNAL = 1 << 1
 
 _ACCESS_BITS: dict[str, int] = {
     # Read-only: read files and list directories.
     "r": _LL_READ_FILE | _LL_READ_DIR,
     # Read + write: create/remove/rename entries, write and truncate.
+    # REFER is required for rename/link between different directories
+    # of one tree: without it the kernel refuses the move with EXDEV
+    # even when both directories are fully writable.
     "rw": (
         _LL_READ_FILE
         | _LL_WRITE_FILE
@@ -106,6 +116,7 @@ _ACCESS_BITS: dict[str, int] = {
         | _LL_MAKE_DIR
         | _LL_MAKE_REG
         | _LL_MAKE_SYM
+        | _LL_REFER
         | _LL_TRUNCATE
     ),
     # Read + execute (system binary/library trees only).
@@ -158,7 +169,6 @@ _DENIED_SYSCALLS: tuple[str, ...] = (
 
 TAIL_BYTES = 256 * 1024
 _READ_CHUNK = 64 * 1024
-_STATUS_FLUSH_S = 1.0
 _HANDSHAKE_TIMEOUT_S = 10.0
 _SPAWN_FAILED_EXIT = 127
 
@@ -278,6 +288,21 @@ def _load_seccomp() -> object:
     return lib
 
 
+def _has_symlink_component(path: Path) -> bool:
+    """True when any component of ``path`` (itself included) is a symlink."""
+    current = path
+    while True:
+        try:
+            if os.path.islink(current):
+                return True
+        except OSError:
+            return True  # fail closed on an unreadable component
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent
+
+
 def _apply_landlock(grants: list[dict[str, object]]) -> tuple[int, str]:
     """Install the Landlock FS ruleset.
 
@@ -294,10 +319,14 @@ def _apply_landlock(grants: list[dict[str, object]]) -> tuple[int, str]:
         | _LL_MAKE_DIR
         | _LL_MAKE_REG
         | _LL_MAKE_SYM
+        | _LL_REFER
         | _LL_TRUNCATE
     )
     attr.handled_access_net = 0
-    attr.scoped = 0
+    # Signal scope: a restricted process may only signal processes in
+    # its own domain. The supervisor and daemon are unrestricted, so
+    # they can still signal the tree; the tree cannot signal them.
+    attr.scoped = _LL_SCOPE_SIGNAL
     ruleset = _libc.syscall(
         _SYS_landlock_create_ruleset, ctypes.byref(attr), ctypes.sizeof(attr), 0
     )
@@ -314,8 +343,11 @@ def _apply_landlock(grants: list[dict[str, object]]) -> tuple[int, str]:
                 st = path.lstat()
             except OSError:
                 continue  # grant target vanished: fail closed for it
-            if os.path.islink(path):
-                continue  # symlinks are never granted
+            if _has_symlink_component(path):
+                # Symlinks are never granted, in any component: a grant
+                # through a symlinked ancestor would hand out whatever
+                # the link points to, not the path the daemon computed.
+                continue
             mode = st.st_mode & 0o170000
             if mode == 0o040000:
                 # Directory: the full access set (incl. listing and
@@ -517,7 +549,6 @@ class _Supervisor:
         self.stdout_tail = _Tail()
         self.stderr_tail = _Tail()
         self.terminate_requested = False
-        self._last_status_flush = 0.0
 
     def _status(self, state: str, **extra: object) -> dict[str, object]:
         status: dict[str, object] = {
@@ -712,14 +743,19 @@ class _Supervisor:
         self.started_at = _iso_now()
         self.started_mono = time.monotonic()
         self._write_status("running")
-        self._last_status_flush = self.started_mono
         # 4. Supervision: drain pipes into bounded tails, enforce the
         # runtime timeout, handle SIGTERM as a graceful tree kill.
+        # The leader's exit does NOT end supervision: descendants may
+        # still hold the pipes and write after it, and the daemon
+        # counts the tree as running until the cgroup is empty. The
+        # leader's exit status is saved and the loop keeps draining
+        # until both streams reach EOF.
         exit_code: int | None = None
         exit_signal: int | None = None
         final_state = "exited"
         out_open = True
         err_open = True
+        leader_status: tuple[int | None, int | None] | None = None
         while True:
             if self.terminate_requested:
                 self.terminate_requested = False
@@ -757,15 +793,24 @@ class _Supervisor:
                             out_open = False
                         else:
                             err_open = False
+            # Publish the tail and its counters together, on every
+            # iteration: the daemon reads them as one snapshot, and a
+            # status that lags the tail misaligns poll offsets (and
+            # loses bytes after a tail rotation). The tail is written
+            # first, so the status never describes bytes the tail
+            # does not yet contain.
             self._flush_tails()
-            now = time.monotonic()
-            if now - self._last_status_flush >= _STATUS_FLUSH_S:
-                self._write_status("running")
-                self._last_status_flush = now
-            status = self._reap(pid)
-            if status is not None:
-                exit_code, exit_signal = status
-                # Drain whatever the pipes still hold before finalizing.
+            if leader_status is None:
+                # The leader is reaped at most once: a second wait4
+                # would raise ChildProcessError.
+                status = self._reap(pid)
+                if status is not None:
+                    leader_status = status
+                    exit_code, exit_signal = status
+            if leader_status is not None and not out_open and not err_open:
+                # Both streams are at EOF: no descendant can write any
+                # more. Drain once more (a last chunk may have arrived
+                # with the EOF), publish the final status, and exit.
                 for fd, tail in ((out_r, self.stdout_tail), (err_r, self.stderr_tail)):
                     while True:
                         try:
@@ -776,8 +821,6 @@ class _Supervisor:
                             break
                         tail.append(chunk)
                 self._flush_tails()
-                if final_state == "exited" and exit_signal is not None:
-                    final_state = "exited"
                 self._write_status(
                     final_state,
                     finished_at=_iso_now(),
@@ -785,21 +828,23 @@ class _Supervisor:
                     signal=exit_signal,
                 )
                 return 0
-            if not fds and self._child_gone(pid):
-                # Both pipes drained and the child is gone without a
-                # waitpid hit (should not happen); reap once more.
-                status = self._reap(pid)
-                if status is not None:
-                    exit_code, exit_signal = status
-                    self._flush_tails()
-                    self._write_status(
-                        final_state,
-                        finished_at=_iso_now(),
-                        exit_code=exit_code,
-                        signal=exit_signal,
-                    )
-                    return 0
-                time.sleep(0.05)
+            self._write_status("running")
+            if not fds:
+                if leader_status is None and self._child_gone(pid):
+                    # Both pipes drained and the child is gone without
+                    # a waitpid hit (should not happen); reap once more.
+                    status = self._reap(pid)
+                    if status is not None:
+                        leader_status = status
+                        exit_code, exit_signal = status
+                        # Fall through: the EOF check above finalizes
+                        # on the next iteration.
+                        continue
+                # Both streams closed but the tree is alive (a child
+                # that closed stdout/stderr and keeps running): no fd
+                # will ever become readable — sleep instead of spinning
+                # on wait4 + tail fsyncs.
+                time.sleep(0.2)
 
     @staticmethod
     def _child_gone(pid: int) -> bool:

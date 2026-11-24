@@ -768,6 +768,32 @@ class HostFsService:
                     f"path is inside a SlavikAI checkout: {target.display}",
                 )
 
+    def is_write_excluded(self, root: Root, lexical: Path) -> bool:
+        """True when a mutation to ``lexical`` is refused by policy.
+
+        Used by the process service when it builds Landlock grants:
+        a path the FS API refuses to write (config ``write_excluded``
+        or a SlavikAI checkout) must never be covered by an ``rw``
+        grant (ADR-0013 §9). Reads stay allowed, so the path is
+        downgraded to a read-only grant, not dropped. A path outside
+        the root is never writable through it.
+        """
+        try:
+            parts = lexical.relative_to(root.path).parts
+        except ValueError:
+            return True
+        target = _Target(
+            root=root,
+            parts=tuple(parts),
+            lexical=lexical,
+            display="/".join(parts) or ".",
+        )
+        try:
+            self._check_write_excluded(target)
+        except FsError:
+            return True
+        return False
+
     # --- lexical resolution & classification ---
 
     def _classify(

@@ -151,7 +151,8 @@ _SYSTEM_GRANT_PATHS: tuple[tuple[str, str], ...] = (
 _PROBE_CODE = r"""
 import json, os, socket, sys, time
 result = {"tcp": "unknown", "udp": "unknown", "unix": "unknown",
-          "protected": "unknown", "allowed": "unknown", "uid": None}
+          "protected": "unknown", "allowed": "unknown", "uid": None,
+          "signal": "unknown"}
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(2)
@@ -183,6 +184,11 @@ try:
         result["allowed"] = "read" if fh.read() == "probe-ok" else "wrong-content"
 except OSError as e:
     result["allowed"] = f"error:{e.errno}"
+try:
+    os.kill(os.getppid(), 0)
+    result["signal"] = "allowed"
+except OSError as e:
+    result["signal"] = "refused" if e.errno in (1, 13) else f"error:{e.errno}"
 result["uid"] = os.getuid()
 print("PROBE:" + json.dumps(result), flush=True)
 time.sleep(2)
@@ -587,7 +593,11 @@ def _compute_cwd_grants(
     children, so a secret nested inside an allowed tree is never
     covered by a parent grant. Symlinks are never granted or followed
     (Landlock checks the resolved target, so a granted symlink would
-    hand out whatever it points to).
+    hand out whatever it points to). Write-exclusion is per path:
+    a subtree the FS API refuses to write (config ``write_excluded``
+    or a SlavikAI checkout) is granted read-only, never ``rw``, and
+    a parent is never granted as one ``rw`` rule over a weaker child
+    (ADR-0013 §9).
     """
     root = registry.by_id(profile.cwd_root_id)
     if root is None:
@@ -597,15 +607,22 @@ def _compute_cwd_grants(
     entries_seen = 0
     grants: list[Grant] = []
 
-    def walk(directory: Path, depth: int) -> tuple[list[Grant], bool]:
+    def walk(directory: Path, depth: int, access: str) -> tuple[list[Grant], bool]:
         nonlocal entries_seen
         if depth > GRANT_WALK_MAX_DEPTH:
             raise ProcessError("spawn_failed", "grant walk too deep")
+        # A directory that is itself write-excluded downgrades its
+        # whole subtree to read-only: the FS API refuses mutations
+        # there, so no "rw" grant may cover it.
+        if access == "rw" and fs_service.is_write_excluded(root, directory):
+            access = "r"
         try:
             st = directory.lstat()
         except OSError as exc:
             raise ProcessError("spawn_failed", f"cwd is not readable: {exc}") from exc
-        if not os.path.isdir(directory):
+        if not stat.S_ISDIR(st.st_mode):
+            # lstat, not isdir: a symlinked cwd must be rejected, not
+            # followed into a directory outside the root.
             raise ProcessError("spawn_failed", "cwd is not a directory")
         base_dev = st.st_dev
         local: list[Grant] = []
@@ -635,20 +652,33 @@ def _compute_cwd_grants(
             if classification != "normal":
                 dirty = True
                 continue
+            # Write-exclusion is per path: a writable parent may hold
+            # an excluded child, whose subtree is read-only.
+            entry_access = access
+            if access == "rw" and fs_service.is_write_excluded(root, entry_path):
+                entry_access = "r"
             if entry.is_dir(follow_symlinks=False):
-                sub, sub_dirty = walk(entry_path, depth + 1)
+                sub, sub_dirty = walk(entry_path, depth + 1, entry_access)
                 if sub_dirty:
                     local.extend(sub)
                     dirty = True
+                elif entry_access != access:
+                    # Clean but weaker than the parent: one grant for
+                    # the parent at its access would cover this subtree
+                    # with write — expand to per-entry grants instead.
+                    local.append(Grant(entry_path, entry_access))
+                    dirty = True
                 else:
-                    local.append(Grant(entry_path, access))
+                    local.append(Grant(entry_path, entry_access))
             else:
-                local.append(Grant(entry_path, access))
+                local.append(Grant(entry_path, entry_access))
+                if entry_access != access:
+                    dirty = True
         if not dirty:
             return [Grant(directory, access)], False
         return local, True
 
-    cwd_grants, _ = walk(cwd, 0)
+    cwd_grants, _ = walk(cwd, 0, access)
     grants.extend(cwd_grants)
     if len(grants) > GRANT_WALK_MAX_GRANTS:
         raise ProcessError("spawn_failed", "too many Landlock grants")
@@ -815,7 +845,8 @@ def run_enforcement_probe(
     Verifies, in the daemon's real context, that a spawned process
     cannot open a TCP/UDP/pathname socket, cannot read a protected
     file nested inside its allowed tree, CAN read an allowed file,
-    runs with the mapped uid, and is placed in its own scope cgroup.
+    runs with the mapped uid, cannot signal processes outside its
+    Landlock domain, and is placed in its own scope cgroup.
     Any failure makes the process API unavailable (fail-closed).
     """
     probe_dir: Path | None = None
@@ -943,6 +974,7 @@ def run_enforcement_probe(
                 "protected": verdict.get("protected"),
                 "allowed": verdict.get("allowed"),
                 "uid": verdict.get("uid"),
+                "signal": verdict.get("signal"),
                 "placement": placement_ok,
                 "landlock_abi": landlock_abi(),
             }
@@ -953,6 +985,7 @@ def run_enforcement_probe(
                 and verdict.get("protected") == "refused"
                 and verdict.get("allowed") == "read"
                 and verdict.get("uid") == 0
+                and verdict.get("signal") == "refused"
                 and placement_ok
             )
             if not ok:
@@ -989,6 +1022,7 @@ class _Record:
     profile_id: str
     state: str  # launching | running | killing | exited | killed | timeout | spawn_failed
     handle: SpawnHandle | None = None
+    run_dir: Path | None = None
     started_at: str = ""
     finished_at: str | None = None
     exit_code: int | None = None
@@ -1078,6 +1112,12 @@ class HostProcessService:
             if exc.request_id is None:
                 exc.request_id = request_id
             raise
+        except FsError as exc:
+            # The shared validators (_check_params, _str_param,
+            # _int_param) raise FsError, not ProcessError: convert and
+            # keep the correlation, or the client sees
+            # malformed_response instead of invalid_params.
+            raise ProcessError(exc.code, str(exc), request_id=request_id) from exc
         raise ProcessError("invalid_params", f"unknown process capability {capability}")
 
     # -- run -----------------------------------------------------------------
@@ -1091,9 +1131,12 @@ class HostProcessService:
             raise ProcessError("invalid_args", "too many args")
         if sum(len(v) for v in raw) > MAX_ARGS_TOTAL_BYTES:
             raise ProcessError("invalid_args", "args are too long")
-        required = sum(1 for s in profile.args if s.required)
-        if len(raw) < required:
-            raise ProcessError("invalid_args", "missing required args")
+        # Positional binding: a value fills the first unfilled slot,
+        # so a required slot after an optional one is missing even
+        # when the arg count matches the number of required slots.
+        for index, slot in enumerate(profile.args):
+            if slot.required and index >= len(raw):
+                raise ProcessError("invalid_args", f"missing required arg {slot.name!r}")
         if len(raw) > len(profile.args):
             raise ProcessError("invalid_args", "too many args for this profile")
         out: list[str] = []
@@ -1162,30 +1205,37 @@ class HostProcessService:
         # Commit the record first: cancellation and launch are one
         # state transition, and a retry with the same request_id finds
         # this exact record instead of spawning a second process.
+        existing: _Record | None = None
+        record: _Record | None = None
         with self._lock:
             token.check()
             existing_id = self._by_request_id.get(request_id)
             if existing_id is not None:
                 existing = self._records.get(existing_id)
-                if existing is not None:
-                    return self._run_result(existing, wait_settled=True, token=token)
-            running = sum(
-                1
-                for record in self._records.values()
-                if record.state in ("launching", "running", "killing")
-            )
-            if running >= MAX_RUNNING_PROCESSES:
-                raise ProcessError("too_many_processes", "too many processes are running")
-            process_id = uuid.uuid4().hex
-            record = _Record(
-                process_id=process_id,
-                profile_id=profile_id,
-                state="launching",
-                timeout_s=timeout_s,
-                started_mono=time.monotonic(),
-            )
-            self._records[process_id] = record
-            self._by_request_id[request_id] = process_id
+            if existing is None:
+                running = sum(
+                    1
+                    for record in self._records.values()
+                    if record.state in ("launching", "running", "killing")
+                )
+                if running >= MAX_RUNNING_PROCESSES:
+                    raise ProcessError("too_many_processes", "too many processes are running")
+                process_id = uuid.uuid4().hex
+                record = _Record(
+                    process_id=process_id,
+                    profile_id=profile_id,
+                    state="launching",
+                    timeout_s=timeout_s,
+                    started_mono=time.monotonic(),
+                )
+                self._records[process_id] = record
+                self._by_request_id[request_id] = process_id
+        if existing is not None:
+            # Wait outside the lock: _finalize needs it to settle the
+            # original run, and the reaper needs it for every other
+            # process's timeout enforcement.
+            return self._run_result(existing, wait_settled=True, token=token)
+        assert record is not None
         try:
             self._spawn(record, profile, args, token)
         except (ProcessError, RequestTimeoutError):
@@ -1220,6 +1270,9 @@ class HostProcessService:
         cwd = root.path.joinpath(*profile.cwd_parts)
         run_dir = self._run_base / record.process_id
         run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Remember the directory on the record: a spawn that fails
+        # before a handle exists must still be swept.
+        record.run_dir = run_dir
         tmp_dir = run_dir / "tmp"
         tmp_dir.mkdir(mode=0o700, exist_ok=True)
         grants = _system_grants()
@@ -1259,7 +1312,20 @@ class HostProcessService:
             )
         except SpawnError as exc:
             raise ProcessError("spawn_failed", str(exc)) from exc
-        record.handle = handle
+        with self._lock:
+            if record.final:
+                # The reaper gave up on this launch while spawn() was
+                # still in flight: the tree exists now and nobody owns
+                # it. Destroy it before returning, or it would run
+                # outside the active-process accounting and without
+                # daemon timeout enforcement.
+                late = True
+            else:
+                record.handle = handle
+                late = False
+        if late:
+            self._spawner.kill_all(handle)
+            raise ProcessError("spawn_failed", "spawn did not confirm in time")
         # Wait for the helper to confirm enforcement + exec, bounded by
         # the request deadline (the token) and the spawn timeout.
         deadline = min(
@@ -1368,13 +1434,27 @@ class HostProcessService:
         if record.handle is None:
             raise ProcessError("process_not_found", f"unknown process {process_id!r}")
         run_dir = record.handle.run_dir
-        # The tail file can be up to ~1 s newer than the status totals
-        # (the helper flushes tails before the periodic status write);
-        # totals are refreshed on the next poll, so this is bounded
-        # and self-healing, never a loss.
-        stdout_tail = self._tail_bytes(run_dir, "stdout")
-        stderr_tail = self._tail_bytes(run_dir, "stderr")
-        if stdout_offset > record.stdout_total or stderr_offset > record.stderr_total:
+        # The tail and its counters must be one consistent snapshot:
+        # the helper publishes the tail before the status, so a tail
+        # newer than the status is possible, and after a 256 KiB tail
+        # rotation a stale retained_from misaligns every offset. In a
+        # consistent snapshot total - retained_from == len(tail) for
+        # each stream; when it does not hold, re-read status + tails
+        # (the helper writes both on every flush, so the fresh
+        # counters cover the tail). The growth case is still clamped
+        # below, so a stale status can never publish an offset beyond
+        # the bytes actually read.
+        for _ in range(5):
+            stdout_tail = self._tail_bytes(run_dir, "stdout")
+            stderr_tail = self._tail_bytes(run_dir, "stderr")
+            if record.stdout_total - record.stdout_retained_from == len(
+                stdout_tail
+            ) and record.stderr_total - record.stderr_retained_from == len(stderr_tail):
+                break
+            self._refresh(record)
+        stdout_total = max(record.stdout_total, record.stdout_retained_from + len(stdout_tail))
+        stderr_total = max(record.stderr_total, record.stderr_retained_from + len(stderr_tail))
+        if stdout_offset > stdout_total or stderr_offset > stderr_total:
             raise ProcessError("offset_out_of_range", "offset is beyond the stream end")
         if record.started_at:
             start_ts = datetime.fromisoformat(record.started_at).timestamp()
@@ -1389,19 +1469,19 @@ class HostProcessService:
 
         def chunk(
             offset: int, total: int, retained_from: int, tail: bytes, at_eof: bool
-        ) -> tuple[str, int, int, bool]:
+        ) -> tuple[str, bytes, int, int, bool]:
             start = max(offset, retained_from)
             truncated = offset < retained_from
             raw = tail[start - retained_from : start - retained_from + max_bytes]
             text, consumed = _decode_poll_chunk(raw, at_eof=at_eof)
-            return text, start, start + consumed, truncated
+            return text, raw, start, start + consumed, truncated
 
         at_eof = record.final
-        stdout_text, stdout_start, stdout_next, stdout_truncated = chunk(
-            stdout_offset, record.stdout_total, record.stdout_retained_from, stdout_tail, at_eof
+        stdout_text, stdout_raw, stdout_start, stdout_next, stdout_truncated = chunk(
+            stdout_offset, stdout_total, record.stdout_retained_from, stdout_tail, at_eof
         )
-        stderr_text, stderr_start, stderr_next, stderr_truncated = chunk(
-            stderr_offset, record.stderr_total, record.stderr_retained_from, stderr_tail, at_eof
+        stderr_text, stderr_raw, stderr_start, stderr_next, stderr_truncated = chunk(
+            stderr_offset, stderr_total, record.stderr_retained_from, stderr_tail, at_eof
         )
         result: dict[str, object] = {
             "process_id": record.process_id,
@@ -1415,8 +1495,8 @@ class HostProcessService:
             "stderr": stderr_text,
             "stdout_next_offset": stdout_next,
             "stderr_next_offset": stderr_next,
-            "stdout_total_bytes": record.stdout_total,
-            "stderr_total_bytes": record.stderr_total,
+            "stdout_total_bytes": stdout_total,
+            "stderr_total_bytes": stderr_total,
             "stdout_retained_from": record.stdout_retained_from,
             "stderr_retained_from": record.stderr_retained_from,
             "stdout_truncated": stdout_truncated,
@@ -1426,11 +1506,13 @@ class HostProcessService:
         # the FS read path): shrink the longer chunk until it fits.
         while not _frame_fits(result, request_id):
             if stdout_text and len(stdout_text) >= len(stderr_text):
-                stdout_text = stdout_text[: max(1, len(stdout_text) // 2)]
-                stdout_next = stdout_start + len(stdout_text.encode("utf-8", errors="replace"))
+                stdout_raw = stdout_raw[: max(1, len(stdout_raw) // 2)]
+                stdout_text, stdout_consumed = _decode_poll_chunk(stdout_raw, at_eof=at_eof)
+                stdout_next = stdout_start + stdout_consumed
             elif stderr_text:
-                stderr_text = stderr_text[: max(1, len(stderr_text) // 2)]
-                stderr_next = stderr_start + len(stderr_text.encode("utf-8", errors="replace"))
+                stderr_raw = stderr_raw[: max(1, len(stderr_raw) // 2)]
+                stderr_text, stderr_consumed = _decode_poll_chunk(stderr_raw, at_eof=at_eof)
+                stderr_next = stderr_start + stderr_consumed
             else:
                 break
             result["stdout"] = stdout_text
@@ -1654,8 +1736,11 @@ class HostProcessService:
                     k: v for k, v in self._by_request_id.items() if v != record.process_id
                 }
         for record in evict:
-            if record.handle is not None:
-                shutil.rmtree(record.handle.run_dir, ignore_errors=True)
+            run_dir = record.run_dir
+            if run_dir is None and record.handle is not None:
+                run_dir = record.handle.run_dir
+            if run_dir is not None:
+                shutil.rmtree(run_dir, ignore_errors=True)
 
     def shutdown(self) -> None:
         self._stop.set()
