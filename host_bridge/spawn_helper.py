@@ -142,10 +142,14 @@ _SCMP_ACT_ERRNO = 0x00050000
 # processes). Landlock does NOT restrict the metadata families
 # (chmod/chown/setxattr/utime — see /usr/include/linux/landlock.h),
 # so they are denied here too: without this a profile could chmod 000
-# the daemon config or source code it cannot even read. The startup
-# probe verifies the metadata ban live. Landlock + the empty network
-# namespace are the other layers; the seccomp bans are mandatory
-# (owner correction 2026-11-24).
+# the daemon config or source code it cannot even read. prlimit64 is
+# denied for the same reason Landlock's signal scope exists: with no
+# PID namespace and matching kernel credentials, a profile that knows
+# the daemon/server PID could zero its RLIMIT_NOFILE and deny it files
+# and connections. The startup probe verifies the metadata and
+# prlimit bans live. Landlock + the empty network namespace are the
+# other layers; the seccomp bans are mandatory (owner correction
+# 2026-11-24).
 _DENIED_SYSCALLS: tuple[str, ...] = (
     "socket",
     "socketpair",
@@ -169,6 +173,7 @@ _DENIED_SYSCALLS: tuple[str, ...] = (
     "ptrace",
     "process_vm_readv",
     "process_vm_writev",
+    "prlimit64",
     "bpf",
     "open_by_handle_at",
     "name_to_handle_at",
@@ -314,23 +319,51 @@ def _load_seccomp() -> object:
     return lib
 
 
-def _has_symlink_component(path: Path) -> bool:
-    """True when any component of ``path`` (itself included) is a symlink."""
-    current = path
-    while True:
+def _open_grant_fd(path: Path) -> int:
+    """Open ``path`` without following any symlink component.
+
+    Each component is opened individually with O_NOFOLLOW, so a
+    symlink swapped in between the daemon's grant computation and
+    this open fails (ELOOP for a file link, ENOTDIR for a directory
+    link under O_DIRECTORY) instead of handing out the link target
+    — the check and the open are never split on a mutable path.
+    Returns the fd for the final component (caller closes).
+    """
+    if not path.is_absolute():
+        raise OSError(errno.EINVAL, "grant path is not absolute")
+    parts = [part for part in path.parts if part != "/"]
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for index, part in enumerate(parts):
+            last = index == len(parts) - 1
+            flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+            if not last:
+                flags |= os.O_DIRECTORY
+            child = os.open(part, flags, dir_fd=fd)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            fd = child
+        return fd
+    except BaseException:
         try:
-            if os.path.islink(current):
-                return True
+            os.close(fd)
         except OSError:
-            return True  # fail closed on an unreadable component
-        parent = current.parent
-        if parent == current:
-            return False
-        current = parent
+            pass
+        raise
 
 
 def _apply_landlock(grants: list[dict[str, object]]) -> tuple[int, str]:
     """Install the Landlock FS ruleset.
+
+    Every grant is bound to a safely opened descriptor: the path is
+    opened component-by-component with O_NOFOLLOW, the fd's identity
+    (dev, ino) is checked against the (dev, ino) the daemon recorded
+    when it verified the object, and only then is the rule added from
+    the fd. A replaced object fails the whole spawn (EACCES) instead
+    of silently running with less access; a vanished or symlinked
+    target is skipped (no rule, no access).
 
     Returns (0, "") on success, else (errno, failing grant path).
     """
@@ -366,32 +399,35 @@ def _apply_landlock(grants: list[dict[str, object]]) -> tuple[int, str]:
                 continue
             path = Path(raw_path)
             try:
-                st = path.lstat()
+                fd = _open_grant_fd(path)
             except OSError:
-                continue  # grant target vanished: fail closed for it
-            if _has_symlink_component(path):
-                # Symlinks are never granted, in any component: a grant
-                # through a symlinked ancestor would hand out whatever
-                # the link points to, not the path the daemon computed.
-                continue
-            mode = st.st_mode & 0o170000
-            if mode == 0o040000:
-                # Directory: the full access set (incl. listing and
-                # creating/removing entries beneath it).
-                allowed = _ACCESS_BITS[str(access)]
-                flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY
-            elif mode in (0o100000, 0o020000, 0o060000):
-                # Regular file or device node: directory-only rights
-                # would make the kernel refuse the rule with EINVAL.
-                allowed = _ACCESS_BITS[str(access)] & _FILE_BITS
-                flags = os.O_RDONLY | os.O_CLOEXEC
-            else:
-                continue  # fifo, socket, ...: never granted
+                continue  # target vanished or is a symlink: no access
             try:
-                fd = os.open(path, flags)
-            except OSError:
-                continue
-            try:
+                st = os.fstat(fd)
+                expected_dev = grant.get("dev")
+                expected_ino = grant.get("ino")
+                if (
+                    isinstance(expected_dev, int)
+                    and isinstance(expected_ino, int)
+                    and (st.st_dev, st.st_ino) != (expected_dev, expected_ino)
+                ):
+                    # The object at this path is not the one the
+                    # daemon verified: replaced between grant
+                    # computation and this open. Fail the spawn
+                    # rather than running with a silently different
+                    # sandbox.
+                    return errno.EACCES, raw_path
+                mode = st.st_mode & 0o170000
+                if mode == 0o040000:
+                    # Directory: the full access set (incl. listing and
+                    # creating/removing entries beneath it).
+                    allowed = _ACCESS_BITS[str(access)]
+                elif mode in (0o100000, 0o020000, 0o060000):
+                    # Regular file or device node: directory-only rights
+                    # would make the kernel refuse the rule with EINVAL.
+                    allowed = _ACCESS_BITS[str(access)] & _FILE_BITS
+                else:
+                    continue  # fifo, socket, ...: never granted
                 rule = _PathBeneathAttr(allowed_access=allowed, parent_fd=fd)
                 if (
                     _libc.syscall(

@@ -15,6 +15,7 @@ binary identity, and live idempotent retry).
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
@@ -612,8 +613,12 @@ def test_exec_grants_cover_binary_and_interp() -> None:
     # one (it skips symlink grant paths), and profile binaries are
     # often symlinks (/usr/bin/true -> gnutrue, /usr/bin/python3 ->
     # python3.14, and the interpreter /lib64/ld-linux-x86-64.so.2).
-    assert grants[0] == Grant(Path(_TRUE).resolve(), "rx")
-    assert grants[1] == Grant(Path("/lib64/ld-linux-x86-64.so.2").resolve(), "rx")
+    true_path = Path(_TRUE).resolve()
+    true_st = true_path.lstat()
+    assert grants[0] == Grant(true_path, "rx", dev=true_st.st_dev, ino=true_st.st_ino)
+    interp_path = Path("/lib64/ld-linux-x86-64.so.2").resolve()
+    interp_st = interp_path.lstat()
+    assert grants[1] == Grant(interp_path, "rx", dev=interp_st.st_dev, ino=interp_st.st_ino)
     assert len(grants) == 2
 
 
@@ -686,12 +691,12 @@ def test_run_spec_grants_exclude_protected_file(
     assert str(work_root / "notes.txt") in grant_paths
     # EXECUTE only for the approved binary + its interpreter:
     # the system dirs are read-only, so no other binary can run.
-    assert {"path": str(Path(_TRUE).resolve()), "access": "rx"} in spec["grants"]
-    assert {
-        "path": str(Path("/lib64/ld-linux-x86-64.so.2").resolve()),
-        "access": "rx",
-    } in spec["grants"]
-    assert {"path": "/usr", "access": "rx"} not in spec["grants"]
+    # (Grants also carry dev/ino identity for the helper; compare
+    # path+access, not the whole dict.)
+    grant_pairs = {(g["path"], g["access"]) for g in spec["grants"]}
+    assert (str(Path(_TRUE).resolve()), "rx") in grant_pairs
+    assert (str(Path("/lib64/ld-linux-x86-64.so.2").resolve()), "rx") in grant_pairs
+    assert ("/usr", "rx") not in grant_pairs
 
 
 def _no_rw_grant_covers(grants: list[dict[str, object]], target: Path) -> None:
@@ -742,6 +747,25 @@ def test_cwd_grants_split_write_excluded_subtree(home: Path, tmp_path: Path) -> 
         and (home / "Project" / "work" / "open.txt").is_relative_to(Path(str(g["path"])))
         for g in grants
     )
+
+
+def test_cwd_grants_carry_identity(home: Path, tmp_path: Path) -> None:
+    """Every grant the daemon computes is bound to the (dev, ino)
+    of the object it saw: the helper refuses a path whose object
+    was swapped after the grant was computed (TOCTOU)."""
+    spawner = FakeSpawner()
+    registry = _registry_with_exclusions(home, ())
+    fs = HostFsService(registry, trash_root=tmp_path / "Trash")
+    svc = _service_with_spawner(fs, registry, tmp_path, spawner)
+    try:
+        _run(svc, "true", "req-grant-identity")
+    finally:
+        svc.shutdown()
+    for grant in spawner.spawns[-1]["grants"]:
+        path = Path(str(grant["path"]))
+        st = path.lstat()
+        assert grant["dev"] == st.st_dev
+        assert grant["ino"] == st.st_ino
 
 
 def test_cwd_grants_split_nested_checkout(home: Path, tmp_path: Path) -> None:
@@ -1021,6 +1045,49 @@ def test_poll_chunk_eof_is_per_slice(service: HostProcessService, spawner: FakeS
     assert first["stdout"] + second["stdout"] + third["stdout"] == "a€b"
 
 
+def test_poll_max_bytes_smaller_than_char(
+    service: HostProcessService, spawner: FakeSpawner
+) -> None:
+    """A max_bytes smaller than the next UTF-8 character must not
+    spin forever returning '' at offset 0: it is a typed
+    too-small-limit error (the FS read precedent)."""
+    result = _run(service, "true", "req-small-limit")
+    process_id = result["process_id"]
+    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    spawner.finish(handle, state="exited", exit_code=0, stdout="€".encode())
+    _wait_state(service, process_id, "exited")
+    with pytest.raises(ProcessError) as excinfo:
+        _poll(service, process_id, max_bytes=1)
+    assert excinfo.value.code == "invalid_params"
+    assert "too small" in str(excinfo.value)
+
+
+def test_poll_frame_budget_trim_never_stalls(
+    service: HostProcessService,
+    spawner: FakeSpawner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A frame budget smaller than one character must not truncate a
+    poll to an empty, non-advancing chunk: the trim stops at the last
+    readable character instead of returning '' at offset 0."""
+
+    def _tiny_budget(result: dict[str, object], request_id: str) -> bool:
+        return (
+            len(str(result.get("stdout", "")).encode("utf-8")) <= 1
+            and len(str(result.get("stderr", "")).encode("utf-8")) <= 1
+        )
+
+    monkeypatch.setattr(process_module, "_frame_fits", _tiny_budget)
+    result = _run(service, "true", "req-tiny-budget")
+    process_id = result["process_id"]
+    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    spawner.finish(handle, state="exited", exit_code=0, stdout="€".encode())
+    _wait_state(service, process_id, "exited")
+    polled = _poll(service, process_id)
+    assert polled["stdout"] == "€"
+    assert polled["stdout_next_offset"] == 3
+
+
 def test_poll_unknown_process(service: HostProcessService) -> None:
     with pytest.raises(ProcessError) as excinfo:
         _poll(service, "deadbeef")
@@ -1065,6 +1132,82 @@ def test_timeout_finalizes_via_reaper(
     final = _wait_state(service, process_id, "timeout", timeout_s=8.0)
     assert final["state"] == "timeout"
     assert spawner.kill_calls, "the reaper must kill the tree on timeout"
+
+
+class _StubbornSpawner(FakeSpawner):
+    """A spawner whose cgroup never empties: kill_all records the
+    call but leaves the unit's procs alone, so the record stays in
+    ``killing`` and a repeat kill must not move its deadline."""
+
+    def kill_all(self, handle: SpawnHandle) -> None:
+        self.kill_calls.append(handle.unit_name)
+
+
+def test_repeated_kill_preserves_original_deadline(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repeat kill observes the already-started termination: it
+    must not move the original kill deadline, overwrite the reason,
+    or re-signal the tree (a descendant ignoring SIGTERM would
+    otherwise never reach its cgroup SIGKILL)."""
+    monkeypatch.setattr(process_module, "KILL_GRACE_S", 0.3)
+    spawner = _StubbornSpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    try:
+        result = _run(svc, "sleep", "req-kill-twice", args=["5"])
+        process_id = result["process_id"]
+        first = svc.handle("host.process.kill", {"process_id": process_id}, "kill-1", _token(1.0))
+        assert first["state"] == "killing"
+        record = svc._records[process_id]
+        deadline = record.kill_deadline
+        assert deadline is not None
+        assert record.kill_reason == "killed"
+        signals = len(spawner.signal_calls)
+        second = svc.handle("host.process.kill", {"process_id": process_id}, "kill-2", _token(1.0))
+        assert second["state"] == "killing"
+        assert record.kill_deadline == deadline
+        assert record.kill_reason == "killed"
+        assert len(spawner.signal_calls) == signals
+    finally:
+        svc.shutdown()
+
+
+def test_kill_after_timeout_keeps_timeout_reason(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A kill that arrives while a timeout kill is already in
+    progress must not overwrite the ``timeout`` reason or move the
+    deadline the reaper set."""
+    monkeypatch.setattr(process_module, "KILL_GRACE_S", 0.3)
+    spawner = _StubbornSpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    try:
+        result = _run(svc, "sleep", "req-kill-timeout", args=["5"], timeout_s=1)
+        process_id = result["process_id"]
+        record = svc._records[process_id]
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            if record.state == "killing" and record.kill_reason == "timeout":
+                break
+            time.sleep(0.02)
+        assert record.state == "killing"
+        assert record.kill_reason == "timeout"
+        original_deadline = record.kill_deadline
+        assert original_deadline is not None
+        signals = len(spawner.signal_calls)
+        killed = svc.handle("host.process.kill", {"process_id": process_id}, "kill-3", _token(0.5))
+        assert killed["state"] == "killing"
+        assert record.kill_reason == "timeout"
+        assert record.kill_deadline == original_deadline
+        assert len(spawner.signal_calls) == signals
+    finally:
+        svc.shutdown()
 
 
 def test_finished_record_cap(service: HostProcessService, spawner: FakeSpawner) -> None:
@@ -1588,6 +1731,115 @@ def test_supervisor_keeps_reading_after_leader_exit(
     assert (run_dir / "stdout").read_bytes() == b"descendant-output\n"
 
 
+def _grant_identity(path: Path) -> tuple[int, int]:
+    st = path.lstat()
+    return st.st_dev, st.st_ino
+
+
+def test_open_grant_fd_rejects_symlink_components(tmp_path: Path) -> None:
+    """_open_grant_fd opens each component with O_NOFOLLOW: a symlink
+    anywhere in the path fails instead of following it, so a grant
+    can never be bound to a swapped-in link target (a symlink to a
+    directory under O_NOFOLLOW|O_DIRECTORY raises ENOTDIR, a symlink
+    to a file raises ELOOP — both refuse the path)."""
+    from host_bridge.spawn_helper import _open_grant_fd
+
+    real = tmp_path / "real"
+    (real / "sub").mkdir(parents=True)
+    (real / "sub" / "data.txt").write_text("ok\n", encoding="utf-8")
+    fd = _open_grant_fd(real / "sub" / "data.txt")
+    try:
+        st = os.fstat(fd)
+        assert (st.st_dev, st.st_ino) == _grant_identity(real / "sub" / "data.txt")
+    finally:
+        os.close(fd)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "link").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OSError) as excinfo:
+        _open_grant_fd(tmp_path / "link" / "data.txt")
+    assert excinfo.value.errno in (errno.ELOOP, errno.ENOTDIR)
+    (real / "alias").symlink_to(real / "sub" / "data.txt")
+    with pytest.raises(OSError) as excinfo:
+        _open_grant_fd(real / "alias")
+    assert excinfo.value.errno == errno.ELOOP
+
+
+def test_landlock_grant_ignores_swapped_symlink(tmp_path: Path) -> None:
+    """A subdir swapped for a symlink after the grant was computed
+    must not hand out the link target: the grant is skipped and the
+    outside file stays denied (static symlinks were already skipped;
+    this pins the behaviour for the swapped case)."""
+    from host_bridge.spawn_helper import landlock_abi
+
+    if landlock_abi() is None:
+        pytest.skip("Landlock is unavailable in this environment")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    work = tmp_path / "work"
+    sub = work / "sub"
+    sub.mkdir(parents=True)
+    (sub / "data.txt").write_text("ok\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "data.txt").write_text("SECRET\n", encoding="utf-8")
+    dev, ino = _grant_identity(sub)
+    spec = _supervisor_spec(
+        run_dir, work, "import sys; sys.stdout.write(open('sub/data.txt').read())"
+    )
+    spec["grants"] = [
+        *spec["grants"],
+        {"path": str(sub), "access": "rw", "dev": dev, "ino": ino},
+    ]
+    # Control: the verified directory is granted.
+    code, _ = _run_supervisor(spec, run_dir)
+    assert code == 0
+    assert (run_dir / "stdout").read_bytes() == b"ok\n"
+    # Attack: swap the granted subdir for a symlink to the outside
+    # tree after the grant (and its identity) was computed.
+    shutil.rmtree(sub)
+    sub.symlink_to(outside, target_is_directory=True)
+    code, _ = _run_supervisor(spec, run_dir)
+    assert code == 0
+    status = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
+    assert status["exit_code"] == 1
+    assert b"SECRET" not in (run_dir / "stdout").read_bytes()
+
+
+def test_landlock_grant_refuses_replaced_object(tmp_path: Path) -> None:
+    """A granted path replaced by a different real directory (same
+    path, different inode) fails the whole spawn instead of granting
+    the replacement: the grant is bound to the recorded identity."""
+    from host_bridge.spawn_helper import landlock_abi
+
+    if landlock_abi() is None:
+        pytest.skip("Landlock is unavailable in this environment")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    work = tmp_path / "work"
+    sub = work / "sub"
+    sub.mkdir(parents=True)
+    (sub / "data.txt").write_text("ok\n", encoding="utf-8")
+    dev, ino = _grant_identity(sub)
+    spec = _supervisor_spec(
+        run_dir, work, "import sys; sys.stdout.write(open('sub/data.txt').read())"
+    )
+    spec["grants"] = [
+        *spec["grants"],
+        {"path": str(sub), "access": "rw", "dev": dev, "ino": ino},
+    ]
+    shutil.rmtree(sub)
+    sub.mkdir()
+    (sub / "data.txt").write_text("EVIL\n", encoding="utf-8")
+    code, _ = _run_supervisor(spec, run_dir)
+    assert code == 1
+    status = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
+    assert status["state"] == "spawn_failed"
+    # A failed spawn never writes a stdout tail: the replacement
+    # directory was never granted, so its content cannot leak.
+    assert not (run_dir / "stdout").exists() or b"EVIL" not in (run_dir / "stdout").read_bytes()
+
+
 # --- integration: real spawner + helper (skipped when the probe fails) ---
 
 
@@ -1621,6 +1873,35 @@ def _live_profiles(work: Path, bin_dir: Path) -> list[dict[str, object]]:
             "id": "py_chmod",
             "binary": _PY,
             "argv_prefix": ["-c", "import os; os.chmod('.env', 0o600)"],
+            "cwd": {"root_id": "work", "path": "."},
+        }
+    )
+    profiles.append(
+        {
+            "id": "py_prlimit",
+            "binary": _PY,
+            "argv_prefix": [
+                "-c",
+                "import os, resource, time\n"
+                "pid = os.fork()\n"
+                "if pid == 0:\n"
+                "    time.sleep(2)\n"
+                "    os._exit(0)\n"
+                "try:\n"
+                "    resource.prlimit(pid, resource.RLIMIT_NOFILE, (0, 0))\n"
+                "    print('allowed')\n"
+                "except OSError as e:\n"
+                "    print('refused' if e.errno in (1, 13) else 'error:%d' % e.errno)\n"
+                "finally:\n"
+                "    try:\n"
+                "        os.kill(pid, 9)\n"
+                "    except OSError:\n"
+                "        pass\n"
+                "    try:\n"
+                "        os.waitpid(pid, 0)\n"
+                "    except OSError:\n"
+                "        pass\n",
+            ],
             "cwd": {"root_id": "work", "path": "."},
         }
     )
@@ -1696,6 +1977,7 @@ def test_live_probe_reports_all_layers(live: tuple[HostProcessService, Path]) ->
     assert probe.checks["allowed"] == "read"
     assert probe.checks["signal"] == "refused"
     assert probe.checks["metadata"] == "refused"
+    assert probe.checks["prlimit"] == "refused"
     assert probe.checks["uid"] == 0
     assert probe.checks["placement"] is True
     assert probe.checks["landlock_abi"] == 8
@@ -1847,6 +2129,16 @@ def test_live_metadata_ops_denied(live: tuple[HostProcessService, Path]) -> None
     assert final["exit_code"] != 0
     assert "Operation not permitted" in final["stderr"]
     assert env_path.stat().st_mode == before
+
+
+def test_live_prlimit_foreign_pid_denied(live: tuple[HostProcessService, Path]) -> None:
+    """A profile that knows another process's PID cannot zero its
+    limits: prlimit64 is banned by seccomp (there is no PID namespace,
+    and the uid/gid mapping keeps matching kernel credentials)."""
+    svc, _ = live
+    run = _run(svc, "py_prlimit", "live-prlimit")
+    final = _live_wait(svc, run["process_id"], "exited")
+    assert "refused" in final["stdout"], final
 
 
 def test_live_idempotent_retry(live: tuple[HostProcessService, Path]) -> None:

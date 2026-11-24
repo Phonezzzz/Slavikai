@@ -152,7 +152,7 @@ _PROBE_CODE = r"""
 import json, os, socket, sys, time
 result = {"tcp": "unknown", "udp": "unknown", "unix": "unknown",
           "protected": "unknown", "allowed": "unknown", "uid": None,
-          "signal": "unknown", "metadata": "unknown"}
+          "signal": "unknown", "metadata": "unknown", "prlimit": "unknown"}
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(2)
@@ -208,6 +208,30 @@ for _name, _op in (
             break
 else:
     result["metadata"] = "refused"
+# prlimit64 is outside Landlock and signal scope: with no PID
+# namespace and matching kernel credentials, the target must not
+# change another process's limits. Fork a sacrificial child and
+# try prlimit on its pid; the child is killed right after, so a
+# missing ban cannot hurt a real process.
+import resource
+_child = os.fork()
+if _child == 0:
+    time.sleep(2)
+    os._exit(0)
+try:
+    resource.prlimit(_child, resource.RLIMIT_NOFILE, (0, 0))
+    result["prlimit"] = "allowed"
+except OSError as e:
+    result["prlimit"] = "refused" if e.errno in (1, 13) else f"error:{e.errno}"
+finally:
+    try:
+        os.kill(_child, 9)
+    except OSError:
+        pass
+    try:
+        os.waitpid(_child, 0)
+    except OSError:
+        pass
 result["uid"] = os.getuid()
 print("PROBE:" + json.dumps(result), flush=True)
 time.sleep(2)
@@ -222,6 +246,17 @@ class ProcessError(BridgeProtocolError):
 class Grant:
     path: Path
     access: str  # "r" | "rw" | "rx"
+    # Identity the daemon recorded when it verified the object.
+    # The helper opens the path without following symlinks and
+    # refuses the whole spawn when the fd is a different object
+    # (TOCTOU between grant computation and Landlock install).
+    dev: int | None = None
+    ino: int | None = None
+
+
+def _grants_wire(grants: list[Grant]) -> list[dict[str, object]]:
+    """Grants as the helper expects them, identity included."""
+    return [{"path": str(g.path), "access": g.access, "dev": g.dev, "ino": g.ino} for g in grants]
 
 
 @dataclass(frozen=True)
@@ -540,8 +575,13 @@ def load_profiles(registry: RootsRegistry) -> tuple[ProcessProfile, ...]:
 def _system_grants() -> list[Grant]:
     grants: list[Grant] = []
     for path, access in _SYSTEM_GRANT_PATHS:
-        if Path(path).exists():
-            grants.append(Grant(Path(path), access))
+        target = Path(path)
+        if target.exists():
+            try:
+                st = target.lstat()
+            except OSError:
+                continue
+            grants.append(Grant(target, access, dev=st.st_dev, ino=st.st_ino))
     return grants
 
 
@@ -587,13 +627,16 @@ def _exec_grants(binary: Path) -> list[Grant]:
     # skips symlink grant paths), and profile binaries are often
     # symlinks (/usr/bin/python3 -> python3.14, uutils multicall).
     binary = binary.resolve(strict=True)
-    grants = [Grant(binary, "rx")]
+    binary_st = binary.lstat()
+    grants = [Grant(binary, "rx", dev=binary_st.st_dev, ino=binary_st.st_ino)]
     interp = _read_interp_path(binary)
     if interp is not None:
         # Resolve too: the interpreter path itself is usually a
         # symlink (/lib64/ld-linux-x86-64.so.2 -> ld-2.x.so),
         # and the helper never grants through a symlink.
-        grants.append(Grant(Path(interp).resolve(strict=True), "rx"))
+        interp_path = Path(interp).resolve(strict=True)
+        interp_st = interp_path.lstat()
+        grants.append(Grant(interp_path, "rx", dev=interp_st.st_dev, ino=interp_st.st_ino))
     return grants
 
 
@@ -705,16 +748,37 @@ def _compute_cwd_grants(
                     # Clean but weaker than the parent: one grant for
                     # the parent at its access would cover this subtree
                     # with write — expand to per-entry grants instead.
-                    local.append(Grant(entry_path, entry_access))
+                    local.append(
+                        Grant(
+                            entry_path,
+                            entry_access,
+                            dev=entry_st.st_dev,
+                            ino=entry_st.st_ino,
+                        )
+                    )
                     dirty = True
                 else:
-                    local.append(Grant(entry_path, entry_access))
+                    local.append(
+                        Grant(
+                            entry_path,
+                            entry_access,
+                            dev=entry_st.st_dev,
+                            ino=entry_st.st_ino,
+                        )
+                    )
             else:
-                local.append(Grant(entry_path, entry_access))
+                local.append(
+                    Grant(
+                        entry_path,
+                        entry_access,
+                        dev=entry_st.st_dev,
+                        ino=entry_st.st_ino,
+                    )
+                )
                 if entry_access != access:
                     dirty = True
         if not dirty:
-            return [Grant(directory, access)], False
+            return [Grant(directory, access, dev=st.st_dev, ino=st.st_ino)], False
         return local, True
 
     cwd_grants, _ = walk(cwd, 0, access)
@@ -885,6 +949,8 @@ def run_enforcement_probe(
     cannot open a TCP/UDP/pathname socket, cannot read a protected
     file nested inside its allowed tree, cannot change file metadata
     (chmod/chown/setxattr/utime — outside Landlock, closed by the
+    seccomp ban), cannot change another process's limits via
+    prlimit64 (outside Landlock and signal scope, closed by the
     seccomp ban), CAN read an allowed file, runs with the mapped uid,
     cannot signal processes outside its Landlock domain, and is
     placed in its own scope cgroup.
@@ -915,6 +981,8 @@ def run_enforcement_probe(
             # Grants cover only the allowed file individually — never
             # the whole probe dir, which would cover the protected
             # .env too.
+            ok_path = probe_dir / "ok.txt"
+            ok_st = ok_path.lstat()
             probe_spec = {
                 "version": 1,
                 "process_id": "probe",
@@ -935,13 +1003,8 @@ def run_enforcement_probe(
                 "cwd": str(probe_dir),
                 "timeout_s": PROBE_TARGET_TIMEOUT_S,
                 "run_dir": str(probe_dir),
-                "grants": [
-                    {"path": str(g.path), "access": g.access}
-                    for g in _system_grants() + _exec_grants(Path("/usr/bin/python3"))
-                ]
-                + [
-                    {"path": str(probe_dir / "ok.txt"), "access": "r"},
-                ],
+                "grants": _grants_wire(_system_grants() + _exec_grants(Path("/usr/bin/python3")))
+                + _grants_wire([Grant(ok_path, "r", dev=ok_st.st_dev, ino=ok_st.st_ino)]),
                 "outer_uid": os.getuid(),
                 "outer_gid": os.getgid(),
             }
@@ -1017,6 +1080,7 @@ def run_enforcement_probe(
                 "uid": verdict.get("uid"),
                 "signal": verdict.get("signal"),
                 "metadata": verdict.get("metadata"),
+                "prlimit": verdict.get("prlimit"),
                 "placement": placement_ok,
                 "landlock_abi": landlock_abi(),
             }
@@ -1029,6 +1093,7 @@ def run_enforcement_probe(
                 and verdict.get("uid") == 0
                 and verdict.get("signal") == "refused"
                 and verdict.get("metadata") == "refused"
+                and verdict.get("prlimit") == "refused"
                 and placement_ok
             )
             if not ok:
@@ -1331,7 +1396,8 @@ class HostProcessService:
         tmp_dir.mkdir(mode=0o700, exist_ok=True)
         grants = _system_grants()
         grants.extend(_compute_cwd_grants(self.fs_service, self.registry, profile, token=token))
-        grants.append(Grant(tmp_dir, "rw"))
+        tmp_st = tmp_dir.lstat()
+        grants.append(Grant(tmp_dir, "rw", dev=tmp_st.st_dev, ino=tmp_st.st_ino))
         grants.extend(_exec_grants(profile.binary))
         env = dict(_BASE_ENV)
         env["HOME"] = str(tmp_dir)
@@ -1351,7 +1417,7 @@ class HostProcessService:
             "cwd": str(cwd),
             "timeout_s": record.timeout_s,
             "run_dir": str(run_dir),
-            "grants": [{"path": str(g.path), "access": g.access} for g in grants],
+            "grants": _grants_wire(grants),
             "outer_uid": os.getuid(),
             "outer_gid": os.getgid(),
         }
@@ -1555,7 +1621,28 @@ class HostProcessService:
             truncated = offset < retained_from
             raw = tail[start - retained_from : start - retained_from + max_bytes]
             text, consumed = decode_slice(raw, start, total)
+            if raw and consumed == 0:
+                # FS read precedent: a limit smaller than the next
+                # character must fail loudly instead of returning
+                # zero bytes forever (the poll would never advance).
+                raise ProcessError(
+                    "invalid_params", "max_bytes is too small for the next character"
+                )
             return text, raw, start, start + consumed, truncated
+
+        def trim_chunk(raw: bytes, start: int, total: int) -> tuple[str, bytes, int]:
+            """Halve a chunk for the frame budget, never below one
+            full character and never stuck: halving into a bare
+            multibyte prefix extends to the first complete character,
+            so the poll still advances."""
+            shrunk = raw[: max(1, len(raw) // 2)]
+            text, consumed = decode_slice(shrunk, start, total)
+            if shrunk and consumed == 0:
+                lead = shrunk[0]
+                n = 1 if lead < 0x80 else 2 if lead < 0xE0 else 3 if lead < 0xF0 else 4
+                shrunk = raw[:n]
+                text, consumed = decode_slice(shrunk, start, total)
+            return text, shrunk, start + consumed
 
         stdout_text, stdout_raw, stdout_start, stdout_next, stdout_truncated = chunk(
             stdout_offset, stdout_total, record.stdout_retained_from, stdout_tail
@@ -1584,21 +1671,26 @@ class HostProcessService:
         }
         # Chunk by the serialized-JSON frame budget (same discipline as
         # the FS read path): shrink the longer chunk until it fits.
+        # One character is the floor: if a trim cannot shrink either
+        # chunk, stop instead of looping on the same bytes forever.
         while not _frame_fits(result, request_id):
+            before = (len(stdout_raw), len(stderr_raw))
             if stdout_text and len(stdout_text) >= len(stderr_text):
-                stdout_raw = stdout_raw[: max(1, len(stdout_raw) // 2)]
-                stdout_text, stdout_consumed = decode_slice(stdout_raw, stdout_start, stdout_total)
-                stdout_next = stdout_start + stdout_consumed
+                stdout_text, stdout_raw, stdout_next = trim_chunk(
+                    stdout_raw, stdout_start, stdout_total
+                )
             elif stderr_text:
-                stderr_raw = stderr_raw[: max(1, len(stderr_raw) // 2)]
-                stderr_text, stderr_consumed = decode_slice(stderr_raw, stderr_start, stderr_total)
-                stderr_next = stderr_start + stderr_consumed
+                stderr_text, stderr_raw, stderr_next = trim_chunk(
+                    stderr_raw, stderr_start, stderr_total
+                )
             else:
                 break
             result["stdout"] = stdout_text
             result["stderr"] = stderr_text
             result["stdout_next_offset"] = stdout_next
             result["stderr_next_offset"] = stderr_next
+            if (len(stdout_raw), len(stderr_raw)) == before:
+                break
         return result
 
     # -- kill ----------------------------------------------------------------
@@ -1644,12 +1736,18 @@ class HostProcessService:
                     "exit_code": record.exit_code,
                     "signal": record.exit_signal,
                 }
-        record.kill_requested = True
-        record.kill_reason = "killed"
-        record.state = "killing"
-        record.kill_deadline = time.monotonic() + KILL_GRACE_S
-        if record.handle is not None:
-            self._spawner.signal_tree(record.handle, signal.SIGTERM)
+        # A repeat kill observes the termination already in progress:
+        # it must not move the original deadline, must not re-signal
+        # the tree, and must not overwrite a "timeout" reason with
+        # "killed" — otherwise kills more frequent than the grace
+        # period postpone the cgroup SIGKILL indefinitely.
+        if not record.kill_requested:
+            record.kill_requested = True
+            record.kill_reason = "killed"
+            record.state = "killing"
+            record.kill_deadline = time.monotonic() + KILL_GRACE_S
+            if record.handle is not None:
+                self._spawner.signal_tree(record.handle, signal.SIGTERM)
         deadline = time.monotonic() + min(token.remaining_s, 4.0)
         while time.monotonic() < deadline:
             if self._try_finalize(record):
