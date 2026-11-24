@@ -35,6 +35,7 @@ scope leader is reaped.
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import re
@@ -365,19 +366,20 @@ def _decode_poll_chunk(raw: bytes, *, at_eof: bool) -> tuple[str, int]:
     Unlike the FS read path (which rejects invalid UTF-8), poll
     replaces undecodable bytes with U+FFFD — process output is
     untrusted bytes, not a file the model asked to read exactly.
-    A trailing incomplete sequence is held back (not consumed) until
-    the stream is finished, so it can complete in the next chunk.
+    An incremental decoder holds a trailing incomplete sequence
+    back (not consumed) until the stream is finished, so it can
+    complete in the next chunk. Crucially, an invalid byte earlier
+    in the chunk must not eat that suffix: for b"\\xff\\xe2\\x82"
+    the first poll returns "\\ufffd" consuming 1 byte, and the
+    next poll (re-read from the tail at the new offset) completes
+    "\\u20ac". A hand-rolled split on the first decode error
+    cannot do this: the first error is about the invalid byte, so
+    it replaces — and consumes — the incomplete suffix as well.
     """
-    data = raw
-    while data:
-        try:
-            return data.decode("utf-8"), len(data)
-        except UnicodeDecodeError as exc:
-            if not at_eof and exc.reason == "unexpected end of data" and exc.end == len(data):
-                data = data[: exc.start]
-                continue
-            return data.decode("utf-8", errors="replace"), len(data)
-    return "", 0
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    text = decoder.decode(raw, final=at_eof)
+    pending = decoder.getstate()[0]
+    return text, len(raw) - len(pending)
 
 
 # --- profile loading (fail-closed, same discipline as fs.load_registry)
@@ -1420,7 +1422,29 @@ class HostProcessService:
         except RequestTimeoutError:
             raise
         except BaseException as exc:
-            self._finalize(record, "spawn_failed")
+            # A failure before the spawner returned means no process
+            # was ever created: settle the record now. A failure
+            # after the spawn started (or with unknown outcome) must
+            # NOT finalize: the tree may still be alive, and every
+            # cleanup path skips final records (_reap_once, _kill,
+            # shutdown) — finalizing here would leave the tree
+            # outside the 120 s enforcement. A transient signal-send
+            # error (e.g. systemctl timing out on SIGTERM while the
+            # spawn deadline expires) is exactly such a failure: the
+            # handle exists, the tree may be alive. Hand the record
+            # to the reaper instead: it is already in "killing"
+            # state (or put it there, without moving an existing
+            # kill deadline), which destroys the tree after the
+            # grace period and finalizes once the cgroup is empty.
+            if not record.spawn_started:
+                self._finalize(record, "spawn_failed")
+            elif not record.final:
+                if not record.kill_requested:
+                    record.kill_requested = True
+                    record.kill_reason = "cancelled"
+                    record.state = "killing"
+                    record.kill_deadline = time.monotonic() + KILL_GRACE_S
+                record.settled.set()
             raise ProcessError("spawn_failed", f"spawn failed: {exc}") from exc
         return self._run_result(record, wait_settled=True, token=token)
 

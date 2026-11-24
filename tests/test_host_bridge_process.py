@@ -1147,6 +1147,39 @@ def test_poll_chunk_eof_is_per_slice(service: HostProcessService, spawner: FakeS
     assert first["stdout"] + second["stdout"] + third["stdout"] == "a€b"
 
 
+def test_decode_poll_chunk_keeps_suffix_after_invalid_byte() -> None:
+    """An invalid byte must not eat a following incomplete sequence:
+    the decoder replaces only the bad byte and holds the suffix back
+    for the next chunk."""
+    decode = process_module._decode_poll_chunk
+    assert decode(b"\xff\xe2\x82", at_eof=False) == ("\ufffd", 1)
+    assert decode(b"\xe2\x82\xac", at_eof=True) == ("€", 3)
+    assert decode(b"\xe2\x82", at_eof=False) == ("", 0)
+    assert decode(b"\xe2\x82", at_eof=True) == ("\ufffd", 2)
+    assert decode(b"a\xffb", at_eof=False) == ("a\ufffdb", 3)
+
+
+def test_poll_invalid_byte_before_incomplete_char(
+    service: HostProcessService, spawner: FakeSpawner
+) -> None:
+    """Through the service: stdout b"\\xff\\xe2\\x82\\xac" polled
+    with max_bytes=3 must give "\\ufffd" then "€" — the correct
+    character after the bad byte must survive the chunk boundary,
+    not be replaced along with it."""
+    result = _run(service, "true", "req-bad-byte")
+    process_id = result["process_id"]
+    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    spawner.finish(handle, state="exited", exit_code=0, stdout=b"\xff\xe2\x82\xac")
+    _wait_state(service, process_id, "exited")
+    first = _poll(service, process_id, max_bytes=3)
+    assert first["stdout"] == "\ufffd"
+    assert first["stdout_next_offset"] == 1
+    second = _poll(service, process_id, stdout_offset=first["stdout_next_offset"], max_bytes=3)
+    assert second["stdout"] == "€"
+    assert second["stdout_next_offset"] == 4
+    assert first["stdout"] + second["stdout"] == "\ufffd€"
+
+
 def test_poll_max_bytes_smaller_than_char(
     service: HostProcessService, spawner: FakeSpawner
 ) -> None:
@@ -1369,6 +1402,65 @@ def test_helper_crash_before_first_status_kills_tree(
             time.sleep(0.02)
         assert record.final
         assert record.state == "killed"
+    finally:
+        svc.shutdown()
+
+
+class _SignalTimeoutSpawner(FakeSpawner):
+    """A spawner whose SIGTERM send times out (systemctl hangs):
+    the launch deadline expires, the signal never lands, and the
+    tree must stay under reaper control — not finalize while alive."""
+
+    def spawn(self, spec_path: Path, *, unit_name: str, run_dir: Path) -> SpawnHandle:
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        self.spawns.append(spec)
+        leader = subprocess.Popen(
+            ["sleep", "30"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        handle = SpawnHandle(popen=leader, unit_name=unit_name, cgroup_path=None, run_dir=run_dir)
+        self.units[unit_name] = {"handle": handle, "procs": [str(leader.pid)]}
+        # No status file is ever written: the launch never confirms.
+        return handle
+
+    def signal_tree(self, handle: SpawnHandle, sig: int) -> None:
+        self.signal_calls.append((handle.unit_name, sig))
+        raise subprocess.TimeoutExpired("systemctl", 5)
+
+
+def test_signal_timeout_after_spawn_keeps_tree_under_cleanup(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the SIGTERM send times out while the spawn deadline
+    expires, the record must not finalize while the tree may still
+    be alive: a transient signal error must not switch off the
+    120 s enforcement. The reaper destroys the tree after the grace
+    period and finalizes once the cgroup is empty."""
+    monkeypatch.setattr(process_module, "SPAWN_START_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(process_module, "KILL_GRACE_S", 0.3)
+    spawner = _SignalTimeoutSpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    try:
+        with pytest.raises(ProcessError) as excinfo:
+            _run(svc, "true", "req-signal-timeout")
+        assert excinfo.value.code == "spawn_failed"
+        process_id = svc._by_request_id["req-signal-timeout"]
+        record = svc._records[process_id]
+        assert not record.final
+        assert record.state == "killing"
+        assert spawner.signal_calls, "the SIGTERM attempt never happened"
+        assert not spawner.kill_calls, "the tree was destroyed before the grace period"
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not record.final:
+            svc._reap_once()
+            time.sleep(0.02)
+        assert record.final
+        assert record.state == "killed"
+        assert spawner.kill_calls, "the tree was never destroyed"
     finally:
         svc.shutdown()
 
