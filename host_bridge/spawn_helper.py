@@ -132,6 +132,29 @@ _ACCESS_BITS: dict[str, int] = {
     ),
     # Read + execute (system binary/library trees only).
     "rx": _LL_READ_FILE | _LL_READ_DIR | _LL_EXECUTE,
+    # Directory operations only: list/create/remove/rename entries,
+    # but NO file-content rights (READ_FILE/WRITE_FILE/TRUNCATE).
+    # A path-beneath rule on a directory covers every file created
+    # beneath it later, so a full "rw" rule on a directory would also
+    # cover a secret file the owner drops in after the walk (a
+    # long-lived profile would gain credential material _classify()
+    # would deny). Directory rules therefore never carry file-content
+    # bits; each allowed file gets its own rule instead, and the
+    # directory keeps only the operations on its own entries (this
+    # is what lets a profile listdir('.'), create entries and rename
+    # between granted directories while a protected file nested
+    # inside stays denied).
+    "dir": (
+        _LL_READ_DIR
+        | _LL_REMOVE_DIR
+        | _LL_REMOVE_FILE
+        | _LL_MAKE_DIR
+        | _LL_MAKE_REG
+        | _LL_MAKE_SYM
+        | _LL_REFER
+    ),
+    # Read-only directory operations: list only.
+    "rdir": _LL_READ_DIR,
 }
 
 # Access bits that apply to a single file (or device node). The

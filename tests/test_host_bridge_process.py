@@ -768,6 +768,86 @@ def test_cwd_grants_carry_identity(home: Path, tmp_path: Path) -> None:
         assert grant["ino"] == st.st_ino
 
 
+def test_cwd_grants_use_dir_ops_not_file_rights(home: Path, tmp_path: Path) -> None:
+    """No directory grant in the cwd tree carries file-content rights:
+    a directory rule covers every file created beneath it later, so a
+    full "rw" rule on a directory would let a long-lived profile read
+    a secret the owner drops in after the walk. Directories get
+    directory-operations-only rights ("dir") and each allowed file
+    gets its own file rule."""
+    work = (home / "Project" / "work").resolve()
+    (work / "data.txt").write_text("data\n", encoding="utf-8")
+    (work / "sub" / "inner.txt").write_text("inner\n", encoding="utf-8")
+    registry = _registry_with_exclusions(home, ())
+    fs = HostFsService(registry, trash_root=tmp_path / "Trash")
+    spawner = FakeSpawner()
+    svc = _service_with_spawner(fs, registry, tmp_path, spawner)
+    try:
+        _run(svc, "true", "req-dir-ops")
+    finally:
+        svc.shutdown()
+    grants = [g for g in spawner.spawns[-1]["grants"] if str(g["path"]).startswith(str(work))]
+    by_path = {str(g["path"]): g for g in grants}
+    # Directories: operations only, never file-content rights.
+    assert by_path[str(work)]["access"] == "dir"
+    assert by_path[str(work / "sub")]["access"] == "dir"
+    # Allowed files: their own file rules.
+    assert by_path[str(work / "data.txt")]["access"] == "rw"
+    assert by_path[str(work / "sub" / "inner.txt")]["access"] == "rw"
+    assert by_path[str(work / "notes.txt")]["access"] == "rw"
+    # The protected file: no grant, and no file-content grant covers it.
+    assert str(work / ".env") not in by_path
+    assert not any(
+        g["access"] in ("r", "rw", "rx") and (work / ".env").is_relative_to(Path(str(g["path"])))
+        for g in grants
+    )
+
+
+def test_cwd_grants_ro_tree_uses_read_only_dir_ops(home: Path, tmp_path: Path) -> None:
+    """A read-only root gets read-only directory operations ("rdir",
+    list only) and read-only file rules — no creation, no removal,
+    no writes anywhere in the tree."""
+    docs = (home / "Documents" / "docs").resolve()
+    (docs / "sub").mkdir()
+    (docs / "read.txt").write_text("read\n", encoding="utf-8")
+    (docs / "sub" / "inner.txt").write_text("inner\n", encoding="utf-8")
+    config = _write_config(
+        home,
+        _profiles(
+            [
+                {
+                    "id": "docreader",
+                    "binary": _TRUE,
+                    "cwd": {"root_id": "docs", "path": "."},
+                }
+            ]
+        ),
+    )
+    registry = RootsRegistry(
+        roots=(
+            Root(id="work", path=(home / "Project" / "work").resolve(), mode="rw"),
+            Root(id="docs", path=docs, mode="ro"),
+        ),
+        write_excluded=(),
+        home=home.resolve(),
+        config_path=config,
+        socket_dir=None,
+    )
+    fs = HostFsService(registry, trash_root=tmp_path / "Trash")
+    spawner = FakeSpawner()
+    svc = _service_with_spawner(fs, registry, tmp_path, spawner)
+    try:
+        _run(svc, "docreader", "req-ro-dir-ops")
+    finally:
+        svc.shutdown()
+    grants = spawner.spawns[-1]["grants"]
+    by_path = {str(g["path"]): g for g in grants}
+    assert by_path[str(docs)]["access"] == "rdir"
+    assert by_path[str(docs / "sub")]["access"] == "rdir"
+    assert by_path[str(docs / "read.txt")]["access"] == "r"
+    assert by_path[str(docs / "sub" / "inner.txt")]["access"] == "r"
+
+
 def test_cwd_grant_refuses_protected_cwd(home: Path, tmp_path: Path) -> None:
     """A cwd that classifies as protected ("credentials") gets no
     grant at all: the walk classifies every child, never the cwd
@@ -892,8 +972,14 @@ def test_cwd_grants_skip_bind_mounted_file(home: Path, tmp_path: Path) -> None:
     finally:
         svc.shutdown()
     grants = spawner.spawns[-1]["grants"]
+    # A bind-mounted file must never get a file-content grant: a
+    # directory-operations-only grant on an ancestor is fine (it
+    # carries no READ_FILE/WRITE_FILE), but no "r"/"rw" rule may
+    # cover the bound file itself or through an ancestor.
     assert not any(
-        bound == Path(str(g["path"])) or bound.is_relative_to(Path(str(g["path"]))) for g in grants
+        Path(str(g["path"])) == bound
+        or (g["access"] in ("r", "rw", "rx") and bound.is_relative_to(Path(str(g["path"]))))
+        for g in grants
     ), "a bind-mounted file must never be granted"
     assert any(
         g["access"] == "rw" and (work / "open.txt").is_relative_to(Path(str(g["path"])))
@@ -2176,6 +2262,154 @@ def test_landlock_mkfifo_denied_even_in_granted_cwd(tmp_path: Path) -> None:
     assert (run_dir / "stdout").read_bytes() == b"refused\n"
 
 
+def test_landlock_dir_ops_allow_listdir_and_granted_file(tmp_path: Path) -> None:
+    """Directory-operations-only rules let a profile listdir('.') and
+    read/write its granted files — the N2 behaviour — while an
+    ungranted file nested inside stays denied."""
+    from host_bridge.spawn_helper import landlock_abi
+
+    if landlock_abi() is None:
+        pytest.skip("Landlock is unavailable in this environment")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "data.txt").write_text("orig\n", encoding="utf-8")
+    (work / "secret.txt").write_text("SECRET\n", encoding="utf-8")
+    spec = _supervisor_spec(
+        run_dir,
+        work,
+        "import os\n"
+        "print('listdir:' + ('ok' if 'data.txt' in os.listdir('.') else 'missing'))\n"
+        "print('read:' + open('data.txt').read().strip())\n"
+        "open('data.txt', 'a').write('more')\n"
+        "print('append:ok')\n"
+        "try:\n"
+        "    open('secret.txt').read()\n"
+        "    print('secret:allowed')\n"
+        "except OSError as e:\n"
+        "    print('secret:refused' if e.errno in (1, 13) else 'secret:error:%d' % e.errno)\n",
+    )
+    spec["grants"] = [
+        *spec["grants"],
+        {"path": str(work), "access": "dir"},
+        {"path": str(work / "data.txt"), "access": "rw"},
+    ]
+    code, _ = _run_supervisor(spec, run_dir)
+    assert code == 0
+    out = (run_dir / "stdout").read_bytes().decode("utf-8")
+    assert "listdir:ok" in out
+    assert "read:orig" in out
+    assert "append:ok" in out
+    assert "secret:refused" in out
+
+
+def test_landlock_late_file_unreadable(tmp_path: Path) -> None:
+    """A file created under a granted directory after the rules were
+    installed stays unreadable and unwritable: the directory rule
+    carries directory-operation rights only, never file-content
+    rights. (With the old grant shape — a full "rw" rule on the
+    directory — both the write and the read succeed.)"""
+    from host_bridge.spawn_helper import landlock_abi
+
+    if landlock_abi() is None:
+        pytest.skip("Landlock is unavailable in this environment")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "data.txt").write_text("orig\n", encoding="utf-8")
+    spec = _supervisor_spec(
+        run_dir,
+        work,
+        "import os\n"
+        "try:\n"
+        "    fd = os.open('.env', os.O_CREAT | os.O_WRONLY, 0o644)\n"
+        "    os.write(fd, b'TOKEN=x')\n"
+        "    os.close(fd)\n"
+        "    print('late-write:allowed')\n"
+        "except OSError as e:\n"
+        "    print('late-write:refused' if e.errno in (1, 13) else 'late-write:error')\n"
+        "try:\n"
+        "    open('.env').read()\n"
+        "    print('late-read:allowed')\n"
+        "except OSError as e:\n"
+        "    print('late-read:refused' if e.errno in (1, 13) else 'late-read:error')\n",
+    )
+    spec["grants"] = [
+        *spec["grants"],
+        {"path": str(work), "access": "dir"},
+        {"path": str(work / "data.txt"), "access": "rw"},
+    ]
+    code, _ = _run_supervisor(spec, run_dir)
+    assert code == 0
+    out = (run_dir / "stdout").read_bytes().decode("utf-8")
+    assert "late-write:refused" in out
+    assert "late-read:refused" in out
+
+
+def test_landlock_new_file_write_and_rename_limits(tmp_path: Path) -> None:
+    """Accepted limits of directory-operations-only rules (verified
+    live): a new file created directly in the tree can be created
+    (empty) but not written, and an atomic tmp+rename update lands
+    but the new inode is not covered by the inode-bound file rule,
+    so the updated file is unreadable to the profile afterwards.
+    Both are loud EACCES failures, not silent corruption."""
+    from host_bridge.spawn_helper import landlock_abi
+
+    if landlock_abi() is None:
+        pytest.skip("Landlock is unavailable in this environment")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    work = tmp_path / "work"
+    scratch = tmp_path / "scratch"
+    work.mkdir()
+    scratch.mkdir()
+    (work / "data.txt").write_text("orig\n", encoding="utf-8")
+    spec = _supervisor_spec(
+        run_dir,
+        work,
+        "import os\n"
+        "scratch = " + repr(str(scratch)) + "\n"
+        "try:\n"
+        "    fd = os.open('result.txt', os.O_CREAT | os.O_WRONLY, 0o644)\n"
+        "    os.write(fd, b'new')\n"
+        "    os.close(fd)\n"
+        "    print('create-write:allowed')\n"
+        "except OSError as e:\n"
+        "    print('create-write:refused' if e.errno in (1, 13) else 'create-write:error')\n"
+        "try:\n"
+        "    open('result.txt').read()\n"
+        "    print('read-new:allowed')\n"
+        "except FileNotFoundError:\n"
+        "    print('read-new:missing')\n"
+        "except OSError as e:\n"
+        "    print('read-new:refused' if e.errno in (1, 13) else 'read-new:error:%d' % e.errno)\n"
+        "with open(os.path.join(scratch, 'tmp.txt'), 'w') as fh:\n"
+        "    fh.write('atomic')\n"
+        "os.rename(os.path.join(scratch, 'tmp.txt'), 'data.txt')\n"
+        "print('rename:ok')\n"
+        "try:\n"
+        "    open('data.txt').read()\n"
+        "    print('read-renamed:allowed')\n"
+        "except OSError as e:\n"
+        "    print('read-renamed:refused' if e.errno in (1, 13) else 'read-renamed:error')\n",
+    )
+    spec["grants"] = [
+        *spec["grants"],
+        {"path": str(work), "access": "dir"},
+        {"path": str(work / "data.txt"), "access": "rw"},
+        {"path": str(scratch), "access": "rw"},
+    ]
+    code, _ = _run_supervisor(spec, run_dir)
+    assert code == 0
+    out = (run_dir / "stdout").read_bytes().decode("utf-8")
+    assert "create-write:refused" in out
+    assert "read-new:refused" in out
+    assert "rename:ok" in out
+    assert "read-renamed:refused" in out
+
+
 def test_seccomp_setpriority_foreign_pid_denied(tmp_path: Path) -> None:
     """setpriority on another process is refused by the seccomp ban:
     with no PID namespace and matching kernel credentials, a profile
@@ -2495,6 +2729,69 @@ def _live_profiles(work: Path, bin_dir: Path) -> list[dict[str, object]]:
             "cwd": {"root_id": "work", "path": "."},
         }
     )
+    profiles.append(
+        {
+            "id": "py_dirops",
+            "binary": _PY,
+            "argv_prefix": [
+                "-c",
+                "import os\n"
+                "try:\n"
+                "    print('listdir:' + ('ok' if 'notes.txt' in os.listdir('.') else 'missing'))\n"
+                "except OSError as e:\n"
+                "    print('listdir:refused:%d' % e.errno)\n"
+                "try:\n"
+                "    _n = open('notes.txt').read()\n"
+                "    print('notes:' + ('read' if 'hello' in _n else 'wrong'))\n"
+                "except OSError as e:\n"
+                "    print('notes:refused:%d' % e.errno)\n"
+                "try:\n"
+                "    with open('result.txt', 'w') as fh:\n"
+                "        fh.write('new')\n"
+                "    print('create:allowed')\n"
+                "except OSError as e:\n"
+                "    print('create:refused:%d' % e.errno)\n"
+                "try:\n"
+                "    _tmp = os.path.join(os.environ['TMPDIR'], 'tmp.txt')\n"
+                "    with open(_tmp, 'w') as fh:\n"
+                "        fh.write('atomic')\n"
+                "    os.rename(_tmp, 'notes2.txt')\n"
+                "    print('rename:ok')\n"
+                "except OSError as e:\n"
+                "    print('rename:refused:%d' % e.errno)\n"
+                "try:\n"
+                "    open('notes2.txt').read()\n"
+                "    print('read-renamed:allowed')\n"
+                "except OSError as e:\n"
+                "    print('read-renamed:refused:%d' % e.errno)\n",
+            ],
+            "cwd": {"root_id": "work", "path": "."},
+        }
+    )
+    profiles.append(
+        {
+            "id": "py_late_secret",
+            "binary": _PY,
+            "argv_prefix": [
+                "-c",
+                "import os, time\n"
+                "found = 'missing'\n"
+                "for _ in range(25):\n"
+                "    try:\n"
+                "        data = open('late.env').read()\n"
+                "        found = 'read:' + data.strip()\n"
+                "        break\n"
+                "    except FileNotFoundError:\n"
+                "        pass\n"
+                "    except OSError as e:\n"
+                "        found = 'refused:%d' % e.errno\n"
+                "        break\n"
+                "    time.sleep(0.2)\n"
+                "print(found)\n",
+            ],
+            "cwd": {"root_id": "work", "path": "clean"},
+        }
+    )
     return profiles
 
 
@@ -2569,6 +2866,7 @@ def test_live_probe_reports_all_layers(live: tuple[HostProcessService, Path]) ->
     assert probe.checks["metadata"] == "refused"
     assert probe.checks["prlimit"] == "refused"
     assert probe.checks["fifo"] == "refused"
+    assert probe.checks["late"] == "refused"
     assert probe.checks["setpriority"] == "refused"
     assert probe.checks["scheduler"] == "refused"
     assert probe.checks["uid"] == 0
@@ -2771,3 +3069,35 @@ def test_live_idempotent_retry(live: tuple[HostProcessService, Path]) -> None:
     assert first["process_id"] == second["process_id"]
     assert sum(1 for pid in svc._records if pid == first["process_id"]) == 1
     _kill(svc, first["process_id"])
+
+
+def test_live_cwd_dir_ops(live: tuple[HostProcessService, Path]) -> None:
+    """N2 through the real service: a dirty cwd (it contains .env)
+    still allows listdir and renames, and a granted file stays
+    readable — the directory itself keeps its own operations even
+    though it carries no file-content rights."""
+    svc, _ = live
+    run = _run(svc, "py_dirops", "live-dirops")
+    final = _live_wait(svc, run["process_id"], "exited")
+    assert "listdir:ok" in final["stdout"], final
+    assert "notes:read" in final["stdout"], final
+    assert "create:refused" in final["stdout"], final
+    assert "rename:ok" in final["stdout"], final
+    assert "read-renamed:refused" in final["stdout"], final
+
+
+def test_live_late_secret_denied(live: tuple[HostProcessService, Path]) -> None:
+    """N1 through the real service: a secret created in a clean cwd
+    AFTER the walk stays unreadable to the running profile — the
+    directory rule carries directory-operation rights only, never
+    file-content rights."""
+    svc, work = live
+    clean = work / "clean"
+    clean.mkdir(exist_ok=True)
+    (clean / "data.txt").write_text("data\n", encoding="utf-8")
+    run = _run(svc, "py_late_secret", "live-late-secret")
+    time.sleep(1.0)
+    (clean / "late.env").write_text("LATE-SECRET\n", encoding="utf-8")
+    final = _live_wait(svc, run["process_id"], "exited")
+    assert "refused" in final["stdout"], final
+    assert "LATE-SECRET" not in final["stdout"], final

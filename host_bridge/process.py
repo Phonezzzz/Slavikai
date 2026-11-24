@@ -89,7 +89,11 @@ SPAWN_START_TIMEOUT_S = 10.0
 PROBE_TIMEOUT_S = 20.0
 PROBE_TARGET_TIMEOUT_S = 10
 GRANT_WALK_MAX_ENTRIES = 20_000
-GRANT_WALK_MAX_GRANTS = 5_000
+# Grants are now ~one per file + one per directory (directory rules
+# carry no file-content rights, so every allowed file needs its own
+# rule): the cap tracks the entries cap plus the system/exec/tmp
+# grants, so no tree the walk accepts can fail on grant count.
+GRANT_WALK_MAX_GRANTS = GRANT_WALK_MAX_ENTRIES + 100
 GRANT_WALK_MAX_DEPTH = 128
 POLL_MAX_BYTES = 32 * 1024
 POLL_DEFAULT_MAX_BYTES = 8 * 1024
@@ -154,7 +158,7 @@ import json, os, socket, sys, time
 result = {"tcp": "unknown", "udp": "unknown", "unix": "unknown",
           "protected": "unknown", "allowed": "unknown", "uid": None,
           "signal": "unknown", "metadata": "unknown", "prlimit": "unknown",
-          "fifo": "unknown", "setpriority": "unknown",
+          "fifo": "unknown", "setpriority": "unknown", "late": "unknown",
           "scheduler": "unknown"}
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -248,6 +252,36 @@ try:
         pass
 except OSError as e:
     result["fifo"] = "refused" if e.errno in (1, 13) else f"error:{e.errno}"
+# A file created in the cwd after the grants were computed must stay
+# unreadable and unwritable: directory rules carry directory-operation
+# rights only, never file-content rights, or a secret the owner drops
+# in after the walk would leak to a long-lived profile. Creating the
+# file itself must succeed (MAKE_REG is a directory operation); only
+# writing to it and reading it back must be refused.
+try:
+    _fd = os.open("probe-late.txt", os.O_CREAT | os.O_WRONLY, 0o644)
+    try:
+        os.write(_fd, b"late")
+    finally:
+        os.close(_fd)
+    result["late"] = "allowed:write"
+except OSError as e:
+    if e.errno not in (1, 13):
+        result["late"] = f"error:write:{e.errno}"
+    else:
+        # The write half was refused. The file itself is still
+        # created first (MAKE_REG is a directory operation), so a
+        # read attempt distinguishes "never created" (the dir-op
+        # grant is broken) from "created but unreadable" (correct):
+        # ENOENT vs EACCES.
+        try:
+            with open("probe-late.txt", "r", encoding="utf-8") as _fh:
+                _fh.read()
+            result["late"] = "allowed:read"
+        except FileNotFoundError:
+            result["late"] = "error:create:missing"
+        except OSError as e2:
+            result["late"] = "refused" if e2.errno in (1, 13) else f"error:read:{e2.errno}"
 # setpriority is outside Landlock and signal scope, like prlimit64:
 # with no PID namespace and matching kernel credentials, the target
 # must not renice another process. Fork a sacrificial child and try
@@ -333,7 +367,7 @@ class ProcessError(BridgeProtocolError):
 @dataclass(frozen=True)
 class Grant:
     path: Path
-    access: str  # "r" | "rw" | "rx"
+    access: str  # "r" | "rw" | "rx" | "dir" | "rdir" (dir ops only, no file content)
     # Identity the daemon recorded when it verified the object.
     # The helper opens the path without following symlinks and
     # refuses the whole spawn when the fd is a different object
@@ -738,17 +772,43 @@ def _compute_cwd_grants(
 ) -> list[Grant]:
     """Grant only explicitly allowed parts of the profile cwd tree.
 
-    A directory whose whole scanned subtree is clean (no protected
-    entries, no symlinks, no nested mounts) is granted as one rule;
-    a dirty directory is expanded into per-entry grants for its clean
-    children, so a secret nested inside an allowed tree is never
-    covered by a parent grant. Symlinks are never granted or followed
-    (Landlock checks the resolved target, so a granted symlink would
-    hand out whatever it points to). Write-exclusion is per path:
-    a subtree the FS API refuses to write (config ``write_excluded``
-    or a SlavikAI checkout) is granted read-only, never ``rw``, and
-    a parent is never granted as one ``rw`` rule over a weaker child
-    (ADR-0013 §9).
+    Every directory gets a directory-operations-only rule (``dir``
+    for a writable tree, ``rdir`` for a read-only one) and every
+    allowed file gets its own file rule: a Landlock path-beneath rule
+    on a directory covers every file created beneath it later, so a
+    full ``rw`` rule on a directory would let a long-lived profile
+    read a secret file the owner drops in after the walk (the
+    directory's (dev, ino) does not change and there is no
+    re-classification at runtime). Directory rules therefore never
+    carry file-content rights, while the directory itself still
+    keeps its own operations (list, create, remove, rename), so a
+    protected file nested inside an allowed tree stays denied and
+    an approved command can still listdir('.') and move files
+    between granted directories. Symlinks are never granted or
+    followed (Landlock checks the resolved target, so a granted
+    symlink would hand out whatever it points to). Write-exclusion
+    is per path: a subtree the FS API refuses to write (config
+    ``write_excluded`` or a SlavikAI checkout) is granted read-only,
+    never ``rw`` (ADR-0013 §9).
+
+    Verified live on the host (not by reasoning alone): with
+    directory-operations-only rules a profile can listdir('.') and
+    read/write its granted files, cannot read or write a file
+    created under the directory after the rules were installed, and
+    cannot read an ungranted file that was there all along. Two
+    limits follow from Landlock rule semantics and are accepted,
+    not worked around: a new file created directly in the tree can
+    be created (empty) but not written or read — new content goes
+    in $TMPDIR (a full rw grant) and is hard-linked into the tree,
+    which keeps it writable via the tmp path and visible to the
+    owner in the tree; and an atomic tmp+rename update of a granted
+    file lands but the new inode is not covered by the inode-bound
+    file rule, so the updated file is unreadable/unwritable to the
+    profile afterwards (in-place writes to granted files still
+    work). The design that would remove both limits — an isolated
+    filesystem view (mount namespace + bind mounts of only the
+    granted files) — is a design decision for the owner, not part
+    of this ticket.
     """
     root = registry.by_id(profile.cwd_root_id)
     if root is None:
@@ -771,7 +831,7 @@ def _compute_cwd_grants(
         if lexical in mount_points:
             raise ProcessError("spawn_failed", "cwd crosses a nested mount")
 
-    def walk(directory: Path, depth: int, access: str) -> tuple[list[Grant], bool]:
+    def walk(directory: Path, depth: int, access: str) -> list[Grant]:
         nonlocal entries_seen
         if depth > GRANT_WALK_MAX_DEPTH:
             raise ProcessError("spawn_failed", "grant walk too deep")
@@ -789,8 +849,12 @@ def _compute_cwd_grants(
             # followed into a directory outside the root.
             raise ProcessError("spawn_failed", "cwd is not a directory")
         base_dev = st.st_dev
-        local: list[Grant] = []
-        dirty = False
+        # The directory itself gets directory-operation rights only
+        # ("dir" for a writable tree, "rdir" for a read-only one):
+        # never file-content rights, or a file created beneath it
+        # after the walk would inherit them.
+        dir_access = "dir" if access == "rw" else "rdir"
+        grants: list[Grant] = [Grant(directory, dir_access, dev=st.st_dev, ino=st.st_ino)]
         try:
             with os.scandir(directory) as it:
                 children = list(it)
@@ -804,8 +868,7 @@ def _compute_cwd_grants(
             try:
                 entry_st = entry.stat(follow_symlinks=False)
             except OSError:
-                dirty = True
-                continue
+                continue  # unreadable entry: never granted
             if entry.is_symlink():
                 continue  # never granted, never followed
             entry_path = directory / entry.name
@@ -814,49 +877,21 @@ def _compute_cwd_grants(
                 # it): never granted, never descended — the FS API
                 # refuses nested mounts the same way, including the
                 # final file component.
-                dirty = True
                 continue
             if entry_st.st_dev != base_dev:
-                dirty = True  # nested mount: not granted, not descended
-                continue
+                continue  # nested mount: not granted, not descended
             classification = fs_service._classify(entry_path, mutation=False)
             if classification != "normal":
-                dirty = True
-                continue
+                continue  # protected: never granted
             # Write-exclusion is per path: a writable parent may hold
             # an excluded child, whose subtree is read-only.
             entry_access = access
             if access == "rw" and fs_service.is_write_excluded(root, entry_path):
                 entry_access = "r"
             if entry.is_dir(follow_symlinks=False):
-                sub, sub_dirty = walk(entry_path, depth + 1, entry_access)
-                if sub_dirty:
-                    local.extend(sub)
-                    dirty = True
-                elif entry_access != access:
-                    # Clean but weaker than the parent: one grant for
-                    # the parent at its access would cover this subtree
-                    # with write — expand to per-entry grants instead.
-                    local.append(
-                        Grant(
-                            entry_path,
-                            entry_access,
-                            dev=entry_st.st_dev,
-                            ino=entry_st.st_ino,
-                        )
-                    )
-                    dirty = True
-                else:
-                    local.append(
-                        Grant(
-                            entry_path,
-                            entry_access,
-                            dev=entry_st.st_dev,
-                            ino=entry_st.st_ino,
-                        )
-                    )
+                grants.extend(walk(entry_path, depth + 1, entry_access))
             else:
-                local.append(
+                grants.append(
                     Grant(
                         entry_path,
                         entry_access,
@@ -864,11 +899,7 @@ def _compute_cwd_grants(
                         ino=entry_st.st_ino,
                     )
                 )
-                if entry_access != access:
-                    dirty = True
-        if not dirty:
-            return [Grant(directory, access, dev=st.st_dev, ino=st.st_ino)], False
-        return local, True
+        return grants
 
     # The walk classifies every child, but never the cwd itself: a
     # profile with cwd="credentials" would get one rw grant over the
@@ -882,8 +913,7 @@ def _compute_cwd_grants(
         raise ProcessError("spawn_failed", f"cwd cannot be classified: {exc}") from exc
     if cwd_classification != "normal":
         raise ProcessError("spawn_failed", "cwd is protected by host policy")
-    cwd_grants, _ = walk(cwd, 0, access)
-    grants.extend(cwd_grants)
+    grants.extend(walk(cwd, 0, access))
     if len(grants) > GRANT_WALK_MAX_GRANTS:
         raise ProcessError("spawn_failed", "too many Landlock grants")
     return grants
@@ -1056,7 +1086,10 @@ def run_enforcement_probe(
     (same family, same ban), cannot move another process to a
     different scheduling policy via sched_setscheduler/sched_setattr
     (same family, same ban), cannot create a named pipe via mkfifo
-    (MAKE_FIFO is handled by Landlock with no allowing grant), CAN
+    (MAKE_FIFO is handled by Landlock with no allowing grant), cannot
+    read or write a file created in its cwd after the grants were
+    installed (directory rules carry directory-operation rights only,
+    never file-content rights), CAN
     read an allowed file, runs with the mapped uid, cannot signal
     processes outside its Landlock domain, and is placed in its own
     scope cgroup.
@@ -1084,11 +1117,14 @@ def run_enforcement_probe(
                 )
             # The probe dir is the cwd (the helper chdirs before
             # Landlock is installed, so no grant is needed for it).
-            # Grants cover only the allowed file individually — never
-            # the whole probe dir, which would cover the protected
-            # .env too.
+            # Grants cover only the allowed file individually, plus
+            # directory-operation rights on the probe dir itself (the
+            # "late" check needs to create a file there) — never a
+            # file-content rule on the whole probe dir, which would
+            # cover the protected .env too.
             ok_path = probe_dir / "ok.txt"
             ok_st = ok_path.lstat()
+            probe_st = probe_dir.lstat()
             probe_spec = {
                 "version": 1,
                 "process_id": "probe",
@@ -1110,7 +1146,12 @@ def run_enforcement_probe(
                 "timeout_s": PROBE_TARGET_TIMEOUT_S,
                 "run_dir": str(probe_dir),
                 "grants": _grants_wire(_system_grants() + _exec_grants(Path("/usr/bin/python3")))
-                + _grants_wire([Grant(ok_path, "r", dev=ok_st.st_dev, ino=ok_st.st_ino)]),
+                + _grants_wire(
+                    [
+                        Grant(ok_path, "r", dev=ok_st.st_dev, ino=ok_st.st_ino),
+                        Grant(probe_dir, "dir", dev=probe_st.st_dev, ino=probe_st.st_ino),
+                    ]
+                ),
                 "outer_uid": os.getuid(),
                 "outer_gid": os.getgid(),
             }
@@ -1188,6 +1229,7 @@ def run_enforcement_probe(
                 "metadata": verdict.get("metadata"),
                 "prlimit": verdict.get("prlimit"),
                 "fifo": verdict.get("fifo"),
+                "late": verdict.get("late"),
                 "setpriority": verdict.get("setpriority"),
                 "scheduler": verdict.get("scheduler"),
                 "placement": placement_ok,
@@ -1204,6 +1246,7 @@ def run_enforcement_probe(
                 and verdict.get("metadata") == "refused"
                 and verdict.get("prlimit") == "refused"
                 and verdict.get("fifo") == "refused"
+                and verdict.get("late") == "refused"
                 and verdict.get("setpriority") == "refused"
                 and verdict.get("scheduler") == "refused"
                 and placement_ok
