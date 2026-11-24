@@ -230,6 +230,8 @@ class ProcessProfile:
     binary: Path  # canonical absolute path
     binary_dev: int
     binary_ino: int
+    binary_size: int
+    binary_mtime_ns: int
     argv_prefix: tuple[str, ...]
     args: tuple[ArgSlot, ...]
     cwd_root_id: str
@@ -494,6 +496,8 @@ def load_profiles(registry: RootsRegistry) -> tuple[ProcessProfile, ...]:
                 binary=canonical,
                 binary_dev=st.st_dev,
                 binary_ino=st.st_ino,
+                binary_size=st.st_size,
+                binary_mtime_ns=st.st_mtime_ns,
                 argv_prefix=argv_prefix,
                 args=slots,
                 cwd_root_id=root_id,
@@ -845,6 +849,8 @@ def run_enforcement_probe(
                 "binary": "/usr/bin/python3",
                 "binary_dev": st.st_dev,
                 "binary_ino": st.st_ino,
+                "binary_size": st.st_size,
+                "binary_mtime_ns": st.st_mtime_ns,
                 "argv": [
                     "python3",
                     "-c",
@@ -1231,6 +1237,8 @@ class HostProcessService:
             "binary": str(profile.binary),
             "binary_dev": profile.binary_dev,
             "binary_ino": profile.binary_ino,
+            "binary_size": profile.binary_size,
+            "binary_mtime_ns": profile.binary_mtime_ns,
             "argv": argv,
             "env": env,
             "cwd": str(cwd),

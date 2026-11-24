@@ -464,7 +464,12 @@ def _child_main(spec: dict[str, object], pipes: dict[str, int]) -> None:
             os._exit(_SPAWN_FAILED_EXIT)
         try:
             st = os.fstat(binary_fd)
-            if (st.st_dev, st.st_ino) != (spec.get("binary_dev"), spec.get("binary_ino")):
+            if (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) != (
+                spec.get("binary_dev"),
+                spec.get("binary_ino"),
+                spec.get("binary_size"),
+                spec.get("binary_mtime_ns"),
+            ):
                 _write_errno(exec_w, errno.EACCES, "binary_identity")
                 os._exit(_SPAWN_FAILED_EXIT)
             # Identity-bound exec through the verified open file:

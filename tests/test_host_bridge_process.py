@@ -643,6 +643,19 @@ def test_run_spec_grants_exclude_protected_file(
     assert {"path": "/usr", "access": "rx"} not in spec["grants"]
 
 
+def test_run_spec_carries_binary_identity(
+    service: HostProcessService, spawner: FakeSpawner
+) -> None:
+    _run(service, "true", "req-identity")
+    spec = spawner.spawns[-1]
+    canonical = Path(_TRUE).resolve()
+    st = canonical.stat()
+    assert spec["binary_dev"] == st.st_dev
+    assert spec["binary_ino"] == st.st_ino
+    assert spec["binary_size"] == st.st_size
+    assert spec["binary_mtime_ns"] == st.st_mtime_ns
+
+
 def test_run_idempotent_retry_returns_same_process_id(
     service: HostProcessService, spawner: FakeSpawner
 ) -> None:
@@ -1045,6 +1058,27 @@ def test_live_binary_identity(live: tuple[HostProcessService, Path]) -> None:
     shutil.copy(_SLEEP, bin_path)
     with pytest.raises(ProcessError) as excinfo:
         _run(svc, "tool", "live-tool")
+    assert excinfo.value.code == "spawn_failed"
+
+
+def test_live_binary_identity_in_place_change(
+    live: tuple[HostProcessService, Path],
+) -> None:
+    svc, work = live
+    bin_path = work.parents[2] / "bin" / "tool"
+    assert bin_path.exists()
+    before = bin_path.stat()
+    # Rewrite with a different VALID binary in place: the file stays
+    # executable, so only the identity check can refuse it.
+    data = Path(_SLEEP).read_bytes()
+    with open(bin_path, "r+b") as handle:
+        handle.truncate(len(data))
+        handle.write(data)
+    after = bin_path.stat()
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    assert (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns)
+    with pytest.raises(ProcessError) as excinfo:
+        _run(svc, "tool", "live-tool-inplace")
     assert excinfo.value.code == "spawn_failed"
 
 
