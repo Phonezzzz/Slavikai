@@ -17,7 +17,11 @@ def _read_mount_points() -> frozenset[Path]:
 
     Parsed from /proc/self/mountinfo. A same-device bind mount keeps
     st_dev, so the walk checks this set as well as st_dev — the same
-    discipline as host_bridge/fs.py ``_open_dirs``.
+    discipline as host_bridge/fs.py ``_open_dirs``. On platforms
+    without procfs (macOS is a supported server platform) the file is
+    absent and the set degrades to empty: the st_dev check in the walk
+    still refuses cross-device components, only same-device bind
+    mounts escape detection there.
     """
     mount_points: set[Path] = set()
     try:
@@ -35,6 +39,10 @@ def _read_mount_points() -> frozenset[Path]:
                         .replace("\\134", "\\")
                     )
                 )
+    except FileNotFoundError:
+        # No procfs (e.g. macOS): degrade to an empty set, see the
+        # docstring. Any other read failure stays loud.
+        return frozenset()
     except OSError as exc:
         raise ValueError("mount topology unavailable") from exc
     return frozenset(mount_points)
@@ -105,8 +113,12 @@ def _read_workspace_file_bytes(
         raise ValueError("path required")
     if max_download_bytes <= 0:
         raise ValueError("max_download_bytes must be positive")
-    parts = PurePosixPath(normalized).parts
-    if not parts or parts[0] == "/" or ".." in parts:
+    parsed = PurePosixPath(normalized)
+    parts = parsed.parts
+    # is_absolute() catches "//" too: PurePosixPath("//tmp/x").parts[0]
+    # is "//", not "/", so the old parts[0] == "/" check missed it and
+    # os.open("//", dir_fd=...) ignored the workspace fd.
+    if not parts or parsed.is_absolute() or ".." in parts:
         raise ValueError("path outside workspace")
     canonical = workspace_root.joinpath(*parts)
     if is_private_runtime_path(canonical):

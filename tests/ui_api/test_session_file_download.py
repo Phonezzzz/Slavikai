@@ -376,3 +376,85 @@ def test_dotdot_and_absolute_paths_rejected(download_env) -> None:
     assert (
         _read_workspace_file_bytes("secret.txt", workspace_root=ws, max_download_bytes=100) == SAFE
     )
+
+
+def test_double_slash_absolute_path_rejected(download_env, monkeypatch) -> None:
+    """A double leading slash is still an absolute path (SEC-04 rework 1).
+
+    PurePosixPath("//tmp/x").parts[0] == "//", so the old
+    ``parts[0] == "/"`` check missed it and ``os.open("//", dir_fd=...)``
+    ignored the workspace fd, opening the filesystem root instead. The
+    leak needs the workspace to share a device with / — the production
+    topology (WORKSPACE_ROOT lives under the home directory). The pytest
+    tmp dir is a separate tmpfs mount, so the test simulates that
+    topology by reporting one st_dev for every fstat; verified live on
+    the host with a real same-device workspace, where //etc/passwd
+    returned the file before the fix. Red on pre-fix code: the outside
+    file is returned instead of raising.
+    """
+    from server.http.common.workspace_runtime import _read_workspace_file_bytes
+
+    ws = download_env["ws"]
+    outside = download_env["outside"]
+    (ws / "secret.txt").write_bytes(SAFE)
+
+    real_fstat = os.fstat
+
+    def _fstat_one_device(fd):
+        st = real_fstat(fd)
+        return os.stat_result(
+            (
+                st.st_mode,
+                st.st_ino,
+                1,
+                st.st_nlink,
+                st.st_uid,
+                st.st_gid,
+                st.st_size,
+                st.st_atime,
+                st.st_mtime,
+                st.st_ctime,
+            )
+        )
+
+    monkeypatch.setattr(os, "fstat", _fstat_one_device)
+    evil = "//" + str(outside).lstrip("/")
+    with pytest.raises(ValueError, match="path outside workspace"):
+        _read_workspace_file_bytes(evil, workspace_root=ws, max_download_bytes=100)
+    for bad in ("//etc/passwd", "///etc/passwd"):
+        with pytest.raises(ValueError, match="path outside workspace"):
+            _read_workspace_file_bytes(bad, workspace_root=ws, max_download_bytes=100)
+    assert (
+        _read_workspace_file_bytes("secret.txt", workspace_root=ws, max_download_bytes=100) == SAFE
+    )
+
+
+def test_download_without_proc_mountinfo(download_env, monkeypatch) -> None:
+    """No /proc/self/mountinfo (macOS) must not break downloads.
+
+    macOS is a supported server platform but has no procfs; the helper
+    used to raise ValueError("mount topology unavailable") before
+    opening any workspace file. The mount-point set degrades to empty
+    there — the st_dev check in the walk still refuses cross-device
+    components. Red on pre-fix code: ValueError instead of the content.
+    """
+    import builtins
+
+    import server.http.common.workspace_runtime as workspace_runtime
+    from server.http.common.workspace_runtime import _read_workspace_file_bytes
+
+    ws = download_env["ws"]
+    (ws / "secret.txt").write_bytes(SAFE)
+
+    real_open = builtins.open
+
+    def _open_without_procfs(path, *args, **kwargs):
+        if os.fspath(path) == "/proc/self/mountinfo":
+            raise FileNotFoundError(2, "No such file or directory", "/proc/self/mountinfo")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(workspace_runtime, "open", _open_without_procfs, raising=False)
+    assert workspace_runtime._read_mount_points() == frozenset()
+    assert (
+        _read_workspace_file_bytes("secret.txt", workspace_root=ws, max_download_bytes=100) == SAFE
+    )

@@ -1023,15 +1023,24 @@ async def handle_ui_tts_speak(request: web.Request) -> web.Response:
             code="tts_failed",
         )
 
+    candidate = Path(file_path_raw.strip())
     try:
-        audio_rel = Path(file_path_raw.strip()).relative_to(_SANDBOX_AUDIO_ROOT)
+        audio_rel = candidate.relative_to(_SANDBOX_AUDIO_ROOT)
     except ValueError:
-        return error_response(
-            status=502,
-            message="TTS tool вернул недопустимый путь аудиофайла.",
-            error_type="upstream_error",
-            code="tts_failed",
-        )
+        # The stock TtsTool returns a path relative to the server working
+        # directory (SANDBOX_AUDIO = Path("sandbox/audio")); resolve it
+        # against the working directory first, as the pre-SEC-04 code
+        # did. The fd-based read below re-validates the result, so
+        # resolve() here only maps the name, it grants nothing.
+        try:
+            audio_rel = candidate.resolve().relative_to(_SANDBOX_AUDIO_ROOT)
+        except ValueError:
+            return error_response(
+                status=502,
+                message="TTS tool вернул недопустимый путь аудиофайла.",
+                error_type="upstream_error",
+                code="tts_failed",
+            )
     try:
         audio_bytes = _read_workspace_file_bytes(
             str(audio_rel),

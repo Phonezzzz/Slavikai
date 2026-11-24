@@ -1008,3 +1008,35 @@ def test_ui_tts_speak_works_in_default_ask_mode(monkeypatch, tmp_path) -> None:
     asyncio.run(run())
     # The speak action must not flip the chat default.
     assert agent.runtime_mode == "ask"
+
+
+def test_ui_tts_speak_success_with_relative_tool_path(monkeypatch, tmp_path) -> None:
+    """The stock TtsTool returns a relative file_path (SEC-04 rework 1).
+
+    TtsTool writes to SANDBOX_AUDIO = Path("sandbox/audio") and returns
+    ``sandbox/audio/tts_….mp3`` relative to the server working directory;
+    mapping it against the absolute audio root without resolving first
+    answered 502 after a successful generation. Red on pre-fix code:
+    response.status == 502 instead of 200 with the audio bytes.
+    """
+    audio_dir = tmp_path / "sandbox" / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = audio_dir / "tts_test.mp3"
+    audio_path.write_bytes(b"fake-mp3")
+    monkeypatch.setattr("server.http.handlers.settings._SANDBOX_AUDIO_ROOT", audio_dir.resolve())
+    monkeypatch.chdir(tmp_path)
+
+    async def run() -> None:
+        client = await _create_client(TtsAgent(audio_path=Path("sandbox/audio/tts_test.mp3")))
+        try:
+            response = await client.post(
+                "/ui/api/tts/speak",
+                json={"text": "Привет, мир", "voice_id": "nova"},
+            )
+            assert response.status == 200
+            assert response.headers.get("Content-Type") == "audio/mp3"
+            assert await response.read() == b"fake-mp3"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
