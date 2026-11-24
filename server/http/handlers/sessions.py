@@ -52,9 +52,9 @@ from server.http_api import (
     _normalize_provider,
     _normalize_ui_decision,
     _parse_imported_session,
+    _read_workspace_file_bytes,
     _request_principal_id,
     _resolve_ui_session_id_for_principal,
-    _resolve_workspace_file,
     _safe_zip_entry_name,
     _sanitize_download_filename,
     _serialize_persisted_session,
@@ -976,8 +976,7 @@ async def handle_ui_session_file_download(request: web.Request) -> web.Response:
             code="session_file_not_found",
         )
     try:
-        file_path = _resolve_workspace_file(path_raw)
-        content = file_path.read_bytes()
+        content = _read_workspace_file_bytes(path_raw)
     except FileNotFoundError:
         return error_response(
             status=404,

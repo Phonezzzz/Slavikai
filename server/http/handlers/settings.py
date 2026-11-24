@@ -26,6 +26,7 @@ from server.http.common.runtime_contract import (
     _agent_scope,
     _resolve_agent,
 )
+from server.http.common.workspace_runtime import _read_workspace_file_bytes
 from server.http.handlers.chatgpt_plan import chatgpt_plan_context
 from server.preferences_store import PERSONAL_FIELDS, PreferencesConflictError, PreferencesStore
 from server.ui_hub import UIHub
@@ -1022,9 +1023,8 @@ async def handle_ui_tts_speak(request: web.Request) -> web.Response:
             code="tts_failed",
         )
 
-    file_path = Path(file_path_raw).resolve()
     try:
-        file_path.relative_to(_SANDBOX_AUDIO_ROOT)
+        audio_rel = Path(file_path_raw.strip()).relative_to(_SANDBOX_AUDIO_ROOT)
     except ValueError:
         return error_response(
             status=502,
@@ -1032,20 +1032,23 @@ async def handle_ui_tts_speak(request: web.Request) -> web.Response:
             error_type="upstream_error",
             code="tts_failed",
         )
-    if not file_path.exists() or not file_path.is_file():
+    try:
+        audio_bytes = _read_workspace_file_bytes(
+            str(audio_rel),
+            workspace_root=_SANDBOX_AUDIO_ROOT,
+            max_download_bytes=api.MAX_TTS_AUDIO_BYTES,
+        )
+    except FileNotFoundError:
         return error_response(
             status=502,
             message="Аудиофайл TTS не найден.",
             error_type="upstream_error",
             code="tts_failed",
         )
-
-    try:
-        audio_bytes = file_path.read_bytes()
-    except Exception as exc:  # noqa: BLE001
+    except ValueError as exc:
         return error_response(
             status=502,
-            message=f"Не удалось прочитать TTS-аудио: {exc}",
+            message=f"TTS tool вернул недопустимый путь аудиофайла: {exc}",
             error_type="upstream_error",
             code="tts_failed",
         )
@@ -1054,7 +1057,7 @@ async def handle_ui_tts_speak(request: web.Request) -> web.Response:
         body=audio_bytes,
         content_type=f"audio/{format_value}",
         headers={
-            "Content-Disposition": f'inline; filename="{file_path.name}"',
+            "Content-Disposition": f'inline; filename="{audio_rel.name}"',
             "Cache-Control": "no-store",
         },
     )

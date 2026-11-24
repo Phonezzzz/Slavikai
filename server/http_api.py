@@ -179,6 +179,7 @@ MAX_DOWNLOAD_BYTES: Final[int] = 5_000_000
 MAX_CONTENT_CHARS: Final[int] = 120_000
 MAX_TOTAL_PAYLOAD_CHARS: Final[int] = 220_000
 MAX_STT_AUDIO_BYTES: Final[int] = 10_000_000
+MAX_TTS_AUDIO_BYTES: Final[int] = 10_000_000
 WORKSPACE_INDEX_IGNORED_DIRS: Final[set[str]] = workspace_index.DEFAULT_IGNORED_DIRS
 WORKSPACE_INDEX_ALLOWED_EXTENSIONS: Final[set[str]] = workspace_index.DEFAULT_ALLOWED_EXTENSIONS
 WORKSPACE_INDEX_MAX_FILE_BYTES: Final[int] = workspace_index.DEFAULT_MAX_FILE_BYTES
@@ -277,8 +278,8 @@ _provider_settings_payload = _SETTINGS_RUNTIME.provider_settings_payload
 _build_settings_payload = _SETTINGS_RUNTIME.build_settings_payload
 
 
-def _resolve_workspace_file(path_raw: str) -> Path:
-    return workspace_runtime._resolve_workspace_file(
+def _read_workspace_file_bytes(path_raw: str) -> bytes:
+    return workspace_runtime._read_workspace_file_bytes(
         path_raw,
         workspace_root=WORKSPACE_ROOT,
         max_download_bytes=MAX_DOWNLOAD_BYTES,

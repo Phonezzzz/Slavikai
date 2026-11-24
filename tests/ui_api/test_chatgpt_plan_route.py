@@ -12,7 +12,7 @@ from config.http_server_config import HttpAuthConfig
 from llm.chatgpt_plan import ChatGPTPlanError
 from server.http.app import create_app
 from server.http.common.request_identity import CloudflareAccessTokenError, VerifiedAccessClaims
-from server.http.common.workspace_runtime import _resolve_workspace_file
+from server.http.common.workspace_runtime import _read_workspace_file_bytes
 from server.ui_session_storage import InMemoryUISessionStorage
 from shared.models import ToolRequest
 from tools.workspace_tools import (
@@ -43,7 +43,7 @@ def test_plan_state_is_private_even_when_workspace_contains_it(
             rel = str(target.relative_to(tmp_path))
             assert not ReadFileTool().handle(ToolRequest("workspace_read", {"path": rel})).ok
             with pytest.raises(ValueError, match="outside workspace"):
-                _resolve_workspace_file(rel, workspace_root=tmp_path, max_download_bytes=100)
+                _read_workspace_file_bytes(rel, workspace_root=tmp_path, max_download_bytes=100)
         rename = RenameFileTool().handle(
             ToolRequest(
                 "workspace_rename",
