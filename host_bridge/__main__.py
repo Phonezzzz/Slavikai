@@ -10,6 +10,7 @@ import types
 
 from host_bridge.daemon import BridgeConfigError, HostBridgeDaemon, resolve_socket_path
 from host_bridge.fs import HostFsService, load_registry
+from host_bridge.process import build_process_service
 
 
 def main() -> int:
@@ -21,7 +22,17 @@ def main() -> int:
     except BridgeConfigError as exc:
         print(f"host-bridge: {exc}", file=sys.stderr)
         return 2
-    daemon = HostBridgeDaemon(socket_path, fs_service=HostFsService(registry))
+    try:
+        fs_service = HostFsService(registry)
+        process_service = build_process_service(
+            registry, fs_service, runtime_dir=socket_path.parent
+        )
+    except BridgeConfigError as exc:
+        # A bad process_profiles section is a config error like a bad
+        # roots section: the daemon refuses to start (fail-closed).
+        print(f"host-bridge: {exc}", file=sys.stderr)
+        return 2
+    daemon = HostBridgeDaemon(socket_path, fs_service=fs_service, process_service=process_service)
     stop = threading.Event()
 
     def _request_stop(signum: int, frame: types.FrameType | None) -> None:
@@ -34,6 +45,16 @@ def main() -> int:
     except BridgeConfigError as exc:
         print(f"host-bridge: {exc}", file=sys.stderr)
         return 2
+    if process_service.has_profiles():
+        probe = process_service.probe()
+        if probe.available:
+            print(f"host-bridge: process probe ok: {probe.checks}", file=sys.stderr)
+        else:
+            print(
+                f"host-bridge: process probe failed ({probe.reason}); "
+                "process capabilities are hidden",
+                file=sys.stderr,
+            )
     server_thread = threading.Thread(target=daemon.serve_forever, daemon=True)
     server_thread.start()
     stop.wait()

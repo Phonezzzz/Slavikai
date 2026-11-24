@@ -70,6 +70,14 @@ CAPABILITY_FS_MOVE: Final[str] = "host.fs.move"
 CAPABILITY_FS_DELETE: Final[str] = "host.fs.delete"
 CAPABILITY_FS_SEARCH: Final[str] = "host.fs.search"
 
+# Approved-profile process API (E03-T05). Wire schema for the params
+# of each capability lives in host_bridge.process; the envelope is
+# unchanged. Deadlines stay at the 5 s default (no CAPABILITY_DEADLINES
+# entries): run/poll/kill are all instant by design.
+CAPABILITY_PROCESS_RUN: Final[str] = "host.process.run"
+CAPABILITY_PROCESS_POLL: Final[str] = "host.process.poll"
+CAPABILITY_PROCESS_KILL: Final[str] = "host.process.kill"
+
 CAPABILITIES: Final[tuple[str, ...]] = (
     CAPABILITY_PING,
     CAPABILITY_VERSION,
@@ -82,6 +90,9 @@ CAPABILITIES: Final[tuple[str, ...]] = (
     CAPABILITY_FS_MOVE,
     CAPABILITY_FS_DELETE,
     CAPABILITY_FS_SEARCH,
+    CAPABILITY_PROCESS_RUN,
+    CAPABILITY_PROCESS_POLL,
+    CAPABILITY_PROCESS_KILL,
 )
 
 # Per-capability daemon deadlines (E03-T04): tree walks and moves over
@@ -111,6 +122,14 @@ FS_CAPABILITIES: Final[frozenset[str]] = frozenset(
         CAPABILITY_FS_MOVE,
         CAPABILITY_FS_DELETE,
         CAPABILITY_FS_SEARCH,
+    }
+)
+
+PROCESS_CAPABILITIES: Final[frozenset[str]] = frozenset(
+    {
+        CAPABILITY_PROCESS_RUN,
+        CAPABILITY_PROCESS_POLL,
+        CAPABILITY_PROCESS_KILL,
     }
 )
 

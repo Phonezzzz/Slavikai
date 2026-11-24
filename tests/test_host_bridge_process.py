@@ -1,0 +1,1091 @@
+"""Approved-profile process API (E03-T05, ADR-0013 §10a).
+
+Unit tests use an in-test fake spawner (no systemd, no enforcement)
+for the service logic — profile validation, arg validation,
+idempotent launch, poll offsets/retained_from/frame budget, kill
+idempotence, caps, retention, and cancellation at the launch
+boundary — plus wire tests over a real daemon socket. Integration
+tests use the real systemd-run spawner + helper and are skipped
+when the enforcement probe fails in this environment (the probe
+itself is the fail-closed gate); they cover the enforcement stack
+(socket refusal, protected-file denial from inside the process,
+tree kill after leader exit, timeout tree kill, env minimality,
+binary identity, and live idempotent retry).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import threading
+import time
+from collections.abc import Iterator
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+
+import host_bridge.process as process_module
+from host_bridge import client
+from host_bridge.daemon import HostBridgeDaemon
+from host_bridge.fs import CancelToken, HostFsService, Root, RootsRegistry
+from host_bridge.process import (
+    HostProcessService,
+    ProbeResult,
+    ProcessError,
+    SpawnHandle,
+    load_profiles,
+)
+from host_bridge.protocol import (
+    MAX_FRAME_BYTES,
+    BridgeConfigError,
+    RequestTimeoutError,
+    encode_success,
+)
+
+_TRUE = "/usr/bin/true"
+_CAT = "/usr/bin/cat"
+_GREP = "/usr/bin/grep"
+_ECHO = "/usr/bin/echo"
+_SLEEP = "/usr/bin/sleep"
+_PY = "/usr/bin/python3"
+
+# Leader that forks a long-lived child and exits after 1 s: the
+# child must not survive the tree kill (cgroup v2 scope). The
+# child is a fork, not a second exec: under the tightened EXECUTE
+# grant only the approved binary itself may execute.
+_SPAWN_CODE = (
+    "import os, time; 'TREEKILL47'; pid = os.fork(); pid == 0 and time.sleep(47); time.sleep(1)"
+)
+# Prints the marker env var if it leaked into the child, else ABSENT.
+_ENV_CODE = (
+    "import os; print(os.environ.get('SLAVIK_TEST_MARKER', 'ABSENT')); "
+    "print(os.environ.get('HOME', ''))"
+)
+
+
+def _profiles(extra: list[dict[str, object]] | None = None) -> list[dict[str, object]]:
+    profiles: list[dict[str, object]] = [
+        {"id": "true", "binary": _TRUE, "cwd": {"root_id": "work", "path": "."}},
+        {
+            "id": "echo",
+            "binary": _ECHO,
+            "argv_prefix": ["--"],
+            "args": [
+                {
+                    "name": "text",
+                    "kind": "string",
+                    "required": True,
+                    "form": "after_dashdash",
+                }
+            ],
+            "cwd": {"root_id": "work", "path": "."},
+        },
+        {
+            "id": "cat",
+            "binary": _CAT,
+            "args": [{"name": "file", "kind": "path_in_root", "required": True}],
+            "cwd": {"root_id": "work", "path": "."},
+        },
+        {
+            "id": "grep",
+            "binary": _GREP,
+            "argv_prefix": ["--"],
+            "args": [
+                {
+                    "name": "needle",
+                    "kind": "string",
+                    "required": True,
+                    "form": "after_dashdash",
+                },
+                {"name": "file", "kind": "path_in_root", "required": True},
+            ],
+            "cwd": {"root_id": "work", "path": "."},
+        },
+        {
+            "id": "sleep",
+            "binary": _SLEEP,
+            "args": [{"name": "seconds", "kind": "int", "required": True, "min": 1, "max": 5}],
+            "cwd": {"root_id": "work", "path": "."},
+            "timeout_s": 10,
+        },
+        {
+            "id": "py_spawn",
+            "binary": _PY,
+            "argv_prefix": ["-c", _SPAWN_CODE],
+            "cwd": {"root_id": "work", "path": "."},
+            "timeout_s": 30,
+        },
+        {
+            "id": "py_env",
+            "binary": _PY,
+            "argv_prefix": ["-c", _ENV_CODE],
+            "cwd": {"root_id": "work", "path": "."},
+        },
+    ]
+    if extra:
+        profiles.extend(extra)
+    return profiles
+
+
+def _write_config(home: Path, profiles: list[dict[str, object]]) -> Path:
+    config = home / ".config" / "slavikai" / "host-bridge.json"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "roots": [
+            {"id": "work", "path": str(home / "Project" / "work"), "mode": "rw"},
+            {"id": "docs", "path": str(home / "Documents" / "docs"), "mode": "ro"},
+        ],
+        "process_profiles": profiles,
+    }
+    config.write_text(json.dumps(payload), encoding="utf-8")
+    return config
+
+
+@pytest.fixture()
+def home(tmp_path: Path) -> Path:
+    fake_home = tmp_path / "home"
+    work = fake_home / "Project" / "work"
+    work.mkdir(parents=True)
+    (fake_home / "Documents" / "docs").mkdir(parents=True)
+    (work / "notes.txt").write_text("hello\nworld\n", encoding="utf-8")
+    (work / ".env").write_text("SECRET=do-not-leak\n", encoding="utf-8")
+    (work / "sub").mkdir(exist_ok=True)
+    (work / "sub" / "data.txt").write_text("data\n", encoding="utf-8")
+    return fake_home
+
+
+@pytest.fixture()
+def registry(home: Path) -> RootsRegistry:
+    config = _write_config(home, _profiles())
+    return RootsRegistry(
+        roots=(
+            Root(id="work", path=(home / "Project" / "work").resolve(), mode="rw"),
+            Root(id="docs", path=(home / "Documents" / "docs").resolve(), mode="ro"),
+        ),
+        write_excluded=(),
+        home=home.resolve(),
+        config_path=config,
+        socket_dir=None,
+    )
+
+
+@pytest.fixture()
+def work_root(registry: RootsRegistry) -> Path:
+    root = registry.by_id("work")
+    assert root is not None
+    return root.path
+
+
+@pytest.fixture()
+def fs_service(registry: RootsRegistry, tmp_path: Path) -> HostFsService:
+    return HostFsService(registry, trash_root=tmp_path / "Trash")
+
+
+def _now_iso() -> str:
+    """Current UTC time for fake status files.
+
+    The finished-record sweep evicts records older than the 10 min
+    retention, so a fixed timestamp goes stale and freshly finalized
+    records vanish mid-test once the wall clock passes it.
+    """
+    return datetime.now(UTC).isoformat()
+
+
+class FakeSpawner:
+    """In-test spawner: a real ``sleep`` stands in for the scope
+    leader (so ``leader_done`` is honest), and status/tail files are
+    written by hand. No systemd, no Landlock, no seccomp — the unit
+    tests cover service logic, not enforcement."""
+
+    def __init__(self) -> None:
+        self.spawns: list[dict[str, object]] = []
+        self.units: dict[str, dict[str, object]] = {}
+        self.finish_state = "killed"
+        self.delay_running = 0.0
+        self.signal_calls: list[tuple[str, int]] = []
+        self.kill_calls: list[str] = []
+
+    def _status(self, run_dir: Path, state: str, **extra: object) -> dict[str, object]:
+        status: dict[str, object] = {
+            "version": 1,
+            "process_id": run_dir.name,
+            "state": state,
+            "pid": 1234,
+            "helper_pid": 1235,
+            "cgroup": "0::/fake",
+            "started_at": "2026-11-24T00:00:00+00:00",
+            "finished_at": None,
+            "exit_code": None,
+            "signal": None,
+            "error": None,
+            "stdout_total_bytes": 0,
+            "stderr_total_bytes": 0,
+            "stdout_retained_from": 0,
+            "stderr_retained_from": 0,
+            "timeout_s": 120,
+        }
+        status.update(extra)
+        return status
+
+    def spawn(self, spec_path: Path, *, unit_name: str, run_dir: Path) -> SpawnHandle:
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        self.spawns.append(spec)
+        leader = subprocess.Popen(
+            ["sleep", "30"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        handle = SpawnHandle(popen=leader, unit_name=unit_name, cgroup_path=None, run_dir=run_dir)
+        self.units[unit_name] = {"handle": handle, "procs": [str(leader.pid)]}
+
+        def _write_running() -> None:
+            if self.delay_running:
+                time.sleep(self.delay_running)
+            (run_dir / "status.json").write_text(
+                json.dumps(self._status(run_dir, "running")), encoding="utf-8"
+            )
+            (run_dir / "stdout").write_bytes(b"")
+            (run_dir / "stderr").write_bytes(b"")
+
+        if self.delay_running:
+            threading.Thread(target=_write_running, daemon=True).start()
+        else:
+            _write_running()
+        return handle
+
+    def signal_tree(self, handle: SpawnHandle, sig: int) -> None:
+        self.signal_calls.append((handle.unit_name, sig))
+        if handle.popen is not None and handle.popen.poll() is None:
+            handle.popen.send_signal(sig)
+
+    def kill_all(self, handle: SpawnHandle) -> None:
+        self.kill_calls.append(handle.unit_name)
+        unit = self.units.get(handle.unit_name)
+        if unit is not None:
+            unit["procs"] = []
+        if handle.popen is not None and handle.popen.poll() is None:
+            handle.popen.kill()
+        exit_code = 0 if self.finish_state == "exited" else None
+        exit_signal = None if self.finish_state == "exited" else 15
+        (handle.run_dir / "status.json").write_text(
+            json.dumps(
+                self._status(
+                    handle.run_dir,
+                    self.finish_state,
+                    finished_at=_now_iso(),
+                    exit_code=exit_code,
+                    signal=exit_signal,
+                )
+            ),
+            encoding="utf-8",
+        )
+
+    def cgroup_empty(self, handle: SpawnHandle) -> bool:
+        unit = self.units.get(handle.unit_name)
+        if unit is None:
+            return True
+        procs = unit.get("procs")
+        return not procs if isinstance(procs, list) else True
+
+    def finish(
+        self,
+        handle: SpawnHandle,
+        *,
+        state: str = "exited",
+        exit_code: int | None = 0,
+        exit_signal: int | None = None,
+        stdout: bytes = b"",
+        stderr: bytes = b"",
+    ) -> None:
+        unit = self.units.get(handle.unit_name)
+        if unit is not None:
+            unit["procs"] = []
+        if handle.popen is not None and handle.popen.poll() is None:
+            handle.popen.kill()
+        (handle.run_dir / "stdout").write_bytes(stdout)
+        (handle.run_dir / "stderr").write_bytes(stderr)
+        (handle.run_dir / "status.json").write_text(
+            json.dumps(
+                self._status(
+                    handle.run_dir,
+                    state,
+                    finished_at=_now_iso(),
+                    exit_code=exit_code,
+                    signal=exit_signal,
+                    stdout_total_bytes=len(stdout),
+                    stderr_total_bytes=len(stderr),
+                )
+            ),
+            encoding="utf-8",
+        )
+
+    def set_output(
+        self,
+        handle: SpawnHandle,
+        *,
+        stdout: bytes = b"",
+        stderr: bytes = b"",
+        stdout_total: int | None = None,
+        stderr_total: int | None = None,
+        stdout_retained_from: int = 0,
+        stderr_retained_from: int = 0,
+    ) -> None:
+        (handle.run_dir / "stdout").write_bytes(stdout)
+        (handle.run_dir / "stderr").write_bytes(stderr)
+        status = json.loads((handle.run_dir / "status.json").read_text(encoding="utf-8"))
+        status["stdout_total_bytes"] = len(stdout) if stdout_total is None else stdout_total
+        status["stderr_total_bytes"] = len(stderr) if stderr_total is None else stderr_total
+        status["stdout_retained_from"] = stdout_retained_from
+        status["stderr_retained_from"] = stderr_retained_from
+        (handle.run_dir / "status.json").write_text(json.dumps(status), encoding="utf-8")
+
+
+@pytest.fixture()
+def spawner() -> FakeSpawner:
+    return FakeSpawner()
+
+
+@pytest.fixture()
+def service(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+    spawner: FakeSpawner,
+) -> Iterator[HostProcessService]:
+    svc = HostProcessService(
+        fs_service,
+        registry,
+        runtime_dir=tmp_path / "run",
+        profiles=load_profiles(registry),
+        spawner=spawner,  # type: ignore[arg-type]
+    )
+    # Unit tests drive the service logic, not the enforcement probe.
+    svc._probe = ProbeResult(available=True, checks={}, reason="unit-test")
+    try:
+        yield svc
+    finally:
+        svc.shutdown()
+
+
+def _token(deadline_s: float = 5.0) -> CancelToken:
+    return CancelToken(deadline=time.monotonic() + deadline_s, request_id="test-req")
+
+
+def _run(
+    svc: HostProcessService, profile_id: str, request_id: str, **params: object
+) -> dict[str, object]:
+    return svc.handle(
+        "host.process.run",
+        {"profile_id": profile_id, **params},
+        request_id,
+        _token(),
+    )
+
+
+def _poll(svc: HostProcessService, process_id: str, **params: object) -> dict[str, object]:
+    return svc.handle(
+        "host.process.poll", {"process_id": process_id, **params}, "poll-req", _token()
+    )
+
+
+def _kill(svc: HostProcessService, process_id: str) -> dict[str, object]:
+    return svc.handle("host.process.kill", {"process_id": process_id}, "kill-req", _token())
+
+
+def _wait_state(
+    svc: HostProcessService, process_id: str, state: str, *, timeout_s: float = 5.0
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout_s
+    last: dict[str, object] = {}
+    while time.monotonic() < deadline:
+        last = _poll(svc, process_id)
+        if last.get("state") == state:
+            return last
+        time.sleep(0.05)
+    raise AssertionError(f"process {process_id} did not reach {state}: {last}")
+
+
+# --- profile loading -------------------------------------------------------
+
+
+def test_load_profiles_ok(registry: RootsRegistry) -> None:
+    profiles = load_profiles(registry)
+    by_id = {p.id: p for p in profiles}
+    assert set(by_id) == {
+        "true",
+        "echo",
+        "cat",
+        "grep",
+        "sleep",
+        "py_spawn",
+        "py_env",
+    }
+    assert by_id["grep"].args[0].form == "after_dashdash"
+    assert by_id["sleep"].args[0].minimum == 1
+    assert by_id["sleep"].args[0].maximum == 5
+    assert by_id["sleep"].timeout_s == 10
+
+
+def test_profiles_description_hides_paths(service: HostProcessService) -> None:
+    descriptions = service.profiles_description()
+    assert {
+        "id": "grep",
+        "args": [
+            {"name": "needle", "kind": "string", "required": True},
+            {"name": "file", "kind": "path_in_root", "required": True},
+        ],
+    } in descriptions
+    assert "usr/bin" not in json.dumps(descriptions)
+    assert "Project" not in json.dumps(descriptions)
+
+
+def test_load_profiles_rejects_unknown_field(home: Path) -> None:
+    config = _write_config(
+        home,
+        [{"id": "x", "binary": _TRUE, "cwd": {"root_id": "work", "path": "."}, "nope": 1}],
+    )
+    registry = RootsRegistry(
+        roots=(Root(id="work", path=(home / "Project" / "work").resolve(), mode="rw"),),
+        write_excluded=(),
+        home=home.resolve(),
+        config_path=config,
+        socket_dir=None,
+    )
+    with pytest.raises(BridgeConfigError, match="unknown fields"):
+        load_profiles(registry)
+
+
+def test_load_profiles_rejects_shell_binary(home: Path) -> None:
+    config = _write_config(
+        home,
+        [{"id": "sh", "binary": "/usr/bin/sh", "cwd": {"root_id": "work", "path": "."}}],
+    )
+    registry = RootsRegistry(
+        roots=(Root(id="work", path=(home / "Project" / "work").resolve(), mode="rw"),),
+        write_excluded=(),
+        home=home.resolve(),
+        config_path=config,
+        socket_dir=None,
+    )
+    with pytest.raises(BridgeConfigError, match="shell"):
+        load_profiles(registry)
+
+
+def test_load_profiles_rejects_binary_inside_root(home: Path) -> None:
+    tool = home / "Project" / "work" / "tool"
+    shutil.copy(_TRUE, tool)
+    config = _write_config(
+        home,
+        [{"id": "tool", "binary": str(tool), "cwd": {"root_id": "work", "path": "."}}],
+    )
+    registry = RootsRegistry(
+        roots=(Root(id="work", path=(home / "Project" / "work").resolve(), mode="rw"),),
+        write_excluded=(),
+        home=home.resolve(),
+        config_path=config,
+        socket_dir=None,
+    )
+    with pytest.raises(BridgeConfigError, match="inside allowed root"):
+        load_profiles(registry)
+
+
+def test_load_profiles_rejects_string_slot_without_data_form(home: Path) -> None:
+    config = _write_config(
+        home,
+        [
+            {
+                "id": "bad",
+                "binary": _ECHO,
+                "argv_prefix": ["-n"],
+                "args": [{"name": "text", "kind": "string", "required": True}],
+                "cwd": {"root_id": "work", "path": "."},
+            }
+        ],
+    )
+    registry = RootsRegistry(
+        roots=(Root(id="work", path=(home / "Project" / "work").resolve(), mode="rw"),),
+        write_excluded=(),
+        home=home.resolve(),
+        config_path=config,
+        socket_dir=None,
+    )
+    with pytest.raises(BridgeConfigError, match="string requires form"):
+        load_profiles(registry)
+
+
+def test_load_profiles_rejects_forbidden_env(home: Path) -> None:
+    config = _write_config(
+        home,
+        [
+            {
+                "id": "bad",
+                "binary": _TRUE,
+                "env": {"LD_PRELOAD": "/tmp/evil.so"},
+                "cwd": {"root_id": "work", "path": "."},
+            }
+        ],
+    )
+    registry = RootsRegistry(
+        roots=(Root(id="work", path=(home / "Project" / "work").resolve(), mode="rw"),),
+        write_excluded=(),
+        home=home.resolve(),
+        config_path=config,
+        socket_dir=None,
+    )
+    with pytest.raises(BridgeConfigError, match="forbidden"):
+        load_profiles(registry)
+
+
+def test_load_profiles_absent_config_means_no_profiles(home: Path) -> None:
+    registry = RootsRegistry(
+        roots=(Root(id="work", path=(home / "Project" / "work").resolve(), mode="rw"),),
+        write_excluded=(),
+        home=home.resolve(),
+        config_path=home / ".config" / "slavikai" / "host-bridge.json",
+        socket_dir=None,
+    )
+    assert load_profiles(registry) == ()
+
+
+# --- run / arg validation --------------------------------------------------
+
+
+def test_exec_grants_cover_binary_and_interp() -> None:
+    from host_bridge.process import Grant, _exec_grants
+
+    grants = _exec_grants(Path(_TRUE))
+    # _exec_grants resolves symlinks: the helper never grants through
+    # one (it skips symlink grant paths), and profile binaries are
+    # often symlinks (/usr/bin/true -> gnutrue, /usr/bin/python3 ->
+    # python3.14, and the interpreter /lib64/ld-linux-x86-64.so.2).
+    assert grants[0] == Grant(Path(_TRUE).resolve(), "rx")
+    assert grants[1] == Grant(Path("/lib64/ld-linux-x86-64.so.2").resolve(), "rx")
+    assert len(grants) == 2
+
+
+def test_run_unknown_profile(service: HostProcessService) -> None:
+    with pytest.raises(ProcessError) as excinfo:
+        _run(service, "nope", "req-1")
+    assert excinfo.value.code == "unknown_profile"
+
+
+def test_run_invalid_args(service: HostProcessService) -> None:
+    # enum/int/path cases, one per slot kind where applicable
+    with pytest.raises(ProcessError) as excinfo:
+        _run(service, "sleep", "req-int", args=["0"])
+    assert excinfo.value.code == "invalid_args"
+    with pytest.raises(ProcessError) as excinfo:
+        _run(service, "sleep", "req-int2", args=["not-a-number"])
+    assert excinfo.value.code == "invalid_args"
+    with pytest.raises(ProcessError) as excinfo:
+        _run(service, "sleep", "req-int3", args=["1", "2"])
+    assert excinfo.value.code == "invalid_args"
+    with pytest.raises(ProcessError) as excinfo:
+        _run(service, "cat", "req-missing")
+    assert excinfo.value.code == "invalid_args"
+
+
+def test_run_path_arg_uses_fs_codes(service: HostProcessService) -> None:
+    # Escape attempt: the FS layer's codes are reused, not invented.
+    with pytest.raises(ProcessError) as excinfo:
+        _run(service, "cat", "req-escape", args=["../outside.txt"])
+    assert excinfo.value.code == "invalid_path"
+    # Protected file inside the allowed root: denied before any spawn.
+    with pytest.raises(ProcessError) as excinfo:
+        _run(service, "cat", "req-secret", args=[".env"])
+    assert excinfo.value.code == "protected_path"
+
+
+def test_run_string_slot_is_positioned_after_dashdash(
+    service: HostProcessService, spawner: FakeSpawner
+) -> None:
+    result = _run(service, "grep", "req-grep", args=["-v", "notes.txt"])
+    assert result["state"] == "running"
+    # A value that looks like a flag stays data: it sits after "--".
+    spec = spawner.spawns[-1]
+    argv = spec["argv"]
+    assert argv == [_GREP, "--", "-v", str(service.registry.by_id("work").path / "notes.txt")]
+
+
+def test_run_spec_env_is_minimal(
+    service: HostProcessService, spawner: FakeSpawner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SLAVIK_TEST_MARKER", "marker-secret")
+    monkeypatch.setenv("HOME", "/home/ki")
+    result = _run(service, "true", "req-env")
+    assert result["state"] == "running"
+    spec = spawner.spawns[-1]
+    env = spec["env"]
+    assert "SLAVIK_TEST_MARKER" not in env
+    assert env["HOME"].endswith("/tmp")
+    assert env["PATH"].startswith("/usr")
+    assert set(env) <= {"PATH", "LANG", "LC_ALL", "TZ", "HOME", "TMPDIR"}
+
+
+def test_run_spec_grants_exclude_protected_file(
+    service: HostProcessService, spawner: FakeSpawner, work_root: Path
+) -> None:
+    _run(service, "true", "req-grants")
+    spec = spawner.spawns[-1]
+    grant_paths = {g["path"] for g in spec["grants"]}
+    assert str(work_root / ".env") not in grant_paths
+    assert str(work_root / "notes.txt") in grant_paths
+    # EXECUTE only for the approved binary + its interpreter:
+    # the system dirs are read-only, so no other binary can run.
+    assert {"path": str(Path(_TRUE).resolve()), "access": "rx"} in spec["grants"]
+    assert {
+        "path": str(Path("/lib64/ld-linux-x86-64.so.2").resolve()),
+        "access": "rx",
+    } in spec["grants"]
+    assert {"path": "/usr", "access": "rx"} not in spec["grants"]
+
+
+def test_run_idempotent_retry_returns_same_process_id(
+    service: HostProcessService, spawner: FakeSpawner
+) -> None:
+    first = _run(service, "true", "req-same")
+    second = _run(service, "true", "req-same")
+    assert first["process_id"] == second["process_id"]
+    assert len(spawner.spawns) == 1
+
+
+def test_run_and_poll_finish(service: HostProcessService, spawner: FakeSpawner) -> None:
+    result = _run(service, "true", "req-true")
+    process_id = result["process_id"]
+    assert result["state"] == "running"
+    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    spawner.finish(handle, state="exited", exit_code=0, stdout=b"ok\n")
+    final = _wait_state(service, process_id, "exited")
+    assert final["exit_code"] == 0
+    assert final["stdout"] == "ok\n"
+    assert final["elapsed_ms"] >= 0
+
+
+# --- poll ------------------------------------------------------------------
+
+
+def test_poll_offsets_and_retained_from(service: HostProcessService, spawner: FakeSpawner) -> None:
+    result = _run(service, "true", "req-off")
+    process_id = result["process_id"]
+    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    # Total 10 bytes, first 4 already dropped: tail holds bytes 4..9.
+    spawner.set_output(handle, stdout=b"456789", stdout_total=10, stdout_retained_from=4)
+    first = _poll(service, process_id, stdout_offset=0)
+    assert first["stdout"] == "456789"
+    assert first["stdout_next_offset"] == 10
+    assert first["stdout_truncated"] is True
+    assert first["stdout_retained_from"] == 4
+    second = _poll(service, process_id, stdout_offset=7)
+    assert second["stdout"] == "789"
+    assert second["stdout_truncated"] is False
+    with pytest.raises(ProcessError) as excinfo:
+        _poll(service, process_id, stdout_offset=11)
+    assert excinfo.value.code == "offset_out_of_range"
+
+
+def test_poll_frame_budget(service: HostProcessService, spawner: FakeSpawner) -> None:
+    result = _run(service, "true", "req-frame")
+    process_id = result["process_id"]
+    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    # 40 KiB of '"' serializes to ~80 KiB: the poll must shrink it.
+    spawner.set_output(handle, stdout=b'"' * 40_000)
+    chunk = _poll(service, process_id, max_bytes=32 * 1024)
+    assert len(encode_success(chunk, "frame-req")) - 1 <= MAX_FRAME_BYTES
+    assert chunk["stdout_next_offset"] < 40_000
+    assert chunk["stdout_next_offset"] > 0
+
+
+def test_poll_utf8_replacement(service: HostProcessService, spawner: FakeSpawner) -> None:
+    result = _run(service, "true", "req-utf8")
+    process_id = result["process_id"]
+    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    spawner.set_output(handle, stdout=b"\xff\xfe hello")
+    chunk = _poll(service, process_id)
+    assert chunk["stdout"] == "\ufffd\ufffd hello"
+
+
+def test_poll_unknown_process(service: HostProcessService) -> None:
+    with pytest.raises(ProcessError) as excinfo:
+        _poll(service, "deadbeef")
+    assert excinfo.value.code == "process_not_found"
+
+
+# --- kill / caps / retention ----------------------------------------------
+
+
+def test_kill_is_idempotent(service: HostProcessService, spawner: FakeSpawner) -> None:
+    result = _run(service, "sleep", "req-kill", args=["5"])
+    process_id = result["process_id"]
+    killed = _kill(service, process_id)
+    assert killed["state"] == "killed"
+    again = _kill(service, process_id)
+    assert again["state"] == "killed"
+    assert again["exit_code"] == killed["exit_code"]
+    with pytest.raises(ProcessError) as excinfo:
+        _kill(service, "deadbeef")
+    assert excinfo.value.code == "process_not_found"
+
+
+def test_concurrency_cap(service: HostProcessService) -> None:
+    ids = [_run(service, "sleep", f"req-cap-{i}", args=["5"])["process_id"] for i in range(4)]
+    assert len(ids) == 4
+    with pytest.raises(ProcessError) as excinfo:
+        _run(service, "sleep", "req-cap-5", args=["5"])
+    assert excinfo.value.code == "too_many_processes"
+    for process_id in ids:
+        _kill(service, process_id)
+
+
+def test_timeout_finalizes_via_reaper(
+    service: HostProcessService,
+    spawner: FakeSpawner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(process_module, "KILL_GRACE_S", 0.05)
+    spawner.finish_state = "timeout"
+    result = _run(service, "sleep", "req-timeout", args=["5"], timeout_s=1)
+    process_id = result["process_id"]
+    final = _wait_state(service, process_id, "timeout", timeout_s=8.0)
+    assert final["state"] == "timeout"
+    assert spawner.kill_calls, "the reaper must kill the tree on timeout"
+
+
+def test_finished_record_cap(service: HostProcessService, spawner: FakeSpawner) -> None:
+    from host_bridge.process import MAX_FINISHED_RECORDS
+
+    ids: list[str] = []
+    for i in range(MAX_FINISHED_RECORDS + 1):
+        result = _run(service, "true", f"req-fin-{i}")
+        process_id = result["process_id"]
+        handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+        spawner.finish(handle, state="exited", exit_code=0)
+        # The reaper finalizes asynchronously; wait for it before the
+        # next run, or the concurrency cap (4 running) trips first.
+        _wait_state(service, process_id, "exited")
+        ids.append(process_id)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        service._sweep_finished()
+        finished = [r for r in service._records.values() if r.final]
+        if len(finished) <= MAX_FINISHED_RECORDS:
+            break
+        time.sleep(0.05)
+    finished = [r for r in service._records.values() if r.final]
+    assert len(finished) <= MAX_FINISHED_RECORDS
+    assert ids[0] not in service._records  # the oldest was evicted
+
+
+def test_cancel_at_launch_boundary(
+    service: HostProcessService,
+    spawner: FakeSpawner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancel racing spawn: exactly one process_id, no duplicate spawn."""
+    monkeypatch.setattr(process_module, "SPAWN_START_TIMEOUT_S", 0.5)
+    spawner.delay_running = 1.0
+    token = CancelToken(deadline=time.monotonic() + 0.3, request_id="req-cancel")
+    with pytest.raises(RequestTimeoutError):
+        service.handle("host.process.run", {"profile_id": "true"}, "req-cancel", token)
+    # Exactly one record exists for that request_id, and no second
+    # spawn happened even after the reaper settles the stalled launch.
+    assert len(spawner.spawns) == 1
+    process_id = service._by_request_id["req-cancel"]
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and not service._records[process_id].final:
+        time.sleep(0.05)
+    assert service._records[process_id].final
+    # Either outcome is exactly one process for the request: the
+    # launch may settle as spawn_failed (stalled) or as killed (the
+    # deadline path cancelled it first) — what must never happen is
+    # a second process or a second process_id for this request.
+    assert service._records[process_id].state in ("spawn_failed", "killed")
+    # Retry after the lost response returns the same process_id.
+    retry = service.handle("host.process.run", {"profile_id": "true"}, "req-cancel", _token())
+    assert retry["process_id"] == process_id
+    assert len(spawner.spawns) == 1
+
+
+# --- wire: capabilities visibility + dispatch ------------------------------
+
+
+@pytest.fixture()
+def bridge(
+    tmp_path: Path, fs_service: HostFsService, service: HostProcessService
+) -> Iterator[Path]:
+    socket_path = tmp_path / "slavikai" / "host-bridge.sock"
+    daemon = HostBridgeDaemon(socket_path, fs_service=fs_service, process_service=service)
+    daemon.start()
+    thread = threading.Thread(target=daemon.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield socket_path
+    finally:
+        daemon.shutdown()
+        thread.join(timeout=2.0)
+
+
+def test_capabilities_show_profiles_when_available(bridge: Path) -> None:
+    caps = client.capabilities(bridge)
+    assert "host.process.run" in caps
+    assert "host.process.poll" in caps
+    assert "host.process.kill" in caps
+    payload = client.call(bridge, "bridge.capabilities")
+    profiles = payload["profiles"]
+    assert {"id": "true", "args": []} in profiles
+    assert "usr/bin" not in json.dumps(profiles)
+
+
+def test_capabilities_hide_process_when_probe_failed(
+    tmp_path: Path, fs_service: HostFsService, registry: RootsRegistry
+) -> None:
+    svc = HostProcessService(
+        fs_service,
+        registry,
+        runtime_dir=tmp_path / "run2",
+        profiles=load_profiles(registry),
+        spawner=FakeSpawner(),  # type: ignore[arg-type]
+    )
+    svc._probe = ProbeResult(available=False, checks={"probe": "failed"}, reason="probe failed")
+    try:
+        socket_path = tmp_path / "slavikai2" / "host-bridge.sock"
+        daemon = HostBridgeDaemon(socket_path, fs_service=fs_service, process_service=svc)
+        daemon.start()
+        thread = threading.Thread(target=daemon.serve_forever, daemon=True)
+        thread.start()
+        try:
+            caps = client.capabilities(socket_path)
+            assert "host.process.run" not in caps
+            payload = client.call(socket_path, "bridge.capabilities")
+            assert payload["profiles"] == []
+            with pytest.raises(client.BridgeClientError) as excinfo:
+                client.call(
+                    socket_path,
+                    "host.process.run",
+                    params={"profile_id": "true"},
+                )
+            assert excinfo.value.code == "process_unavailable"
+        finally:
+            daemon.shutdown()
+            thread.join(timeout=2.0)
+    finally:
+        svc.shutdown()
+
+
+def test_wire_run_poll_kill(bridge: Path) -> None:
+    run = client.call(
+        bridge, "host.process.run", params={"profile_id": "true"}, request_id="wire-1"
+    )
+    process_id = run["process_id"]
+    assert run["state"] == "running"
+    again = client.call(
+        bridge, "host.process.run", params={"profile_id": "true"}, request_id="wire-1"
+    )
+    assert again["process_id"] == process_id
+    killed = client.call(bridge, "host.process.kill", params={"process_id": process_id})
+    assert killed["state"] == "killed"
+    polled = client.call(bridge, "host.process.poll", params={"process_id": process_id})
+    assert polled["state"] == "killed"
+
+
+# --- integration: real spawner + helper (skipped when the probe fails) ---
+
+
+def _live_profiles(work: Path, bin_dir: Path) -> list[dict[str, object]]:
+    profiles = _profiles()
+    profiles.append(
+        {
+            "id": "cat_abs",
+            "binary": _CAT,
+            "argv_prefix": [str(work / ".env")],
+            "cwd": {"root_id": "work", "path": "."},
+        }
+    )
+    profiles.append(
+        {
+            "id": "tool",
+            "binary": str(bin_dir / "tool"),
+            "cwd": {"root_id": "work", "path": "."},
+        }
+    )
+    return profiles
+
+
+@pytest.fixture(scope="module")
+def live(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[HostProcessService, Path]]:
+    base = tmp_path_factory.mktemp("live")
+    home = base / "home"
+    work = home / "Project" / "work"
+    work.mkdir(parents=True)
+    (home / "Documents" / "docs").mkdir(parents=True)
+    (work / "notes.txt").write_text("hello\nworld\n", encoding="utf-8")
+    (work / ".env").write_text("SECRET=do-not-leak\n", encoding="utf-8")
+    bin_dir = base / "bin"
+    bin_dir.mkdir()
+    shutil.copy(_TRUE, bin_dir / "tool")
+    config = _write_config(home, _live_profiles(work, bin_dir))
+    registry = RootsRegistry(
+        roots=(
+            Root(id="work", path=work.resolve(), mode="rw"),
+            Root(id="docs", path=(home / "Documents" / "docs").resolve(), mode="ro"),
+        ),
+        write_excluded=(),
+        home=home.resolve(),
+        config_path=config,
+        socket_dir=None,
+    )
+    fs_service = HostFsService(registry, trash_root=base / "Trash")
+    svc = HostProcessService(
+        fs_service,
+        registry,
+        runtime_dir=base / "run",
+        profiles=load_profiles(registry),
+    )
+    probe = svc.probe()
+    if not probe.available:
+        svc.shutdown()
+        pytest.skip(f"enforcement probe failed: {probe.reason}: {probe.checks}")
+    try:
+        yield svc, work
+    finally:
+        svc.shutdown()
+
+
+def _live_wait(
+    svc: HostProcessService, process_id: str, state: str, *, timeout_s: float = 15.0
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout_s
+    last: dict[str, object] = {}
+    while time.monotonic() < deadline:
+        last = _poll(svc, process_id)
+        if last.get("state") == state:
+            return last
+        time.sleep(0.1)
+    raise AssertionError(f"process {process_id} did not reach {state}: {last}")
+
+
+def _no_tree_child() -> bool:
+    out = subprocess.run(["pgrep", "-f", "TREEKILL47"], capture_output=True, text=True)
+    return out.returncode != 0
+
+
+def test_live_probe_reports_all_layers(live: tuple[HostProcessService, Path]) -> None:
+    svc, _ = live
+    probe = svc.probe()
+    assert probe.available
+    assert probe.checks["tcp"] == "refused"
+    assert probe.checks["udp"] == "refused"
+    assert probe.checks["unix"] == "refused"
+    assert probe.checks["protected"] == "refused"
+    assert probe.checks["allowed"] == "read"
+    assert probe.checks["uid"] == 0
+    assert probe.checks["placement"] is True
+    assert probe.checks["landlock_abi"] == 8
+
+
+def test_live_run_true_and_cat(live: tuple[HostProcessService, Path]) -> None:
+    svc, _ = live
+    run = _run(svc, "true", "live-true")
+    final = _live_wait(svc, run["process_id"], "exited")
+    assert final["exit_code"] == 0
+    run = _run(svc, "cat", "live-cat", args=["notes.txt"])
+    final = _live_wait(svc, run["process_id"], "exited")
+    assert "hello" in final["stdout"]
+    assert final["exit_code"] == 0
+
+
+def test_live_protected_file_denied_from_inside(live: tuple[HostProcessService, Path]) -> None:
+    """Owner-mandated: a secret nested in the allowed tree is denied
+    from inside the process (Landlock), not just by daemon validation."""
+    svc, _ = live
+    run = _run(svc, "cat_abs", "live-cat-abs")
+    final = _live_wait(svc, run["process_id"], "exited")
+    assert "SECRET" not in final["stdout"]
+    assert final["exit_code"] != 0
+    assert "Permission denied" in final["stderr"] or "Operation not permitted" in final["stderr"]
+
+
+def test_live_string_slot_is_data(live: tuple[HostProcessService, Path]) -> None:
+    svc, _ = live
+    run = _run(svc, "grep", "live-grep-flag", args=["-v", "notes.txt"])
+    final = _live_wait(svc, run["process_id"], "exited")
+    # "-v" after "--" is the pattern (data), not grep's invert flag:
+    # no line contains "-v", so grep exits 1 with no output.
+    assert final["exit_code"] == 1
+    assert final["stdout"] == ""
+    run = _run(svc, "grep", "live-grep-ok", args=["hello", "notes.txt"])
+    final = _live_wait(svc, run["process_id"], "exited")
+    assert final["exit_code"] == 0
+    assert "hello" in final["stdout"]
+
+
+def test_live_env_minimality(live: tuple[HostProcessService, Path]) -> None:
+    svc, _ = live
+    os.environ["SLAVIK_TEST_MARKER"] = "marker-secret"
+    try:
+        run = _run(svc, "py_env", "live-env")
+        final = _live_wait(svc, run["process_id"], "exited")
+    finally:
+        del os.environ["SLAVIK_TEST_MARKER"]
+    assert "ABSENT" in final["stdout"]
+    assert "marker-secret" not in final["stdout"]
+    assert "host-bridge-proc" in final["stdout"]  # HOME is the private tmp dir
+
+
+def test_live_binary_identity(live: tuple[HostProcessService, Path]) -> None:
+    svc, work = live
+    # The "tool" profile binary was loaded from base/bin/tool; replace
+    # the file (new inode, different content) and the helper must
+    # refuse it — identity is bound to the open file from load time.
+    bin_path = work.parents[2] / "bin" / "tool"
+    assert bin_path.exists()
+    bin_path.unlink()
+    shutil.copy(_SLEEP, bin_path)
+    with pytest.raises(ProcessError) as excinfo:
+        _run(svc, "tool", "live-tool")
+    assert excinfo.value.code == "spawn_failed"
+
+
+def test_live_tree_kill_after_leader_exit(live: tuple[HostProcessService, Path]) -> None:
+    """Owner-mandated: leader exits, child outlives it; kill leaves NO
+    surviving descendants (verified via the cgroup and via pgrep)."""
+    svc, _ = live
+    run = _run(svc, "py_spawn", "live-tree-kill")
+    process_id = run["process_id"]
+    # Wait until the leader has exited (1 s) but the tree is alive.
+    deadline = time.monotonic() + 10.0
+    saw_running_with_child = False
+    while time.monotonic() < deadline:
+        polled = _poll(svc, process_id)
+        if polled["state"] == "running" and not _no_tree_child():
+            saw_running_with_child = True
+            break
+        time.sleep(0.1)
+    assert saw_running_with_child, "the spawned sleep child never appeared"
+    killed = _kill(svc, process_id)
+    assert killed["state"] in ("killed", "killing")
+    final = _live_wait(svc, process_id, "killed")
+    assert final["state"] == "killed"
+    assert _no_tree_child(), "a descendant survived the tree kill"
+
+
+def test_live_timeout_tree_kill(live: tuple[HostProcessService, Path]) -> None:
+    """Owner-mandated (timeout variant): the 120 s cap is shortened
+    per run; on expiry the whole tree dies, not just the leader."""
+    svc, _ = live
+    run = _run(svc, "py_spawn", "live-tree-timeout", timeout_s=3)
+    process_id = run["process_id"]
+    final = _live_wait(svc, process_id, "timeout", timeout_s=15.0)
+    assert final["state"] == "timeout"
+    assert _no_tree_child(), "a descendant survived the timeout tree kill"
+
+
+def test_live_idempotent_retry(live: tuple[HostProcessService, Path]) -> None:
+    svc, _ = live
+    first = _run(svc, "sleep", "live-retry", args=["5"])
+    second = _run(svc, "sleep", "live-retry", args=["5"])
+    assert first["process_id"] == second["process_id"]
+    assert sum(1 for pid in svc._records if pid == first["process_id"]) == 1
+    _kill(svc, first["process_id"])

@@ -206,6 +206,13 @@ class CancelToken:
             return True
         return self._deadline is not None and time.monotonic() >= self._deadline
 
+    @property
+    def remaining_s(self) -> float:
+        """Seconds until the deadline; ``inf`` when there is none."""
+        if self._deadline is None:
+            return float("inf")
+        return max(0.0, self._deadline - time.monotonic())
+
     def check(self) -> None:
         if self.cancelled:
             raise RequestTimeoutError(request_id=self.request_id)
@@ -452,7 +459,7 @@ def load_registry(
         raise BridgeConfigError(f"cannot read host bridge config {config_path}: {exc}") from exc
     if not isinstance(payload, dict):
         raise BridgeConfigError(f"host bridge config must be a JSON object: {config_path}")
-    unknown = sorted(set(payload) - {"roots", "write_excluded"})
+    unknown = sorted(set(payload) - {"roots", "write_excluded", "process_profiles"})
     if unknown:
         raise BridgeConfigError(f"host bridge config has unknown field(s): {', '.join(unknown)}")
     raw_roots = payload.get("roots")
@@ -681,6 +688,10 @@ class HostFsService:
     def default(cls, *, home: Path | None = None, socket_dir: Path | None = None) -> HostFsService:
         """Service with only the built-in workspace root (no config read)."""
         return cls(default_registry(home=home, socket_dir=socket_dir))
+
+    @property
+    def registry(self) -> RootsRegistry:
+        return self._registry
 
     def roots_description(self) -> list[dict[str, object]]:
         return self._registry.describe()

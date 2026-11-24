@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Final
 
 from host_bridge.fs import CancelToken, HostFsService
+from host_bridge.process import HostProcessService, ProcessError, build_process_service
 from host_bridge.protocol import (
     BRIDGE_VERSION,
     CAPABILITIES,
@@ -51,6 +52,7 @@ from host_bridge.protocol import (
     CAPABILITY_VERSION,
     FS_CAPABILITIES,
     MAX_FRAME_BYTES,
+    PROCESS_CAPABILITIES,
     PROTOCOL_VERSION,
     BridgeProtocolError,
     BridgeRequest,
@@ -147,6 +149,7 @@ class HostBridgeDaemon:
         request_timeout_s: float = DEFAULT_REQUEST_TIMEOUT_S,
         dispatch_fn: Callable[[BridgeRequest], dict[str, object]] | None = None,
         fs_service: HostFsService | None = None,
+        process_service: HostProcessService | None = None,
         capability_deadlines: Mapping[str, float] | None = None,
     ) -> None:
         self._socket_path = socket_path
@@ -160,6 +163,15 @@ class HostBridgeDaemon:
             fs_service
             if fs_service is not None
             else HostFsService.default(home=Path.home(), socket_dir=socket_path.parent)
+        )
+        self._process_service = (
+            process_service
+            if process_service is not None
+            else build_process_service(
+                self._fs_service.registry,
+                self._fs_service,
+                runtime_dir=socket_path.parent,
+            )
         )
         self._listener: socket.socket | None = None
         self._socket_identity: tuple[int, int] | None = None
@@ -198,6 +210,16 @@ class HostBridgeDaemon:
         listener.listen(16)
         listener.settimeout(_ACCEPT_TIMEOUT_S)
         self._listener = listener
+        # Eager enforcement probe (E03-T05): when profiles exist, verify
+        # the whole enforcement stack through the real spawner now, in
+        # this daemon's context. A probe failure does not stop the
+        # daemon — it hides the process capabilities (fail-closed) and
+        # any direct run answers process_unavailable.
+        if self._process_service.has_profiles():
+            try:
+                self._process_service.probe()
+            except BaseException:
+                pass
 
     def serve_forever(self) -> None:
         if self._listener is None:
@@ -214,6 +236,7 @@ class HostBridgeDaemon:
 
     def shutdown(self) -> None:
         self._stop.set()
+        self._process_service.shutdown()
         if self._listener is not None:
             self._listener.close()
             self._listener = None
@@ -367,10 +390,39 @@ class HostBridgeDaemon:
         if request.capability == CAPABILITY_VERSION:
             return {"protocol": PROTOCOL_VERSION, "bridge": BRIDGE_VERSION}
         if request.capability == CAPABILITY_CAPABILITIES:
+            capabilities = list(CAPABILITIES)
+            profiles: list[dict[str, object]] = []
+            if self._process_service.is_available():
+                profiles = self._process_service.profiles_description()
+            else:
+                # Process capabilities are hidden, not degraded: when
+                # the enforcement probe failed (or no profiles exist),
+                # the client must not see them at all.
+                capabilities = [c for c in capabilities if c not in PROCESS_CAPABILITIES]
             return {
-                "capabilities": list(CAPABILITIES),
+                "capabilities": capabilities,
                 "roots": self._fs_service.roots_description(),
+                "profiles": profiles,
             }
         if request.capability in FS_CAPABILITIES:
             return self._fs_service.handle(request, token)
+        if request.capability in PROCESS_CAPABILITIES:
+            if not self._process_service.has_profiles():
+                # No profiles configured: the process API does not
+                # exist on this daemon at all — it is unknown, not
+                # unavailable. (A daemon without profiles must answer
+                # exactly like a daemon that never had the capability.)
+                raise UnknownCapabilityError(request.capability, request_id=request.request_id)
+            if not self._process_service.is_available():
+                # Profiles exist but the enforcement probe failed:
+                # the capability is hidden and a direct run is refused
+                # with the typed process_unavailable (never degraded).
+                raise ProcessError(
+                    "process_unavailable",
+                    "process execution is unavailable: the enforcement probe failed",
+                    request_id=request.request_id,
+                )
+            return self._process_service.handle(
+                request.capability, request.params, request.request_id, token
+            )
         raise UnknownCapabilityError(request.capability, request_id=request.request_id)
