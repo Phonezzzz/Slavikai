@@ -36,6 +36,7 @@ scope leader is reaped.
 from __future__ import annotations
 
 import codecs
+import hashlib
 import json
 import os
 import re
@@ -70,7 +71,7 @@ from host_bridge.protocol import (
     BridgeProtocolError,
     RequestTimeoutError,
 )
-from host_bridge.spawn_helper import landlock_abi
+from host_bridge.spawn_helper import TAIL_BYTES, landlock_abi
 
 # --- limits (T05 proposal §4 + owner corrections) ---------------------
 
@@ -97,6 +98,14 @@ GRANT_WALK_MAX_GRANTS = GRANT_WALK_MAX_ENTRIES + 100
 GRANT_WALK_MAX_DEPTH = 128
 POLL_MAX_BYTES = 32 * 1024
 POLL_DEFAULT_MAX_BYTES = 8 * 1024
+# A poll accepts a tail + counters snapshot only when it is
+# consistent (see _poll): under a continuously publishing helper a
+# few attempts can straddle a publication, so the poll retries with
+# a short pause instead of failing on the first torn read — and
+# fails typed once the attempts are exhausted, instead of handing
+# out bytes that may sit at wrong absolute offsets.
+_POLL_SNAPSHOT_ATTEMPTS = 10
+_POLL_SNAPSHOT_RETRY_DELAY_S = 0.001
 
 _SLOT_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -1224,6 +1233,73 @@ def _status_int(status: dict[str, object], key: str) -> int:
     return value if isinstance(value, int) else 0
 
 
+def _status_str(status: dict[str, object], key: str) -> str:
+    """A string field from a status file ("" when absent/malformed)."""
+    value = status.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def _tails_match_hashes(record: _Record, stdout_tail: bytes, stderr_tail: bytes) -> bool:
+    """True when the tails read are the ones the status describes.
+
+    The helper publishes the SHA-256 of each tail's exact bytes
+    alongside its counters, so a tail flushed between the two
+    status reads (generation still old, counters still old) is
+    caught even though the generation and the lengths agree. A
+    status published before the hash fields existed carries no
+    digests: the generation + length checks are all that binds it.
+    """
+    if not record.stdout_tail_sha256 or not record.stderr_tail_sha256:
+        return True
+    return (
+        hashlib.sha256(stdout_tail).hexdigest() == record.stdout_tail_sha256
+        and hashlib.sha256(stderr_tail).hexdigest() == record.stderr_tail_sha256
+    )
+
+
+def _snapshot_is_torn(record: _Record, stdout_tail: bytes, stderr_tail: bytes) -> bool:
+    """True when the last-read snapshot cannot be a prefix of the
+    stream the status describes, so falling through with it would
+    hand bytes out at wrong absolute offsets.
+
+    A tail longer than the counters is pure growth — and safe to
+    clamp — only while it is below the rotation cap: once the
+    stream rotated, the tail is always exactly the cap, so a
+    cap-sized tail longer than the counters may already have
+    dropped its front bytes. A tail shorter than the counters is
+    an older file than the status: safe only before any rotation
+    (retained_from == 0), because after a rotation the tail is
+    always full and a short file cannot be the window the status
+    describes. Same length with a digest mismatch is the flush
+    window itself: the tail was replaced between the two status
+    reads while the generation and the counters were still old.
+    """
+    for tail, total, retained, digest in (
+        (
+            stdout_tail,
+            record.stdout_total,
+            record.stdout_retained_from,
+            record.stdout_tail_sha256,
+        ),
+        (
+            stderr_tail,
+            record.stderr_total,
+            record.stderr_retained_from,
+            record.stderr_tail_sha256,
+        ),
+    ):
+        expected = total - retained
+        if len(tail) == expected:
+            if digest and hashlib.sha256(tail).hexdigest() != digest:
+                return True
+        elif len(tail) > expected:
+            if len(tail) >= TAIL_BYTES:
+                return True
+        elif retained > 0:
+            return True
+    return False
+
+
 def run_enforcement_probe(
     spawner: SystemdRunSpawner,
     *,
@@ -1467,6 +1543,10 @@ class _Record:
     # its counters are one snapshot only when the generation did not
     # change across the read (see _poll).
     status_generation: int = 0
+    # SHA-256 digests of the tails the last status read describes
+    # ("" when the status predates the hash fields).
+    stdout_tail_sha256: str = ""
+    stderr_tail_sha256: str = ""
     settled: threading.Event = field(default_factory=threading.Event)
     final: bool = False
 
@@ -1902,6 +1982,8 @@ class HostProcessService:
         record.stdout_retained_from = _status_int(status, "stdout_retained_from")
         record.stderr_retained_from = _status_int(status, "stderr_retained_from")
         record.status_generation = _status_int(status, "generation")
+        record.stdout_tail_sha256 = _status_str(status, "stdout_tail_sha256")
+        record.stderr_tail_sha256 = _status_str(status, "stderr_tail_sha256")
         if record.started_at == "" and status.get("started_at"):
             record.started_at = str(status.get("started_at"))
         if not record.final:
@@ -1944,13 +2026,27 @@ class HostProcessService:
         # status plus a new tail passes the length check and hands
         # new bytes out at old absolute offsets (and repeats them on
         # the next poll). The binding is the publication generation
-        # the helper bumps on every status write: read status, read
-        # the tails, read the status again — the snapshot is
+        # the helper bumps on every status write, plus the SHA-256 of
+        # each tail's exact bytes the status carries: read status,
+        # read the tails, read the status again — the snapshot is
         # consistent only when the generation did not change AND
-        # total - retained_from == len(tail) for each stream. The
-        # growth case is still clamped below, so a stale status can
-        # never publish an offset beyond the bytes actually read.
-        for _ in range(5):
+        # total - retained_from == len(tail) AND the tails hash to
+        # the published digests for each stream. The hash closes
+        # the remaining window the generation cannot see: both
+        # status reads landing between _flush_tails() and
+        # _write_status(), with the generation and the counters
+        # still old while the tail file is already new. The growth
+        # case is still clamped below, so a stale status can never
+        # publish an offset beyond the bytes actually read. When no
+        # consistent snapshot appears within the attempts, the poll
+        # falls through with the last read values only when that
+        # snapshot cannot be a torn rotation (a small tail newer
+        # than its counters is pure growth and clamps safely); a
+        # snapshot that _snapshot_is_torn identifies as torn fails
+        # typed instead of returning bytes that may sit at wrong
+        # absolute offsets.
+        consistent = False
+        for attempt in range(_POLL_SNAPSHOT_ATTEMPTS):
             self._refresh(record)
             generation = record.status_generation
             stdout_tail = self._tail_bytes(run_dir, "stdout")
@@ -1960,8 +2056,17 @@ class HostProcessService:
                 record.status_generation == generation
                 and record.stdout_total - record.stdout_retained_from == len(stdout_tail)
                 and record.stderr_total - record.stderr_retained_from == len(stderr_tail)
+                and _tails_match_hashes(record, stdout_tail, stderr_tail)
             ):
+                consistent = True
                 break
+            if attempt + 1 < _POLL_SNAPSHOT_ATTEMPTS:
+                time.sleep(_POLL_SNAPSHOT_RETRY_DELAY_S)
+        if not consistent and _snapshot_is_torn(record, stdout_tail, stderr_tail):
+            raise ProcessError(
+                "snapshot_inconsistent",
+                "could not read a consistent tail + counters snapshot",
+            )
         stdout_total = max(record.stdout_total, record.stdout_retained_from + len(stdout_tail))
         stderr_total = max(record.stderr_total, record.stderr_retained_from + len(stderr_tail))
         if stdout_offset > stdout_total or stderr_offset > stderr_total:

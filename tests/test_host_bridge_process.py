@@ -16,6 +16,7 @@ binary identity, and live idempotent retry).
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 import shutil
@@ -1242,6 +1243,122 @@ def test_poll_rotation_snapshot_is_generation_bound(
         following = _poll(svc, process_id, stdout_offset=262144, max_bytes=4)
         assert following["stdout"] == "BBBB"
         assert following["stdout_next_offset"] == 262148
+    finally:
+        svc.shutdown()
+
+
+def test_poll_flush_window_snapshot_is_hash_bound(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both status reads can land between _flush_tails() and
+    _write_status(): the generation is unchanged and the counters
+    are still old while the tail file is already new, so the
+    generation + length checks accept the torn snapshot and hand
+    new bytes out at old absolute offsets. The SHA-256 of each
+    tail's exact bytes published in the status binds the tail to
+    its counters: a poll that reads across the flush retries and
+    answers from the new counters instead.
+    """
+    spawner = FakeSpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    # The reaper thread would consume scripted status reads (and
+    # update the record's totals) out of order; park it — this test
+    # drives _refresh explicitly. (Stopping it via _stop would make
+    # _run treat the spawn as a late launch instead.)
+    monkeypatch.setattr(svc, "_reap_once", lambda: None)
+    try:
+        result = _run(svc, "true", "req-flush")
+        process_id = result["process_id"]
+        handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+        # Rotated tail: A x 262140 then B x 4 (absolute 262144..262147).
+        new_tail = b"A" * 262140 + b"B" * 4
+        (handle.run_dir / "stdout").write_bytes(new_tail)
+        (handle.run_dir / "stderr").write_bytes(b"")
+        old = {
+            "version": 1,
+            "state": "running",
+            "stdout_total_bytes": 262144,
+            "stdout_retained_from": 0,
+            "stderr_total_bytes": 0,
+            "stderr_retained_from": 0,
+            "generation": 1,
+            "stdout_tail_sha256": hashlib.sha256(b"A" * 262144).hexdigest(),
+            "stderr_tail_sha256": hashlib.sha256(b"").hexdigest(),
+        }
+        new = dict(
+            old,
+            stdout_total_bytes=262148,
+            stdout_retained_from=4,
+            generation=2,
+            stdout_tail_sha256=hashlib.sha256(new_tail).hexdigest(),
+        )
+        # The supervisor is paused after _flush_tails() for the first
+        # attempt (both status reads old, hash of the new tail), then
+        # publishes the new status.
+        script = [old, old, old, new, new, new, new, new, new, new]
+        calls = {"n": 0}
+
+        def _scripted_status(run_dir: Path) -> dict[str, object] | None:
+            index = min(calls["n"], len(script) - 1)
+            calls["n"] += 1
+            return dict(script[index])
+
+        monkeypatch.setattr(process_module, "_read_status_file", _scripted_status)
+        # Absolute offset 262140 is the last four A's; with the torn
+        # snapshot (old counters, new tail) it would read BBBB.
+        polled = _poll(svc, process_id, stdout_offset=262140, max_bytes=4)
+        assert polled["stdout"] == "AAAA"
+        assert polled["stdout_next_offset"] == 262144
+        assert polled["stdout_total_bytes"] == 262148
+        assert polled["stdout_retained_from"] == 4
+        # And the new bytes follow exactly once, at their own offsets.
+        following = _poll(svc, process_id, stdout_offset=262144, max_bytes=4)
+        assert following["stdout"] == "BBBB"
+        assert following["stdout_next_offset"] == 262148
+    finally:
+        svc.shutdown()
+
+
+def test_poll_raises_when_snapshot_never_consistent(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supervisor wedged between _flush_tails() and
+    _write_status() never publishes a consistent snapshot: the
+    poll must fail typed instead of falling through with torn
+    bytes at wrong absolute offsets.
+    """
+    spawner = FakeSpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    monkeypatch.setattr(svc, "_reap_once", lambda: None)
+    try:
+        result = _run(svc, "true", "req-torn")
+        process_id = result["process_id"]
+        handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+        new_tail = b"A" * 262140 + b"B" * 4
+        (handle.run_dir / "stdout").write_bytes(new_tail)
+        (handle.run_dir / "stderr").write_bytes(b"")
+        old = {
+            "version": 1,
+            "state": "running",
+            "stdout_total_bytes": 262144,
+            "stdout_retained_from": 0,
+            "stderr_total_bytes": 0,
+            "stderr_retained_from": 0,
+            "generation": 1,
+            "stdout_tail_sha256": hashlib.sha256(b"A" * 262144).hexdigest(),
+            "stderr_tail_sha256": hashlib.sha256(b"").hexdigest(),
+        }
+
+        monkeypatch.setattr(process_module, "_read_status_file", lambda run_dir: dict(old))
+        with pytest.raises(ProcessError) as excinfo:
+            _poll(svc, process_id, stdout_offset=262140, max_bytes=4)
+        assert excinfo.value.code == "snapshot_inconsistent"
     finally:
         svc.shutdown()
 
@@ -2873,6 +2990,16 @@ def test_supervisor_status_carries_generation(tmp_path: Path) -> None:
     assert status["state"] == "exited"
     assert isinstance(status.get("generation"), int)
     assert status["generation"] >= 1
+    # The status also binds each tail to its counters with the
+    # SHA-256 of the tail's exact bytes at publication time.
+    assert (
+        status.get("stdout_tail_sha256")
+        == hashlib.sha256((run_dir / "stdout").read_bytes()).hexdigest()
+    )
+    assert (
+        status.get("stderr_tail_sha256")
+        == hashlib.sha256((run_dir / "stderr").read_bytes()).hexdigest()
+    )
 
 
 # --- integration: real spawner + helper (skipped when the probe fails) ---

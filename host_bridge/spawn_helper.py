@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import hashlib
 import json
 import os
 import select
@@ -689,7 +690,13 @@ class _Supervisor:
         # cannot distinguish a new tail from the counters that
         # describe it. A generation that changed between two status
         # reads means a publication happened in between, and the
-        # snapshot must be re-read.
+        # snapshot must be re-read. That still leaves one window:
+        # both status reads can land between _flush_tails() and
+        # _write_status(), with the generation unchanged and the
+        # counters still old while the tail file is already new.
+        # The status therefore also carries the SHA-256 of each
+        # tail's exact bytes at publication time, so the daemon can
+        # verify the tail it read is the one the counters describe.
         self.generation = 0
 
     def _status(self, state: str, **extra: object) -> dict[str, object]:
@@ -710,6 +717,8 @@ class _Supervisor:
             "stderr_total_bytes": self.stderr_tail.total,
             "stdout_retained_from": self.stdout_tail.retained_from,
             "stderr_retained_from": self.stderr_tail.retained_from,
+            "stdout_tail_sha256": hashlib.sha256(self.stdout_tail.bytes()).hexdigest(),
+            "stderr_tail_sha256": hashlib.sha256(self.stderr_tail.bytes()).hexdigest(),
             "timeout_s": self.timeout_s,
         }
         return status
