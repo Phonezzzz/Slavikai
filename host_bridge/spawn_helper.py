@@ -190,8 +190,11 @@ _SCMP_ACT_ERRNO = 0x00050000
 # by a privileged process). sched_setscheduler/sched_setattr are
 # banned for the same reason: a profile could otherwise move the
 # daemon/server to SCHED_IDLE and leave it starved under CPU
-# contention after the profile ends. The startup probe verifies the
-# metadata, prlimit, setpriority and scheduler bans live. Landlock
+# contention after the profile ends. sched_setaffinity is banned for
+# the same reason: a profile could otherwise pin the daemon/server
+# to a busy CPU and leave it degraded after the profile ends. The
+# startup probe verifies the metadata, prlimit, setpriority,
+# scheduler and affinity bans live. Landlock
 # + the empty network
 # namespace are the
 # other layers; the seccomp bans are mandatory (owner correction
@@ -223,6 +226,7 @@ _DENIED_SYSCALLS: tuple[str, ...] = (
     "setpriority",
     "sched_setscheduler",
     "sched_setattr",
+    "sched_setaffinity",
     "bpf",
     "open_by_handle_at",
     "name_to_handle_at",

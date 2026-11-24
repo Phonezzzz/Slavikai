@@ -159,7 +159,7 @@ result = {"tcp": "unknown", "udp": "unknown", "unix": "unknown",
           "protected": "unknown", "allowed": "unknown", "uid": None,
           "signal": "unknown", "metadata": "unknown", "prlimit": "unknown",
           "fifo": "unknown", "setpriority": "unknown", "late": "unknown",
-          "scheduler": "unknown"}
+          "scheduler": "unknown", "affinity": "unknown"}
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(2)
@@ -352,6 +352,31 @@ finally:
         pass
     try:
         os.waitpid(_child3, 0)
+    except OSError:
+        pass
+# sched_setaffinity is outside Landlock and signal scope, like
+# setpriority: with no PID namespace and matching kernel
+# credentials, the target must not pin another process to a CPU —
+# under CPU contention the victim is stuck on a busy core, and the
+# change persists after the profile ends. Fork a sacrificial child
+# and try to narrow its affinity to one CPU; the child is killed
+# right after, so a missing ban cannot hurt a real process.
+_child4 = os.fork()
+if _child4 == 0:
+    time.sleep(2)
+    os._exit(0)
+try:
+    os.sched_setaffinity(_child4, {0})
+    result["affinity"] = "allowed"
+except OSError as e:
+    result["affinity"] = "refused" if e.errno in (1, 13) else f"error:{e.errno}"
+finally:
+    try:
+        os.kill(_child4, 9)
+    except OSError:
+        pass
+    try:
+        os.waitpid(_child4, 0)
     except OSError:
         pass
 result["uid"] = os.getuid()
@@ -1143,7 +1168,8 @@ def run_enforcement_probe(
     seccomp ban), cannot renice another process via setpriority
     (same family, same ban), cannot move another process to a
     different scheduling policy via sched_setscheduler/sched_setattr
-    (same family, same ban), cannot create a named pipe via mkfifo
+    (same family, same ban), cannot pin another process to a CPU
+    via sched_setaffinity (same family, same ban), cannot create a named pipe via mkfifo
     (MAKE_FIFO is handled by Landlock with no allowing grant), cannot
     read or write a file created in its cwd after the grants were
     installed (directory rules carry directory-operation rights only,
@@ -1290,6 +1316,7 @@ def run_enforcement_probe(
                 "late": verdict.get("late"),
                 "setpriority": verdict.get("setpriority"),
                 "scheduler": verdict.get("scheduler"),
+                "affinity": verdict.get("affinity"),
                 "placement": placement_ok,
                 "landlock_abi": landlock_abi(),
             }
@@ -1307,6 +1334,7 @@ def run_enforcement_probe(
                 and verdict.get("late") == "refused"
                 and verdict.get("setpriority") == "refused"
                 and verdict.get("scheduler") == "refused"
+                and verdict.get("affinity") == "refused"
                 and placement_ok
             )
             if not ok:

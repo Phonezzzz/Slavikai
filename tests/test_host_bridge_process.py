@@ -2721,6 +2721,48 @@ def test_seccomp_sched_setattr_foreign_pid_denied(tmp_path: Path) -> None:
     assert (run_dir / "stdout").read_bytes() == b"refused\n"
 
 
+def test_seccomp_sched_setaffinity_foreign_pid_denied(tmp_path: Path) -> None:
+    """sched_setaffinity on another process is refused by the seccomp
+    ban: with no PID namespace and matching kernel credentials, a
+    profile could otherwise pin the daemon/server to a busy CPU and
+    leave it degraded after the profile ends (the scheduler-policy
+    ban does not close this separate syscall)."""
+    from host_bridge.spawn_helper import landlock_abi
+
+    if landlock_abi() is None:
+        pytest.skip("Landlock is unavailable in this environment")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    spec = _supervisor_spec(
+        run_dir,
+        work,
+        "import os, time\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    time.sleep(2)\n"
+        "    os._exit(0)\n"
+        "try:\n"
+        "    os.sched_setaffinity(pid, {0})\n"
+        "    print('allowed')\n"
+        "except OSError as e:\n"
+        "    print('refused' if e.errno in (1, 13) else 'error:%d' % e.errno)\n"
+        "finally:\n"
+        "    try:\n"
+        "        os.kill(pid, 9)\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    try:\n"
+        "        os.waitpid(pid, 0)\n"
+        "    except OSError:\n"
+        "        pass\n",
+    )
+    code, _ = _run_supervisor(spec, run_dir)
+    assert code == 0
+    assert (run_dir / "stdout").read_bytes() == b"refused\n"
+
+
 def test_supervisor_status_carries_generation(tmp_path: Path) -> None:
     """Every status publication bumps the generation counter the
     daemon uses to bind a tail to its counters (see
@@ -2891,6 +2933,35 @@ def _live_profiles(work: Path, bin_dir: Path) -> list[dict[str, object]]:
                 "    _e = ctypes.get_errno()\n"
                 "    _r = 'allowed' if ret == 0 else 'refused' if _e in (1, 13) else 'error'\n"
                 "    print('setattr:' + _r)\n"
+                "finally:\n"
+                "    try:\n"
+                "        os.kill(pid, 9)\n"
+                "    except OSError:\n"
+                "        pass\n"
+                "    try:\n"
+                "        os.waitpid(pid, 0)\n"
+                "    except OSError:\n"
+                "        pass\n",
+            ],
+            "cwd": {"root_id": "work", "path": "."},
+        }
+    )
+    profiles.append(
+        {
+            "id": "py_affinity",
+            "binary": _PY,
+            "argv_prefix": [
+                "-c",
+                "import os, time\n"
+                "pid = os.fork()\n"
+                "if pid == 0:\n"
+                "    time.sleep(2)\n"
+                "    os._exit(0)\n"
+                "try:\n"
+                "    os.sched_setaffinity(pid, {0})\n"
+                "    print('allowed')\n"
+                "except OSError as e:\n"
+                "    print('refused' if e.errno in (1, 13) else 'error:%d' % e.errno)\n"
                 "finally:\n"
                 "    try:\n"
                 "        os.kill(pid, 9)\n"
@@ -3133,6 +3204,7 @@ def test_live_probe_reports_all_layers(live: tuple[HostProcessService, Path]) ->
     assert probe.checks["late"] == "refused"
     assert probe.checks["setpriority"] == "refused"
     assert probe.checks["scheduler"] == "refused"
+    assert probe.checks["affinity"] == "refused"
     assert probe.checks["uid"] == 0
     assert probe.checks["placement"] is True
     assert probe.checks["landlock_abi"] == 8
@@ -3324,6 +3396,16 @@ def test_live_sched_foreign_pid_denied(live: tuple[HostProcessService, Path]) ->
     final = _live_wait(svc, run["process_id"], "exited")
     assert "setscheduler:refused" in final["stdout"], final
     assert "setattr:refused" in final["stdout"], final
+
+
+def test_live_sched_setaffinity_foreign_pid_denied(live: tuple[HostProcessService, Path]) -> None:
+    """A profile cannot pin another process to a CPU: sched_setaffinity
+    is banned by seccomp (same family as setpriority — the scheduler
+    ban alone does not close the affinity syscall)."""
+    svc, _ = live
+    run = _run(svc, "py_affinity", "live-affinity")
+    final = _live_wait(svc, run["process_id"], "exited")
+    assert "refused" in final["stdout"], final
 
 
 def test_live_idempotent_retry(live: tuple[HostProcessService, Path]) -> None:
