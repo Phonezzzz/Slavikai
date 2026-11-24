@@ -1345,6 +1345,45 @@ def test_kill_after_timeout_keeps_timeout_reason(
         svc.shutdown()
 
 
+def test_reaper_timeout_after_natural_exit_keeps_exit_code(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process that exits 0 just before its timeout deadline must
+    still report ``exited`` with that code when the reaper's first
+    iteration after the deadline runs: setting ``kill_requested``
+    before checking natural completion lets ``_try_finalize`` replace
+    the helper's published exit with ``timeout`` and no exit code,
+    turning a successful command into an error depending on reaper
+    scheduling."""
+    spawner = FakeSpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    # The background reaper would finalize the scripted exit itself
+    # before the deadline is moved; park it and drive the real
+    # _reap_once explicitly via the class (the instance attribute is
+    # the parked no-op).
+    monkeypatch.setattr(svc, "_reap_once", lambda: None)
+    try:
+        result = _run(svc, "sleep", "req-exit-before-timeout", args=["5"], timeout_s=1)
+        process_id = result["process_id"]
+        handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+        # The process exits 0 just before its 1 s deadline; the
+        # reaper runs 0.15 s after it.
+        spawner.finish(handle, state="exited", exit_code=0)
+        record = svc._records[process_id]
+        record.started_mono = time.monotonic() - 1.15
+        HostProcessService._reap_once(svc)
+        assert record.final
+        assert record.state == "exited"
+        assert record.exit_code == 0
+        assert not spawner.signal_calls, "no SIGTERM may be sent to a finished tree"
+        assert not spawner.kill_calls, "no cgroup kill may run for a finished tree"
+    finally:
+        svc.shutdown()
+
+
 class _CrashedHelperSpawner(FakeSpawner):
     """A spawner whose leader exits at once, no status file is ever
     published, and the cgroup stays non-empty until kill_all: the

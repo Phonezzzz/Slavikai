@@ -1980,6 +1980,16 @@ class HostProcessService:
             if record.final:
                 continue
             if record.state == "running" and now >= record.started_mono + record.timeout_s:
+                # The tree may already have finished on its own
+                # (leader and all descendants gone) without a poll
+                # having finalized the record: a timeout kill then is
+                # a no-op and the true final state is the natural one,
+                # not "timeout" — check natural completion first, as
+                # _kill() does, or a successful command turns into an
+                # error depending on reaper scheduling.
+                self._refresh(record)
+                if self._try_finalize(record):
+                    continue
                 record.kill_requested = True
                 record.kill_reason = "timeout"
                 record.state = "killing"
