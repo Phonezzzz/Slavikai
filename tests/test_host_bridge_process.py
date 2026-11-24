@@ -15,6 +15,7 @@ binary identity, and live idempotent retry).
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import hashlib
 import json
@@ -1640,6 +1641,39 @@ def test_poll_max_bytes_smaller_than_char(
         _poll(service, process_id, max_bytes=1)
     assert excinfo.value.code == "invalid_params"
     assert "too small" in str(excinfo.value)
+
+
+def test_poll_incomplete_char_at_live_stream_end_returns_empty_chunk(
+    service: HostProcessService, spawner: FakeSpawner
+) -> None:
+    """A live stream that published only the first byte of a
+    multibyte character must not fail the poll: the continuation
+    may still arrive, so the poll answers an empty chunk at the
+    same offset — and completes the character once it arrives.
+    A max_bytes that cuts an already-available character still
+    raises invalid_params (see test_poll_max_bytes_smaller_than_char).
+    """
+    result = _run(service, "true", "req-half-char")
+    process_id = result["process_id"]
+    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    spawner.set_output(handle, stdout=b"\xe2")
+    first = _poll(service, process_id)
+    assert first["stdout"] == ""
+    assert first["stdout_next_offset"] == 0
+    # A limit of 1 byte does not change the answer while the
+    # continuation has not arrived: nothing was cut.
+    limited = _poll(service, process_id, max_bytes=1)
+    assert limited["stdout"] == ""
+    assert limited["stdout_next_offset"] == 0
+    spawner.set_output(handle, stdout=b"\xe2\x82\xac")
+    second = _poll(service, process_id)
+    assert second["stdout"] == "\u20ac"
+    assert second["stdout_next_offset"] == 3
+    # And now the limit does matter: the character is fully
+    # available, so a max_bytes smaller than it fails typed.
+    with pytest.raises(ProcessError) as excinfo:
+        _poll(service, process_id, max_bytes=1)
+    assert excinfo.value.code == "invalid_params"
 
 
 def test_poll_frame_budget_trim_never_stalls(
@@ -3486,6 +3520,47 @@ def _live_profiles(work: Path, bin_dir: Path) -> list[dict[str, object]]:
     )
     profiles.append(
         {
+            "id": "py_ipc",
+            "binary": _PY,
+            "argv_prefix": [
+                "-c",
+                "import ctypes, sys\n"
+                "libc = ctypes.CDLL('libc.so.6', use_errno=True)\n"
+                "shmid = [a for a in sys.argv if a.startswith('--shmid=')][0]\n"
+                "shmid = int(shmid.split('=', 1)[1])\n"
+                "libc.shmat.restype = ctypes.c_void_p\n"
+                "libc.shmat.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]\n"
+                "addr = libc.shmat(shmid, None, 0)\n"
+                "if addr is None or addr == 0xFFFFFFFFFFFFFFFF:\n"
+                "    _e = ctypes.get_errno()\n"
+                "    print('refused' if _e in (1, 13, 22) else 'error:%d' % _e)\n"
+                "else:\n"
+                "    try:\n"
+                "        seen = ctypes.string_at(addr, 15)\n"
+                "        if seen != b'ipc-live-secret':\n"
+                "            print('allowed:read')\n"
+                "        else:\n"
+                "            ctypes.memset(addr, ord('X'), 1)\n"
+                "            print('allowed:write')\n"
+                "    finally:\n"
+                "        libc.shmdt.restype = ctypes.c_int\n"
+                "        libc.shmdt.argtypes = [ctypes.c_void_p]\n"
+                "        libc.shmdt(addr)\n",
+            ],
+            "args": [
+                {
+                    "name": "shmid",
+                    "kind": "string",
+                    "required": True,
+                    "form": "flag",
+                    "flag": "--shmid=",
+                }
+            ],
+            "cwd": {"root_id": "work", "path": "."},
+        }
+    )
+    profiles.append(
+        {
             "id": "py_dirops",
             "binary": _PY,
             "argv_prefix": [
@@ -3716,6 +3791,7 @@ def test_live_probe_reports_all_layers(live: tuple[HostProcessService, Path]) ->
     assert probe.checks["affinity"] == "refused"
     assert probe.checks["xattrat"] == "refused"
     assert probe.checks["ioprio"] == "refused"
+    assert probe.checks["ipc"] == "refused"
     assert probe.checks["uid"] == 0
     assert probe.checks["placement"] is True
     assert probe.checks["landlock_abi"] == 8
@@ -3939,6 +4015,42 @@ def test_live_ioprio_set_foreign_pid_denied(live: tuple[HostProcessService, Path
     run = _run(svc, "py_ioprio", "live-ioprio")
     final = _live_wait(svc, run["process_id"], "exited")
     assert "refused" in final["stdout"], final
+
+
+def test_live_ipc_namespace_isolated(live: tuple[HostProcessService, Path]) -> None:
+    """A profile cannot read or corrupt an owner's SysV segment: the
+    target runs in its own IPC namespace (CLONE_NEWIPC), so the
+    owner's segment does not exist for it (shmat -> EINVAL)."""
+    svc, _ = live
+    libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    libc.shmget.restype = ctypes.c_int
+    libc.shmget.argtypes = [ctypes.c_int, ctypes.c_size_t, ctypes.c_int]
+    shmid = libc.shmget(0, 64, 0o1000 | 0o600)
+    assert shmid >= 0
+    try:
+        libc.shmat.restype = ctypes.c_void_p
+        libc.shmat.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+        addr = libc.shmat(shmid, None, 0)
+        assert addr is not None and addr != 0xFFFFFFFFFFFFFFFF
+        ctypes.memmove(addr, b"ipc-live-secret", 15)
+        libc.shmdt.restype = ctypes.c_int
+        libc.shmdt.argtypes = [ctypes.c_void_p]
+        libc.shmdt(addr)
+        run = _run(svc, "py_ipc", "live-ipc", args=[str(shmid)])
+        final = _live_wait(svc, run["process_id"], "exited")
+        assert "refused" in final["stdout"], final
+        assert "allowed" not in final["stdout"], final
+        # And the segment is intact: the profile could not corrupt it.
+        addr = libc.shmat(shmid, None, 0)
+        assert addr is not None and addr != 0xFFFFFFFFFFFFFFFF
+        try:
+            assert ctypes.string_at(addr, 15) == b"ipc-live-secret"
+        finally:
+            libc.shmdt(addr)
+    finally:
+        libc.shmctl.restype = ctypes.c_int
+        libc.shmctl.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+        libc.shmctl(shmid, 0, None)  # IPC_RMID
 
 
 def test_live_idempotent_retry(live: tuple[HostProcessService, Path]) -> None:

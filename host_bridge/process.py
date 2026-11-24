@@ -3,7 +3,7 @@
 Capabilities ``host.process.run`` / ``host.process.poll`` /
 ``host.process.kill`` run owner-approved command profiles under the
 enforcement stack of ADR-0013 §10a as fixed for T05 by the owner
-(2026-11-24): Landlock + ``NEWUSER|NEWNET`` + ``NO_NEW_PRIVS`` +
+(2026-11-24): Landlock + ``NEWUSER|NEWNET|NEWIPC`` + ``NO_NEW_PRIVS`` +
 a mandatory seccomp socket ban, applied by the trampoline helper
 (``host_bridge.spawn_helper``), never by the multithreaded daemon
 itself; one cgroup v2 scope per ``process_id`` (created by
@@ -36,6 +36,7 @@ scope leader is reaped.
 from __future__ import annotations
 
 import codecs
+import ctypes
 import hashlib
 import json
 import os
@@ -169,7 +170,7 @@ result = {"tcp": "unknown", "udp": "unknown", "unix": "unknown",
           "signal": "unknown", "metadata": "unknown", "prlimit": "unknown",
           "fifo": "unknown", "setpriority": "unknown", "late": "unknown",
           "scheduler": "unknown", "affinity": "unknown",
-          "xattrat": "unknown", "ioprio": "unknown"}
+          "xattrat": "unknown", "ioprio": "unknown", "ipc": "unknown"}
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(2)
@@ -461,6 +462,36 @@ finally:
         os.waitpid(_child5, 0)
     except OSError:
         pass
+# SysV IPC is outside Landlock and outside the seccomp bans, and
+# the uid mapping preserves the owner's kernel UID — without its
+# own IPC namespace the target could shmat any SysV segment of
+# the owner it knows the id of, even mode 0600, and corrupt it.
+# The probe parent creates a segment (IPC_PRIVATE) and passes its
+# id as argv[4]; the target must not be able to attach to it at
+# all. In a fresh IPC namespace shmat on a foreign id fails
+# EINVAL; EACCES/EPERM would also be a refusal.
+_libc.shmat.restype = ctypes.c_void_p
+_libc.shmat.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+_shmid = int(sys.argv[4])
+_addr = _libc.shmat(_shmid, None, 0)
+if _addr is None or _addr == 0xFFFFFFFFFFFFFFFF:
+    _errno = ctypes.get_errno()
+    result["ipc"] = "refused" if _errno in (1, 13, 22) else f"error:{_errno}"
+else:
+    try:
+        _seen = ctypes.string_at(_addr, 16)
+        if _seen != b"ipc-probe-secret":
+            result["ipc"] = "error:wrong-content"
+        else:
+            try:
+                ctypes.memset(_addr, ord("X"), 1)
+                result["ipc"] = "allowed:write"
+            except OSError:
+                result["ipc"] = "allowed:read"
+    finally:
+        _libc.shmdt.restype = ctypes.c_int
+        _libc.shmdt.argtypes = [ctypes.c_void_p]
+        _libc.shmdt(_addr)
 result["uid"] = os.getuid()
 print("PROBE:" + json.dumps(result), flush=True)
 time.sleep(2)
@@ -1381,7 +1412,9 @@ def run_enforcement_probe(
     read or write a file created in its cwd after the grants were
     installed (directory rules carry directory-operation rights only,
     never file-content rights), CAN
-    read an allowed file, runs with the mapped uid, cannot signal
+    read an allowed file, cannot attach to a SysV shared-memory
+    segment of the owner (own IPC namespace), runs with the mapped
+    uid, cannot signal
     processes outside its Landlock domain, and is placed in its own
     scope cgroup.
     Any failure makes the process API unavailable (fail-closed).
@@ -1397,7 +1430,36 @@ def run_enforcement_probe(
         listener.bind(str(probe_dir / "probe.sock"))
         listener.listen(1)
         listener.settimeout(1.0)
+        # An external SysV segment for the ipc check: IPC_PRIVATE
+        # so no key can collide with a stale segment, 0600 like an
+        # owner's secret segment. Created here (host IPC namespace),
+        # its id is passed to the probe child, which must not be
+        # able to attach to it at all. Removed in the finally below.
+        probe_shmid: int | None = None
+        _shm_libc = ctypes.CDLL("libc.so.6", use_errno=True)
         try:
+            _shm_libc.shmget.restype = ctypes.c_int
+            _shm_libc.shmget.argtypes = [ctypes.c_int, ctypes.c_size_t, ctypes.c_int]
+            probe_shmid = _shm_libc.shmget(0, 64, 0o1000 | 0o600)
+            if probe_shmid < 0:
+                return ProbeResult(
+                    available=False,
+                    checks={"ipc": f"unavailable:{ctypes.get_errno()}"},
+                    reason="probe SysV segment unavailable",
+                )
+            _shm_libc.shmat.restype = ctypes.c_void_p
+            _shm_libc.shmat.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+            _shm_addr = _shm_libc.shmat(probe_shmid, None, 0)
+            if _shm_addr is None or _shm_addr == 0xFFFFFFFFFFFFFFFF:
+                return ProbeResult(
+                    available=False,
+                    checks={"ipc": f"unavailable:{ctypes.get_errno()}"},
+                    reason="probe SysV segment unavailable",
+                )
+            ctypes.memmove(_shm_addr, b"ipc-probe-secret", 16)
+            _shm_libc.shmdt.restype = ctypes.c_int
+            _shm_libc.shmdt.argtypes = [ctypes.c_void_p]
+            _shm_libc.shmdt(_shm_addr)
             try:
                 st = os.stat("/usr/bin/python3")
             except OSError as exc:
@@ -1431,6 +1493,7 @@ def run_enforcement_probe(
                     str(probe_dir / "probe.sock"),
                     str(probe_dir / ".env"),
                     str(probe_dir / "ok.txt"),
+                    str(probe_shmid),
                 ],
                 "env": dict(_BASE_ENV),
                 "cwd": str(probe_dir),
@@ -1526,6 +1589,7 @@ def run_enforcement_probe(
                 "affinity": verdict.get("affinity"),
                 "xattrat": verdict.get("xattrat"),
                 "ioprio": verdict.get("ioprio"),
+                "ipc": verdict.get("ipc"),
                 "placement": placement_ok,
                 "landlock_abi": landlock_abi(),
             }
@@ -1546,6 +1610,7 @@ def run_enforcement_probe(
                 and verdict.get("affinity") == "refused"
                 and verdict.get("xattrat") == "refused"
                 and verdict.get("ioprio") == "refused"
+                and verdict.get("ipc") == "refused"
                 and placement_ok
             )
             if not ok:
@@ -1558,6 +1623,10 @@ def run_enforcement_probe(
             return ProbeResult(available=True, checks=checks, reason="ok")
         finally:
             listener.close()
+            if probe_shmid is not None:
+                _shm_libc.shmctl.restype = ctypes.c_int
+                _shm_libc.shmctl.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+                _shm_libc.shmctl(probe_shmid, 0, None)  # IPC_RMID
     except Exception as exc:  # probe failure is "unavailable", never a crash
         return ProbeResult(
             available=False,
@@ -2228,6 +2297,16 @@ class HostProcessService:
             raw = tail[start - retained_from : start - retained_from + max_bytes]
             text, consumed = decode_slice(raw, start, total)
             if raw and consumed == 0:
+                if start - retained_from + len(raw) >= len(tail) and not snap.final:
+                    # The next character is not fully published yet:
+                    # the slice ends where the tail ends, so its
+                    # continuation may still arrive. Answer an empty
+                    # chunk at the same offset instead of blaming
+                    # max_bytes — the limit cut nothing, the bytes
+                    # simply are not there yet. A final stream never
+                    # takes this branch: its trailing incomplete
+                    # character is a replacement, not a wait.
+                    return "", raw, start, start, truncated
                 # FS read precedent: a limit smaller than the next
                 # character must fail loudly instead of returning
                 # zero bytes forever (the poll would never advance).

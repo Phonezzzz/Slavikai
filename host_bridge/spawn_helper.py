@@ -15,7 +15,7 @@ multithreaded and ``preexec_fn`` is documented-unsafe there):
 
 1. Read the JSON spec (binary, argv, env, cwd, Landlock grants,
    timeout) and unlink it immediately.
-2. Fork the target child. The child unshares ``NEWUSER|NEWNET``,
+2. Fork the target child. The child unshares ``NEWUSER|NEWNET|NEWIPC``,
    signals readiness on a pipe, and waits for the parent to write
    its ``uid_map``/``gid_map`` (a process cannot write its own map
    on this host: AppArmor's ``unprivileged_userns`` profile denies
@@ -80,6 +80,7 @@ _LANDLOCK_RULE_PATH_BENEATH = 1
 _LANDLOCK_CREATE_RULESET_VERSION = 1
 _CLONE_NEWUSER = 0x10000000
 _CLONE_NEWNET = 0x40000000
+_CLONE_NEWIPC = 0x08000000
 _PR_SET_NO_NEW_PRIVS = 38
 _PR_SET_PDEATHSIG = 1
 _PR_SET_DUMPABLE = 4
@@ -564,7 +565,17 @@ def _child_main(spec: dict[str, object], pipes: dict[str, int]) -> None:
         os.dup2(err_w, 2)
         if devnull > 2:
             os.close(devnull)
-        if _libc.unshare(_CLONE_NEWUSER | _CLONE_NEWNET) != 0:
+        # NEWIPC as well as NEWUSER|NEWNET: SysV IPC is outside
+        # Landlock and outside the seccomp bans, and the uid mapping
+        # preserves the owner's kernel UID — without its own IPC
+        # namespace the target could shmat/shmctl any SysV segment
+        # of the owner it knows the id of, even mode 0600. In a
+        # fresh IPC namespace the owner's segments do not exist
+        # (shmat -> EINVAL, shmget by key -> ENOENT); the target can
+        # still create its own segments, which die with the
+        # namespace. Verified unprivileged on this host: one
+        # unshare(NEWUSER|NEWNET|NEWIPC) call creates all three.
+        if _libc.unshare(_CLONE_NEWUSER | _CLONE_NEWNET | _CLONE_NEWIPC) != 0:
             _write_errno(exec_w, ctypes.get_errno(), "unshare")
             os._exit(_SPAWN_FAILED_EXIT)
         os.write(ready_w, b"R")
