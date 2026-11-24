@@ -994,60 +994,64 @@ def _compute_cwd_grants(
         base_dev = st.st_dev
         child_grants: list[Grant] = []
         has_protected = False
+        # Consume the iterator entry by entry: materializing it with
+        # list(it) would load the whole directory into memory before
+        # the entry limit or the cancellation token is ever checked,
+        # so a huge directory could exhaust the daemon's memory while
+        # a cancelled request keeps enumerating.
         try:
             with os.scandir(directory) as it:
-                children = list(it)
+                for entry in it:
+                    entries_seen += 1
+                    if entries_seen > GRANT_WALK_MAX_ENTRIES:
+                        raise ProcessError("spawn_failed", "grant walk too large")
+                    token.check()
+                    try:
+                        entry_st = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue  # unreadable entry: never granted
+                    if entry.is_symlink():
+                        continue  # never granted, never followed
+                    entry_path = directory / entry.name
+                    if entry_path in mount_points:
+                        # Bind mount (even same-device, so st_dev cannot see
+                        # it): never granted, never descended — the FS API
+                        # refuses nested mounts the same way, including the
+                        # final file component.
+                        continue
+                    if entry_st.st_dev != base_dev:
+                        continue  # nested mount: not granted, not descended
+                    classification = fs_service._classify(entry_path, mutation=False)
+                    if classification != "normal":
+                        # Protected: never granted. A protected directory is
+                        # still a protected subtree beneath this one, so the
+                        # ancestor downgrade applies to it.
+                        if entry.is_dir(follow_symlinks=False):
+                            has_protected = True
+                        continue
+                    # Write-exclusion is per path: a writable parent may hold
+                    # an excluded child, whose subtree is read-only.
+                    entry_access = access
+                    if access == "rw" and fs_service.is_write_excluded(root, entry_path):
+                        entry_access = "r"
+                    if entry.is_dir(follow_symlinks=False):
+                        sub_grants, sub_protected = walk(entry_path, depth + 1, entry_access)
+                        child_grants.extend(sub_grants)
+                        if sub_protected or (entry_access == "r" and access == "rw"):
+                            # A write-excluded child is itself a protected
+                            # subtree beneath this directory.
+                            has_protected = True
+                    else:
+                        child_grants.append(
+                            Grant(
+                                entry_path,
+                                entry_access,
+                                dev=entry_st.st_dev,
+                                ino=entry_st.st_ino,
+                            )
+                        )
         except OSError as exc:
             raise ProcessError("spawn_failed", f"cwd is not readable: {exc}") from exc
-        for entry in children:
-            entries_seen += 1
-            if entries_seen > GRANT_WALK_MAX_ENTRIES:
-                raise ProcessError("spawn_failed", "grant walk too large")
-            token.check()
-            try:
-                entry_st = entry.stat(follow_symlinks=False)
-            except OSError:
-                continue  # unreadable entry: never granted
-            if entry.is_symlink():
-                continue  # never granted, never followed
-            entry_path = directory / entry.name
-            if entry_path in mount_points:
-                # Bind mount (even same-device, so st_dev cannot see
-                # it): never granted, never descended — the FS API
-                # refuses nested mounts the same way, including the
-                # final file component.
-                continue
-            if entry_st.st_dev != base_dev:
-                continue  # nested mount: not granted, not descended
-            classification = fs_service._classify(entry_path, mutation=False)
-            if classification != "normal":
-                # Protected: never granted. A protected directory is
-                # still a protected subtree beneath this one, so the
-                # ancestor downgrade applies to it.
-                if entry.is_dir(follow_symlinks=False):
-                    has_protected = True
-                continue
-            # Write-exclusion is per path: a writable parent may hold
-            # an excluded child, whose subtree is read-only.
-            entry_access = access
-            if access == "rw" and fs_service.is_write_excluded(root, entry_path):
-                entry_access = "r"
-            if entry.is_dir(follow_symlinks=False):
-                sub_grants, sub_protected = walk(entry_path, depth + 1, entry_access)
-                child_grants.extend(sub_grants)
-                if sub_protected or (entry_access == "r" and access == "rw"):
-                    # A write-excluded child is itself a protected
-                    # subtree beneath this directory.
-                    has_protected = True
-            else:
-                child_grants.append(
-                    Grant(
-                        entry_path,
-                        entry_access,
-                        dev=entry_st.st_dev,
-                        ino=entry_st.st_ino,
-                    )
-                )
         # The directory itself gets directory-operation rights only
         # ("dir" for a writable tree, "rdir" for a read-only one):
         # never file-content rights, or a file created beneath it
@@ -1149,14 +1153,68 @@ class SystemdRunSpawner:
                 break
             time.sleep(0.05)
         if cgroup is None:
-            # systemd-run exited (or the unit never appeared): the spawn
-            # cannot be placed in a cgroup, so it is not a spawn at all.
+            # The scope path could not be resolved: systemd-run may
+            # have failed, but _cgroup_of() also returns None when
+            # systemctl itself errors or times out — and then the
+            # helper may already be running, possibly with a target
+            # that already forked descendants. Killing only the
+            # launcher leaves second-generation descendants alive
+            # (PDEATHSIG does not cover the whole tree), and _run()
+            # finalizes the record right after this raise, so the
+            # tree would keep running with no enforcement at all
+            # (ADR-0013 §10a). Destroy the tree by unit name and
+            # confirm the scope is gone before reporting the
+            # failed spawn.
+            self._destroy_scope_by_unit(unit_name)
             try:
                 popen.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 popen.kill()
             raise SpawnError("systemd-run scope did not appear")
         return SpawnHandle(popen=popen, unit_name=unit_name, cgroup_path=cgroup, run_dir=run_dir)
+
+    @staticmethod
+    def _unit_gone(unit_name: str) -> bool:
+        """True when the scope is finished: systemd no longer knows
+        the unit, or it is inactive (a scope deactivates only once
+        its cgroup is empty)."""
+        try:
+            out = subprocess.run(
+                [
+                    "systemctl",
+                    "--user",
+                    "show",
+                    unit_name,
+                    "-p",
+                    "LoadState,ActiveState",
+                ],
+                capture_output=True,
+                timeout=5,
+                text=True,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        fields = dict(line.split("=", 1) for line in out.stdout.splitlines() if "=" in line)
+        return fields.get("LoadState") == "not-found" or fields.get("ActiveState") == "inactive"
+
+    def _destroy_scope_by_unit(self, unit_name: str, timeout_s: float = 5.0) -> None:
+        """SIGKILL everything in the scope by unit name and wait
+        until the unit is gone. Best effort: the spawn fails either
+        way, but a leaked tree would keep running unenforced, so
+        the wait is bounded instead of skipped."""
+        try:
+            subprocess.run(
+                ["systemctl", "--user", "kill", "--signal=SIGKILL", unit_name],
+                capture_output=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self._unit_gone(unit_name):
+                return
+            time.sleep(0.05)
 
     @staticmethod
     def _cgroup_of(unit_name: str) -> Path | None:
@@ -1549,6 +1607,57 @@ class _Record:
     stderr_tail_sha256: str = ""
     settled: threading.Event = field(default_factory=threading.Event)
     final: bool = False
+
+
+@dataclass(frozen=True)
+class _PollSnapshot:
+    """Immutable counters + tails of one verified poll snapshot.
+
+    Everything ``_poll`` answers with comes from here, never from
+    the shared ``_Record``: a concurrent ``_refresh`` (another poll,
+    the reaper) may rewrite the record's counters after the snapshot
+    was verified, and answering from the record would then slice the
+    verified tails with newer counters — new bytes at old absolute
+    offsets. The snapshot is captured before the check runs, so a
+    refresh landing during the check cannot move the values the
+    answer is built from; the generation + digest checks then prove
+    no refresh landed between the capture and the check.
+    """
+
+    process_id: str
+    state: str
+    exit_code: int | None
+    exit_signal: int | None
+    started_at: str
+    finished_at: str | None
+    stdout_total: int
+    stdout_retained_from: int
+    stderr_total: int
+    stderr_retained_from: int
+    stdout_tail: bytes
+    stderr_tail: bytes
+    final: bool
+
+
+def _capture_poll_snapshot(
+    record: _Record, stdout_tail: bytes, stderr_tail: bytes
+) -> _PollSnapshot:
+    """Freeze the record's poll-visible fields with the tails read."""
+    return _PollSnapshot(
+        process_id=record.process_id,
+        state=record.state,
+        exit_code=record.exit_code,
+        exit_signal=record.exit_signal,
+        started_at=record.started_at,
+        finished_at=record.finished_at,
+        stdout_total=record.stdout_total,
+        stdout_retained_from=record.stdout_retained_from,
+        stderr_total=record.stderr_total,
+        stderr_retained_from=record.stderr_retained_from,
+        stdout_tail=stdout_tail,
+        stderr_tail=stderr_tail,
+        final=record.final,
+    )
 
 
 class HostProcessService:
@@ -2044,38 +2153,58 @@ class HostProcessService:
         # than its counters is pure growth and clamps safely); a
         # snapshot that _snapshot_is_torn identifies as torn fails
         # typed instead of returning bytes that may sit at wrong
-        # absolute offsets.
+        # absolute offsets. And the answer is built only from the
+        # frozen _PollSnapshot below, never from the shared record:
+        # a concurrent _refresh (another poll, the reaper) may
+        # rewrite the record's counters after the check, and
+        # slicing the verified tails with newer counters would hand
+        # new bytes out at old absolute offsets without any
+        # consistency error.
         consistent = False
+        snap: _PollSnapshot | None = None
         for attempt in range(_POLL_SNAPSHOT_ATTEMPTS):
             self._refresh(record)
             generation = record.status_generation
             stdout_tail = self._tail_bytes(run_dir, "stdout")
             stderr_tail = self._tail_bytes(run_dir, "stderr")
             self._refresh(record)
+            # Freeze the counters with the tails BEFORE the check:
+            # a refresh landing during the check must not move the
+            # values the answer is built from. The generation +
+            # digest checks then prove no refresh landed between
+            # this capture and the check — one that did makes the
+            # generation or the digests disagree, and the attempt
+            # is retried with a fresh capture.
+            snap = _capture_poll_snapshot(record, stdout_tail, stderr_tail)
             if (
                 record.status_generation == generation
-                and record.stdout_total - record.stdout_retained_from == len(stdout_tail)
-                and record.stderr_total - record.stderr_retained_from == len(stderr_tail)
+                and snap.stdout_total - snap.stdout_retained_from == len(stdout_tail)
+                and snap.stderr_total - snap.stderr_retained_from == len(stderr_tail)
                 and _tails_match_hashes(record, stdout_tail, stderr_tail)
             ):
                 consistent = True
                 break
             if attempt + 1 < _POLL_SNAPSHOT_ATTEMPTS:
                 time.sleep(_POLL_SNAPSHOT_RETRY_DELAY_S)
+        if snap is None:  # pragma: no cover - attempts is always >= 1
+            raise ProcessError(
+                "snapshot_inconsistent",
+                "could not read a consistent tail + counters snapshot",
+            )
         if not consistent and _snapshot_is_torn(record, stdout_tail, stderr_tail):
             raise ProcessError(
                 "snapshot_inconsistent",
                 "could not read a consistent tail + counters snapshot",
             )
-        stdout_total = max(record.stdout_total, record.stdout_retained_from + len(stdout_tail))
-        stderr_total = max(record.stderr_total, record.stderr_retained_from + len(stderr_tail))
+        stdout_total = max(snap.stdout_total, snap.stdout_retained_from + len(snap.stdout_tail))
+        stderr_total = max(snap.stderr_total, snap.stderr_retained_from + len(snap.stderr_tail))
         if stdout_offset > stdout_total or stderr_offset > stderr_total:
             raise ProcessError("offset_out_of_range", "offset is beyond the stream end")
-        if record.started_at:
-            start_ts = datetime.fromisoformat(record.started_at).timestamp()
+        if snap.started_at:
+            start_ts = datetime.fromisoformat(snap.started_at).timestamp()
             end_ts = (
-                datetime.fromisoformat(record.finished_at).timestamp()
-                if record.finished_at
+                datetime.fromisoformat(snap.finished_at).timestamp()
+                if snap.finished_at
                 else time.time()
             )
             elapsed_ms = int(round((end_ts - start_ts) * 1000))
@@ -2088,7 +2217,7 @@ class HostProcessService:
             # (not consumed) unless the slice reaches the actual end
             # of the stream — otherwise a max_bytes/frame-budget cut
             # through a multibyte character corrupts the output.
-            eof = record.final and start + len(raw) >= total
+            eof = snap.final and start + len(raw) >= total
             return _decode_poll_chunk(raw, at_eof=eof)
 
         def chunk(
@@ -2122,18 +2251,18 @@ class HostProcessService:
             return text, shrunk, start + consumed
 
         stdout_text, stdout_raw, stdout_start, stdout_next, stdout_truncated = chunk(
-            stdout_offset, stdout_total, record.stdout_retained_from, stdout_tail
+            stdout_offset, stdout_total, snap.stdout_retained_from, snap.stdout_tail
         )
         stderr_text, stderr_raw, stderr_start, stderr_next, stderr_truncated = chunk(
-            stderr_offset, stderr_total, record.stderr_retained_from, stderr_tail
+            stderr_offset, stderr_total, snap.stderr_retained_from, snap.stderr_tail
         )
         result: dict[str, object] = {
-            "process_id": record.process_id,
-            "state": record.state,
-            "exit_code": record.exit_code,
-            "signal": record.exit_signal,
-            "started_at": record.started_at,
-            "finished_at": record.finished_at,
+            "process_id": snap.process_id,
+            "state": snap.state,
+            "exit_code": snap.exit_code,
+            "signal": snap.exit_signal,
+            "started_at": snap.started_at,
+            "finished_at": snap.finished_at,
             "elapsed_ms": elapsed_ms,
             "stdout": stdout_text,
             "stderr": stderr_text,
@@ -2141,8 +2270,8 @@ class HostProcessService:
             "stderr_next_offset": stderr_next,
             "stdout_total_bytes": stdout_total,
             "stderr_total_bytes": stderr_total,
-            "stdout_retained_from": record.stdout_retained_from,
-            "stderr_retained_from": record.stderr_retained_from,
+            "stdout_retained_from": snap.stdout_retained_from,
+            "stderr_retained_from": snap.stderr_retained_from,
             "stdout_truncated": stdout_truncated,
             "stderr_truncated": stderr_truncated,
         }

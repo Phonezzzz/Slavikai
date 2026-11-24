@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -813,6 +814,111 @@ def test_cwd_grants_downgrade_ancestors_of_protected_subtrees(home: Path, tmp_pa
         )
 
 
+def _counting_scandir(real_scandir, directory: Path, counts: dict[str, int]):
+    """Wrap os.scandir to count entries yielded for one directory.
+
+    The walk under test reads the directory through os.scandir;
+    other directories pass through untouched.
+    """
+    resolved = directory.resolve()
+
+    class _Counting:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            entry = next(self._inner)
+            counts["n"] += 1
+            return entry
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self._inner.__exit__(*exc)
+
+        def close(self):
+            self._inner.close()
+
+    def _scandir(path):
+        inner = real_scandir(path)
+        if Path(path).resolve() == resolved:
+            return _Counting(inner)
+        return inner
+
+    return _scandir
+
+
+def _big_work_setup(home: Path, tmp_path: Path, n_files: int):
+    """A work root with more than GRANT_WALK_MAX_ENTRIES entries,
+    plus the fs/registry/profile to run the grant walk on it.
+
+    The entries are dangling symlinks, not files: the limit and
+    token checks run before any per-entry classification, so
+    symlinks exercise the same path — while a real file would pay
+    a full _classify per entry and make the test minutes long.
+    """
+    from host_bridge.process import GRANT_WALK_MAX_ENTRIES, _compute_cwd_grants
+
+    work = home / "Project" / "work"
+    for i in range(n_files):
+        (work / f"f{i:05d}.txt").symlink_to("nonexistent-target")
+    registry = _registry_with_exclusions(home, ())
+    fs = HostFsService(registry, trash_root=tmp_path / "Trash")
+    profiles = load_profiles(registry)
+    profile = next(p for p in profiles if p.id == "true")
+    return fs, registry, profile, _compute_cwd_grants, GRANT_WALK_MAX_ENTRIES
+
+
+def test_grant_walk_checks_limit_while_reading(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory with more than GRANT_WALK_MAX_ENTRIES entries
+    must fail before the whole listing is loaded: the limit is
+    checked per entry as the iterator is read, not after list(it)
+    materialized it.
+    """
+    from host_bridge.process import GRANT_WALK_MAX_ENTRIES
+
+    fs, registry, profile, _compute_cwd_grants, _ = _big_work_setup(
+        home, tmp_path, GRANT_WALK_MAX_ENTRIES + 50
+    )
+    work = home / "Project" / "work"
+    counts = {"n": 0}
+    monkeypatch.setattr(os, "scandir", _counting_scandir(os.scandir, work, counts))
+    with pytest.raises(ProcessError) as excinfo:
+        _compute_cwd_grants(fs, registry, profile, token=_token(deadline_s=120))
+    assert excinfo.value.code == "spawn_failed"
+    assert "too large" in str(excinfo.value)
+    assert counts["n"] <= GRANT_WALK_MAX_ENTRIES + 1
+
+
+def test_grant_walk_cancellation_stops_reading(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancelled token must stop the walk on the first entry:
+    with list(it) the whole directory (50 001 entries in the
+    finding's repro) was consumed first and the RequestTimeoutError
+    only surfaced after the list was built.
+    """
+    from host_bridge.process import GRANT_WALK_MAX_ENTRIES
+
+    fs, registry, profile, _compute_cwd_grants, _ = _big_work_setup(
+        home, tmp_path, GRANT_WALK_MAX_ENTRIES + 50
+    )
+    work = home / "Project" / "work"
+    counts = {"n": 0}
+    monkeypatch.setattr(os, "scandir", _counting_scandir(os.scandir, work, counts))
+    token = _token()
+    token.cancel()
+    with pytest.raises(RequestTimeoutError):
+        _compute_cwd_grants(fs, registry, profile, token=token)
+    assert counts["n"] <= 2
+
+
 def test_cwd_grants_carry_identity(home: Path, tmp_path: Path) -> None:
     """Every grant the daemon computes is bound to the (dev, ino)
     of the object it saw: the helper refuses a path whose object
@@ -1359,6 +1465,79 @@ def test_poll_raises_when_snapshot_never_consistent(
         with pytest.raises(ProcessError) as excinfo:
             _poll(svc, process_id, stdout_offset=262140, max_bytes=4)
         assert excinfo.value.code == "snapshot_inconsistent"
+    finally:
+        svc.shutdown()
+
+
+def test_poll_uses_snapshot_counters_despite_concurrent_refresh(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concurrent _refresh (another poll, the reaper) must not
+    move the counters the answer is built from: the first poll
+    verified the old tail (ending 1234), the other thread rotates
+    and updates the record, and the first poll must still answer
+    1234 at offset 262140 — not AAAA from slicing the old tail
+    with the new retained_from.
+    """
+    spawner = FakeSpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    monkeypatch.setattr(svc, "_reap_once", lambda: None)
+    try:
+        result = _run(svc, "true", "req-snap-race")
+        process_id = result["process_id"]
+        handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+        old_tail = b"A" * 262140 + b"1234"
+        new_tail = b"A" * 262136 + b"1234" + b"BBBB"
+        (handle.run_dir / "stdout").write_bytes(old_tail)
+        (handle.run_dir / "stderr").write_bytes(b"")
+        old = {
+            "version": 1,
+            "state": "running",
+            "stdout_total_bytes": 262144,
+            "stdout_retained_from": 0,
+            "stderr_total_bytes": 0,
+            "stderr_retained_from": 0,
+            "generation": 1,
+            "stdout_tail_sha256": hashlib.sha256(old_tail).hexdigest(),
+            "stderr_tail_sha256": hashlib.sha256(b"").hexdigest(),
+        }
+        new = dict(
+            old,
+            stdout_total_bytes=262148,
+            stdout_retained_from=4,
+            generation=2,
+            stdout_tail_sha256=hashlib.sha256(new_tail).hexdigest(),
+        )
+        current = {"status": old}
+        injected = {"done": False}
+
+        def _scripted_status(run_dir: Path) -> dict[str, object] | None:
+            return dict(current["status"])
+
+        monkeypatch.setattr(process_module, "_read_status_file", _scripted_status)
+        original_match = process_module._tails_match_hashes
+
+        def _injecting_match(record, stdout_tail, stderr_tail):
+            matched = original_match(record, stdout_tail, stderr_tail)
+            if matched and not injected["done"]:
+                injected["done"] = True
+                # The other thread publishes a rotation and refreshes
+                # the shared record — after the check, before the
+                # answer is built.
+                current["status"] = new
+                svc._refresh(record)
+            return matched
+
+        monkeypatch.setattr(process_module, "_tails_match_hashes", _injecting_match)
+        polled = _poll(svc, process_id, stdout_offset=262140, max_bytes=4)
+        assert injected["done"]
+        assert polled["stdout"] == "1234"
+        assert polled["stdout_next_offset"] == 262144
+        assert polled["stdout_total_bytes"] == 262144
+        assert polled["stdout_retained_from"] == 0
     finally:
         svc.shutdown()
 
@@ -3000,6 +3179,59 @@ def test_supervisor_status_carries_generation(tmp_path: Path) -> None:
         status.get("stderr_tail_sha256")
         == hashlib.sha256((run_dir / "stderr").read_bytes()).hexdigest()
     )
+
+
+def test_spawn_cgroup_lookup_failure_destroys_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If _cgroup_of() cannot resolve the scope, the helper may
+    still be running with descendants: killing only the launcher
+    leaves the tree alive. The spawn must destroy the tree by unit
+    name and confirm the scope is gone before raising.
+    """
+    from host_bridge.process import SystemdRunSpawner
+    from host_bridge.spawn_helper import landlock_abi
+
+    if landlock_abi() is None:
+        pytest.skip("Landlock is unavailable in this environment")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    token = uuid.uuid4().hex[:12]
+    marker = f"GCFAIL-{token}"
+    unit_name = f"slavikai-test-cgroup-fail-{token}.scope"
+    # The leader forks a long-lived child and exits after 1 s; the
+    # child (a fork, not an exec: only the approved binary may
+    # execute) must not survive the failed spawn. The marker rides
+    # in the -c code, so both parent and child match pgrep -f.
+    code = (
+        f"import os, time; '{marker}'; pid = os.fork(); pid == 0 and time.sleep(47); time.sleep(1)"
+    )
+    spec = _supervisor_spec(run_dir, cwd, code)
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+    def _alive() -> list[str]:
+        found = subprocess.run(["pgrep", "-f", marker], capture_output=True, timeout=5, text=True)
+        return [line for line in found.stdout.splitlines() if line.strip()]
+
+    spawner = SystemdRunSpawner()
+    monkeypatch.setattr(SystemdRunSpawner, "_cgroup_of", staticmethod(lambda unit: None))
+    try:
+        with pytest.raises(SpawnError):
+            spawner.spawn(spec_path, unit_name=unit_name, run_dir=run_dir)
+        assert _alive() == [], "grandchild survived the failed spawn"
+    finally:
+        # Never leak the scope on the host, whatever the outcome.
+        subprocess.run(
+            ["systemctl", "--user", "kill", "--signal=SIGKILL", unit_name],
+            capture_output=True,
+            timeout=5,
+        )
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and _alive():
+            time.sleep(0.05)
 
 
 # --- integration: real spawner + helper (skipped when the probe fails) ---
