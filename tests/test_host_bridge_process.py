@@ -2218,6 +2218,100 @@ def test_seccomp_setpriority_foreign_pid_denied(tmp_path: Path) -> None:
     assert (run_dir / "stdout").read_bytes() == b"refused\n"
 
 
+def test_seccomp_sched_setscheduler_foreign_pid_denied(tmp_path: Path) -> None:
+    """sched_setscheduler on another process is refused by the seccomp
+    ban: with no PID namespace and matching kernel credentials, a
+    profile could otherwise move the daemon/server to SCHED_IDLE and
+    leave it starved under CPU contention after the profile ends (the
+    setpriority ban does not close this separate syscall)."""
+    from host_bridge.spawn_helper import landlock_abi
+
+    if landlock_abi() is None:
+        pytest.skip("Landlock is unavailable in this environment")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    spec = _supervisor_spec(
+        run_dir,
+        work,
+        "import os, time\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    time.sleep(2)\n"
+        "    os._exit(0)\n"
+        "try:\n"
+        "    os.sched_setscheduler(pid, os.SCHED_IDLE, os.sched_param(0))\n"
+        "    print('allowed')\n"
+        "except OSError as e:\n"
+        "    print('refused' if e.errno in (1, 13) else 'error:%d' % e.errno)\n"
+        "finally:\n"
+        "    try:\n"
+        "        os.kill(pid, 9)\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    try:\n"
+        "        os.waitpid(pid, 0)\n"
+        "    except OSError:\n"
+        "        pass\n",
+    )
+    code, _ = _run_supervisor(spec, run_dir)
+    assert code == 0
+    assert (run_dir / "stdout").read_bytes() == b"refused\n"
+
+
+def test_seccomp_sched_setattr_foreign_pid_denied(tmp_path: Path) -> None:
+    """sched_setattr on another process is refused by the seccomp ban:
+    it is the second entry point to the same scheduling-policy change
+    as sched_setscheduler (raw syscall 314 on x86_64, no stdlib
+    wrapper) and must be closed with it."""
+    from host_bridge.spawn_helper import landlock_abi
+
+    if landlock_abi() is None:
+        pytest.skip("Landlock is unavailable in this environment")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    spec = _supervisor_spec(
+        run_dir,
+        work,
+        "import ctypes, os, time\n"
+        "class Attr(ctypes.Structure):\n"
+        "    _fields_ = [('size', ctypes.c_uint32), ('sched_policy', ctypes.c_uint32),\n"
+        "                ('sched_flags', ctypes.c_uint64), ('sched_nice', ctypes.c_int32),\n"
+        "                ('sched_priority', ctypes.c_uint32), ('sched_runtime', ctypes.c_uint64),\n"
+        "                ('sched_deadline', ctypes.c_uint64), ('sched_period', ctypes.c_uint64)]\n"
+        "libc = ctypes.CDLL('libc.so.6', use_errno=True)\n"
+        "libc.syscall.restype = ctypes.c_long\n"
+        "libc.syscall.argtypes = [ctypes.c_long, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint]\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    time.sleep(2)\n"
+        "    os._exit(0)\n"
+        "try:\n"
+        "    attr = Attr()\n"
+        "    attr.size = ctypes.sizeof(Attr)\n"
+        "    attr.sched_policy = 5\n"
+        "    ret = libc.syscall(314, pid, ctypes.byref(attr), 0)\n"
+        "    _e = ctypes.get_errno()\n"
+        "    _r = 'allowed' if ret == 0 else 'refused' if _e in (1, 13) else 'error:%d' % _e\n"
+        "    print(_r)\n"
+        "finally:\n"
+        "    try:\n"
+        "        os.kill(pid, 9)\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    try:\n"
+        "        os.waitpid(pid, 0)\n"
+        "    except OSError:\n"
+        "        pass\n",
+    )
+    code, _ = _run_supervisor(spec, run_dir)
+    assert code == 0
+    assert (run_dir / "stdout").read_bytes() == b"refused\n"
+
+
 def test_supervisor_status_carries_generation(tmp_path: Path) -> None:
     """Every status publication bumps the generation counter the
     daemon uses to bind a tail to its counters (see
@@ -2349,6 +2443,58 @@ def _live_profiles(work: Path, bin_dir: Path) -> list[dict[str, object]]:
             "cwd": {"root_id": "work", "path": "."},
         }
     )
+    profiles.append(
+        {
+            "id": "py_sched",
+            "binary": _PY,
+            "argv_prefix": [
+                "-c",
+                "import ctypes, os, time\n"
+                "class Attr(ctypes.Structure):\n"
+                "    _fields_ = [\n"
+                "        ('size', ctypes.c_uint32),\n"
+                "        ('sched_policy', ctypes.c_uint32),\n"
+                "        ('sched_flags', ctypes.c_uint64),\n"
+                "        ('sched_nice', ctypes.c_int32),\n"
+                "        ('sched_priority', ctypes.c_uint32),\n"
+                "        ('sched_runtime', ctypes.c_uint64),\n"
+                "        ('sched_deadline', ctypes.c_uint64),\n"
+                "        ('sched_period', ctypes.c_uint64)]\n"
+                "libc = ctypes.CDLL('libc.so.6', use_errno=True)\n"
+                "libc.syscall.restype = ctypes.c_long\n"
+                "libc.syscall.argtypes = [ctypes.c_long, ctypes.c_int,\n"
+                "                         ctypes.c_void_p, ctypes.c_uint]\n"
+                "pid = os.fork()\n"
+                "if pid == 0:\n"
+                "    time.sleep(2)\n"
+                "    os._exit(0)\n"
+                "try:\n"
+                "    os.sched_setscheduler(pid, os.SCHED_IDLE, os.sched_param(0))\n"
+                "    print('setscheduler:allowed')\n"
+                "except OSError as e:\n"
+                "    _r = 'refused' if e.errno in (1, 13) else 'error:%d' % e.errno\n"
+                "    print('setscheduler:' + _r)\n"
+                "try:\n"
+                "    attr = Attr()\n"
+                "    attr.size = ctypes.sizeof(Attr)\n"
+                "    attr.sched_policy = 5\n"
+                "    ret = libc.syscall(314, pid, ctypes.byref(attr), 0)\n"
+                "    _e = ctypes.get_errno()\n"
+                "    _r = 'allowed' if ret == 0 else 'refused' if _e in (1, 13) else 'error'\n"
+                "    print('setattr:' + _r)\n"
+                "finally:\n"
+                "    try:\n"
+                "        os.kill(pid, 9)\n"
+                "    except OSError:\n"
+                "        pass\n"
+                "    try:\n"
+                "        os.waitpid(pid, 0)\n"
+                "    except OSError:\n"
+                "        pass\n",
+            ],
+            "cwd": {"root_id": "work", "path": "."},
+        }
+    )
     return profiles
 
 
@@ -2424,6 +2570,7 @@ def test_live_probe_reports_all_layers(live: tuple[HostProcessService, Path]) ->
     assert probe.checks["prlimit"] == "refused"
     assert probe.checks["fifo"] == "refused"
     assert probe.checks["setpriority"] == "refused"
+    assert probe.checks["scheduler"] == "refused"
     assert probe.checks["uid"] == 0
     assert probe.checks["placement"] is True
     assert probe.checks["landlock_abi"] == 8
@@ -2603,6 +2750,18 @@ def test_live_setpriority_foreign_pid_denied(live: tuple[HostProcessService, Pat
     run = _run(svc, "py_setpriority", "live-setpriority")
     final = _live_wait(svc, run["process_id"], "exited")
     assert "refused" in final["stdout"], final
+
+
+def test_live_sched_foreign_pid_denied(live: tuple[HostProcessService, Path]) -> None:
+    """A profile cannot move another process to SCHED_IDLE: both
+    sched_setscheduler and sched_setattr are banned by seccomp (same
+    family as setpriority — the setpriority ban alone does not close
+    the scheduler syscalls)."""
+    svc, _ = live
+    run = _run(svc, "py_sched", "live-sched")
+    final = _live_wait(svc, run["process_id"], "exited")
+    assert "setscheduler:refused" in final["stdout"], final
+    assert "setattr:refused" in final["stdout"], final
 
 
 def test_live_idempotent_retry(live: tuple[HostProcessService, Path]) -> None:

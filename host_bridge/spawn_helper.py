@@ -158,8 +158,12 @@ _SCMP_ACT_ERRNO = 0x00050000
 # and connections. setpriority is banned for the same reason: a
 # profile could otherwise renice the daemon/server to 19 and leave
 # it degraded after the profile ends (nice can only be lowered back
-# by a privileged process). The startup probe verifies the metadata,
-# prlimit and setpriority bans live. Landlock + the empty network
+# by a privileged process). sched_setscheduler/sched_setattr are
+# banned for the same reason: a profile could otherwise move the
+# daemon/server to SCHED_IDLE and leave it starved under CPU
+# contention after the profile ends. The startup probe verifies the
+# metadata, prlimit, setpriority and scheduler bans live. Landlock
+# + the empty network
 # namespace are the
 # other layers; the seccomp bans are mandatory (owner correction
 # 2026-11-24).
@@ -188,6 +192,8 @@ _DENIED_SYSCALLS: tuple[str, ...] = (
     "process_vm_writev",
     "prlimit64",
     "setpriority",
+    "sched_setscheduler",
+    "sched_setattr",
     "bpf",
     "open_by_handle_at",
     "name_to_handle_at",

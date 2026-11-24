@@ -154,7 +154,8 @@ import json, os, socket, sys, time
 result = {"tcp": "unknown", "udp": "unknown", "unix": "unknown",
           "protected": "unknown", "allowed": "unknown", "uid": None,
           "signal": "unknown", "metadata": "unknown", "prlimit": "unknown",
-          "fifo": "unknown", "setpriority": "unknown"}
+          "fifo": "unknown", "setpriority": "unknown",
+          "scheduler": "unknown"}
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(2)
@@ -268,6 +269,55 @@ finally:
         pass
     try:
         os.waitpid(_child2, 0)
+    except OSError:
+        pass
+# sched_setscheduler/sched_setattr are outside Landlock and signal
+# scope, like setpriority: with no PID namespace and matching kernel
+# credentials, the target must not move another process to
+# SCHED_IDLE (or any other policy) — under CPU contention the victim
+# starves, and the change persists after the profile ends. Fork a
+# sacrificial child and try both entry points on it; the child is
+# killed right after, so a missing ban cannot hurt a real process.
+# sched_setattr has no stdlib wrapper, so it goes through the raw
+# syscall (314 on x86_64) with a struct sched_attr.
+import ctypes
+class _SchedAttr(ctypes.Structure):
+    _fields_ = [("size", ctypes.c_uint32), ("sched_policy", ctypes.c_uint32),
+                ("sched_flags", ctypes.c_uint64), ("sched_nice", ctypes.c_int32),
+                ("sched_priority", ctypes.c_uint32), ("sched_runtime", ctypes.c_uint64),
+                ("sched_deadline", ctypes.c_uint64), ("sched_period", ctypes.c_uint64)]
+_libc = ctypes.CDLL("libc.so.6", use_errno=True)
+_libc.syscall.restype = ctypes.c_long
+_libc.syscall.argtypes = [ctypes.c_long, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint]
+_child3 = os.fork()
+if _child3 == 0:
+    time.sleep(2)
+    os._exit(0)
+try:
+    try:
+        os.sched_setscheduler(_child3, os.SCHED_IDLE, os.sched_param(0))
+        result["scheduler"] = "allowed:setscheduler"
+    except OSError as e:
+        if e.errno not in (1, 13):
+            result["scheduler"] = f"error:setscheduler:{e.errno}"
+        else:
+            _attr = _SchedAttr()
+            _attr.size = ctypes.sizeof(_SchedAttr)
+            _attr.sched_policy = 5  # SCHED_IDLE
+            _ret = _libc.syscall(314, _child3, ctypes.byref(_attr), 0)
+            if _ret == 0:
+                result["scheduler"] = "allowed:setattr"
+            else:
+                _errno = ctypes.get_errno()
+                result["scheduler"] = ("refused" if _errno in (1, 13)
+                                       else f"error:setattr:{_errno}")
+finally:
+    try:
+        os.kill(_child3, 9)
+    except OSError:
+        pass
+    try:
+        os.waitpid(_child3, 0)
     except OSError:
         pass
 result["uid"] = os.getuid()
@@ -1003,6 +1053,8 @@ def run_enforcement_probe(
     seccomp ban), cannot change another process's limits via
     prlimit64 (outside Landlock and signal scope, closed by the
     seccomp ban), cannot renice another process via setpriority
+    (same family, same ban), cannot move another process to a
+    different scheduling policy via sched_setscheduler/sched_setattr
     (same family, same ban), cannot create a named pipe via mkfifo
     (MAKE_FIFO is handled by Landlock with no allowing grant), CAN
     read an allowed file, runs with the mapped uid, cannot signal
@@ -1137,6 +1189,7 @@ def run_enforcement_probe(
                 "prlimit": verdict.get("prlimit"),
                 "fifo": verdict.get("fifo"),
                 "setpriority": verdict.get("setpriority"),
+                "scheduler": verdict.get("scheduler"),
                 "placement": placement_ok,
                 "landlock_abi": landlock_abi(),
             }
@@ -1152,6 +1205,7 @@ def run_enforcement_probe(
                 and verdict.get("prlimit") == "refused"
                 and verdict.get("fifo") == "refused"
                 and verdict.get("setpriority") == "refused"
+                and verdict.get("scheduler") == "refused"
                 and placement_ok
             )
             if not ok:
