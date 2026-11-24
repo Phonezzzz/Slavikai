@@ -420,7 +420,7 @@ Final outcome
 | E00 — baseline/docs | 3 | E00-T01 DONE; E00-T02 DONE; E00-T03 DONE |
 | E01 — canonical execution | 9 | E01 T01–T09 DONE (PR #163, main 0f894c6) |
 | E02 — persistent browser | 10 | T01 DONE (PR #166); T02 DONE (PR #167); T03 DONE (PR #180, main f2e94ba); T04 DONE (PR #181, main 30bd0da); T05 DONE (PR #182, main b2a4257); T06 DONE (PR #183, main dd207de; acceptance закрыт PR #188); T07 DONE (PR #186, main 20af69c); T09 DONE (PR #187, main 421314c); T10 DONE (PR #188, main f581132) |
-| E03 — Host Bridge / Desktop Commander | 11 | T01 DONE (PR #193, main 325d2f9); T02 DONE (PR #194, main cd6f0d4); T03 DONE (PR #195, main 8147223); T04 DONE (PR #196, main 2020b81); T05 DONE (PR #198, main 0dd07de) |
+| E03 — Host Bridge / Desktop Commander | 11 | T01 DONE (PR #193, main 325d2f9); T02 DONE (PR #194, main cd6f0d4); T03 DONE (PR #195, main 8147223); T04 DONE (PR #196, main 2020b81); T05 DONE (PR #198, main 0dd07de); SEC-04 DONE (PR #200, main 7ced6826); SEC-03 VERIFY DONE (PR #201, main 5202510) |
 | E04 — workspace/executor | 6 | T03 slice DONE (PR #164, main 7affb3f); остальное NEEDS_REFINEMENT |
 | E05 — verification/recovery | 7 | NEEDS_REFINEMENT |
 | E06 — modes/policy/UI | 6 | NEEDS_REFINEMENT |
