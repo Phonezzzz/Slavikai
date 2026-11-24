@@ -27,6 +27,7 @@ from typing import Final
 from host_bridge.protocol import (
     CAPABILITY_CAPABILITIES,
     CAPABILITY_PING,
+    CAPABILITY_PROCESS_STOP,
     CAPABILITY_VERSION,
     PROTOCOL_VERSION,
     FrameTooLargeError,
@@ -185,3 +186,26 @@ def roots(socket_path: Path, *, timeout: float | None = None) -> list[dict[str, 
             raise BridgeClientError("malformed_response", "roots must be a list of objects")
         entries.append(item)
     return entries
+
+
+def stop(
+    socket_path: Path,
+    run_id: str,
+    *,
+    principal_id: str | None = None,
+    timeout: float | None = None,
+) -> dict[str, object]:
+    """Kill every non-final process bound to one run (E03-T06).
+
+    The ownership key is (principal_id, run_id); the principal
+    goes in the envelope, the run id in the params — exactly
+    where the daemon reads them.
+    """
+    return call(
+        socket_path,
+        CAPABILITY_PROCESS_STOP,
+        principal_id=principal_id,
+        run_id=run_id,
+        params={"run_id": run_id},
+        timeout=timeout,
+    )

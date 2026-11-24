@@ -18,9 +18,12 @@ Trust-model points enforced here (ADR-0013):
   equal to the daemon's own UID) is accepted.
 - Non-root: the daemon runs as the owner's UID under a systemd user
   service and never invokes sudo/pkexec/setuid helpers.
-- Single instance: an existing socket with a live listener refuses
-  startup; only a provably stale socket file (connection refused) is
-  replaced, and shutdown unlinks only the socket this instance created.
+- Single instance: an flock(2) lock file in the socket directory,
+  held for the daemon's whole lifetime, refuses a second daemon
+  before it can touch the socket; only a provably stale socket
+  file (connection refused) is replaced, and shutdown unlinks
+  only the socket this instance created. The lock closes the
+  bind->listen window a single inode check cannot (E03-T06).
 - Protocol validation (E03-T03): every frame is checked against the
   versioned schema in ``host_bridge.protocol`` (frame limit, protocol
   version, request ID, unknown fields); dispatch runs under a
@@ -31,6 +34,7 @@ Trust-model points enforced here (ADR-0013):
 
 from __future__ import annotations
 
+import fcntl
 import os
 import socket
 import stat
@@ -40,7 +44,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import IO, Any, Final
 
 from host_bridge.fs import CancelToken, HostFsService
 from host_bridge.process import HostProcessService, ProcessError, build_process_service
@@ -175,6 +179,9 @@ class HostBridgeDaemon:
         )
         self._listener: socket.socket | None = None
         self._socket_identity: tuple[int, int] | None = None
+        # Exclusive-ownership lock file (E03-T06): held from start()
+        # until shutdown(); never unlinked (see start()).
+        self._lock_file: IO[Any] | None = None
         self._stop = threading.Event()
 
     @property
@@ -182,7 +189,17 @@ class HostBridgeDaemon:
         return self._socket_path
 
     def start(self) -> None:
-        """Create the socket directory/file with closed modes and listen."""
+        """Create the socket directory/file with closed modes and listen.
+
+        Startup order is the E03-T06 fail-closed sequence (schema
+        §5.3): bind -> identity re-check -> orphan sweep -> probe ->
+        serve. Exclusive ownership of the namespace is held for the
+        daemon's whole lifetime by an flock(2) lock file, taken
+        BEFORE any socket probing: the bind->listen window is closed
+        because a second daemon fails at the lock step before it can
+        touch the socket, and a single inode check never has to
+        carry ownership through the sweep.
+        """
         parent = self._socket_path.parent
         try:
             parent.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
@@ -191,25 +208,75 @@ class HostBridgeDaemon:
         if not parent.is_dir():
             raise BridgeConfigError(f"socket directory is not a directory: {parent}")
         os.chmod(parent, _DIR_MODE)
-        if self._socket_path.exists() or self._socket_path.is_symlink():
-            mode = self._socket_path.lstat().st_mode
-            if not stat.S_ISSOCK(mode):
-                raise BridgeConfigError(f"refusing to replace non-socket file: {self._socket_path}")
-            if _socket_has_live_listener(self._socket_path):
-                raise BridgeConfigError(f"host bridge daemon already running: {self._socket_path}")
-            self._socket_path.unlink(missing_ok=True)
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        old_umask = os.umask(0o077)
+        # Exclusive ownership (E03-T06, approval condition 1):
+        # flock on a lock file in the same directory as the socket,
+        # held until shutdown. LOCK_NB fails immediately when
+        # another daemon holds it — before any socket probe, so a
+        # second daemon can never mistake the first's live socket
+        # for stale and unlink it, and the sweep below runs under
+        # ownership that lasts the whole sweep. The lock file is
+        # never unlinked: unlinking races with a concurrent opener,
+        # and a stale file is harmless — flock is released when
+        # its holder dies, so the next daemon re-locks the same
+        # inode.
+        lock_path = parent / "host-bridge.lock"
         try:
-            listener.bind(str(self._socket_path))
-        finally:
-            os.umask(old_umask)
-        os.chmod(self._socket_path, _SOCKET_MODE)
-        bound = self._socket_path.stat()
-        self._socket_identity = (bound.st_dev, bound.st_ino)
-        listener.listen(16)
-        listener.settimeout(_ACCEPT_TIMEOUT_S)
-        self._listener = listener
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError as exc:
+            raise BridgeConfigError(f"cannot open daemon lock file {lock_path}: {exc}") from exc
+        lock_file = os.fdopen(lock_fd, "w")
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            lock_file.close()
+            raise BridgeConfigError(
+                f"host bridge daemon already running: {self._socket_path} ({exc})"
+            ) from exc
+        self._lock_file = lock_file
+        listener: socket.socket | None = None
+        try:
+            if self._socket_path.exists() or self._socket_path.is_symlink():
+                mode = self._socket_path.lstat().st_mode
+                if not stat.S_ISSOCK(mode):
+                    raise BridgeConfigError(
+                        f"refusing to replace non-socket file: {self._socket_path}"
+                    )
+                if _socket_has_live_listener(self._socket_path):
+                    raise BridgeConfigError(
+                        f"host bridge daemon already running: {self._socket_path}"
+                    )
+                self._socket_path.unlink(missing_ok=True)
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            old_umask = os.umask(0o077)
+            try:
+                listener.bind(str(self._socket_path))
+            finally:
+                os.umask(old_umask)
+            os.chmod(self._socket_path, _SOCKET_MODE)
+            bound = self._socket_path.stat()
+            self._socket_identity = (bound.st_dev, bound.st_ino)
+            listener.listen(16)
+            listener.settimeout(_ACCEPT_TIMEOUT_S)
+            self._listener = listener
+            # Identity re-check (E03-T06 §5.3): the socket at the
+            # path must still be the one this daemon just bound —
+            # if another process replaced it between bind and
+            # listen, serving would hand out the wrong socket.
+            current = self._socket_path.stat()
+            if (current.st_dev, current.st_ino) != self._socket_identity:
+                raise BridgeConfigError(f"socket {self._socket_path} was replaced during startup")
+            # Orphan sweep (E03-T06): kill scopes and run dirs left
+            # by a dead daemon. Any failure is fatal — serving with
+            # an unknown tree alive would violate ownership.
+            self._process_service.reap_orphans()
+        except BaseException:
+            if listener is not None:
+                listener.close()
+            self._listener = None
+            self._socket_identity = None
+            self._lock_file.close()
+            self._lock_file = None
+            raise
         # Eager enforcement probe (E03-T05): when profiles exist, verify
         # the whole enforcement stack through the real spawner now, in
         # this daemon's context. A probe failure does not stop the
@@ -242,16 +309,23 @@ class HostBridgeDaemon:
             self._listener = None
         identity = self._socket_identity
         self._socket_identity = None
-        if identity is None:
-            return
-        try:
-            current = self._socket_path.stat()
-        except FileNotFoundError:
-            return
-        # Unlink only the socket this instance created; if the path now
-        # refers to another instance's socket, leave it in place.
-        if (current.st_dev, current.st_ino) == identity:
-            self._socket_path.unlink(missing_ok=True)
+        if identity is not None:
+            try:
+                current = self._socket_path.stat()
+            except FileNotFoundError:
+                current = None
+            # Unlink only the socket this instance created; if the path now
+            # refers to another instance's socket, leave it in place.
+            if current is not None and (current.st_dev, current.st_ino) == identity:
+                self._socket_path.unlink(missing_ok=True)
+        # Release the exclusive-ownership lock last (E03-T06): until
+        # here the socket above was still ours, and a new daemon
+        # starting in between must not be able to take the lock
+        # while this instance's socket is still being unlinked.
+        lock_file = self._lock_file
+        self._lock_file = None
+        if lock_file is not None:
+            lock_file.close()
 
     @staticmethod
     def _close_gracefully(conn: socket.socket) -> None:
@@ -423,6 +497,13 @@ class HostBridgeDaemon:
                     request_id=request.request_id,
                 )
             return self._process_service.handle(
-                request.capability, request.params, request.request_id, token
+                request.capability,
+                request.params,
+                request.request_id,
+                token,
+                # Envelope attribution (E03-T06): the process
+                # service records it as the ownership binding.
+                principal_id=request.principal_id,
+                run_id=request.run_id,
             )
         raise UnknownCapabilityError(request.capability, request_id=request.request_id)

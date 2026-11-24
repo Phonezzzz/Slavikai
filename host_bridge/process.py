@@ -88,6 +88,15 @@ MAX_ENV_VALUE_CHARS = 1024
 MAX_PROFILE_ENV_VARS = 32
 KILL_GRACE_S = 2.0
 SPAWN_START_TIMEOUT_S = 10.0
+# A stopped-run mark (E03-T06) outlives the run's records: it is
+# dropped when the last record bound to the run is swept, but a mark
+# for a run that never had records (STOP of an unknown run) has
+# nothing pinning it, so it expires after the same bound as finished
+# retention instead of living forever.
+STOPPED_RUN_MARK_TTL_S = 600.0
+# The single shared deadline bound for host.process.stop (E03-T06):
+# one deadline governs the whole STOP, not one per process.
+STOP_WAIT_MAX_S = 4.0
 PROBE_TIMEOUT_S = 20.0
 PROBE_TARGET_TIMEOUT_S = 10
 GRANT_WALK_MAX_ENTRIES = 20_000
@@ -570,6 +579,16 @@ def _req_str(params: dict[str, object], name: str) -> str:
     if value is None:
         raise ProcessError("invalid_params", f"params.{name} is required")
     return value
+
+
+def _check_binding(principal_id: str | None, run_id: str | None) -> None:
+    """Envelope attribution used as the ownership binding (E03-T06):
+    the same 1..256-char string bound the protocol enforces for
+    envelope fields. A direct service caller (not the wire) must
+    not smuggle an unbounded binding past that validation."""
+    for name, value in (("principal_id", principal_id), ("run_id", run_id)):
+        if value is not None and not 1 <= len(value) <= 256:
+            raise ProcessError("invalid_params", f"{name} must be a string of 1..256 characters")
 
 
 def _nonneg_int(params: dict[str, object], name: str, *, default: int) -> int:
@@ -1248,6 +1267,71 @@ class SystemdRunSpawner:
             time.sleep(0.05)
 
     @staticmethod
+    def list_bridge_scopes() -> list[str]:
+        """Unit names of live ``slavikai-bridge-*.scope`` units.
+
+        Used by the E03-T06 startup orphan sweep. Fail-closed:
+        any failure that could hide a live scope raises
+        BridgeConfigError — except the case where no systemd user
+        manager exists at all (no systemctl binary, or the bus is
+        unreachable because the system was not booted with systemd):
+        then no scope can exist, so the sweep is vacuously empty.
+        A broken-but-present manager must never be mistaken for
+        an absent one: only those two precise signatures count
+        as "no manager".
+        """
+        try:
+            out = subprocess.run(
+                [
+                    "systemctl",
+                    "--user",
+                    "list-units",
+                    "--type=scope",
+                    "--all",
+                    "--plain",
+                    "--no-legend",
+                ],
+                capture_output=True,
+                timeout=5,
+                text=True,
+            )
+        except FileNotFoundError:
+            return []  # no systemctl binary: no user manager, no scopes
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise BridgeConfigError(f"orphan sweep cannot list scopes: {exc}") from exc
+        if out.returncode != 0:
+            err = out.stderr or ""
+            if "System has not been booted with systemd" in err or (
+                "Failed to connect to bus" in err
+            ):
+                return []  # no user manager: no scopes can exist
+            raise BridgeConfigError(
+                "orphan sweep cannot list scopes: systemctl exited "
+                f"{out.returncode}: {err.strip()[:200]}"
+            )
+        units: list[str] = []
+        for line in out.stdout.splitlines():
+            if not line.strip():
+                continue
+            name = line.split()[0]
+            if "." not in name:
+                raise BridgeConfigError(f"orphan sweep cannot parse systemctl output: {line!r}")
+            if name.startswith("slavikai-bridge-") and name.endswith(".scope"):
+                units.append(name)
+        return units
+
+    def destroy_scope_checked(self, unit_name: str, timeout_s: float = 5.0) -> bool:
+        """Destroy a scope by unit name and verify it is gone.
+
+        Unlike ``_destroy_scope_by_unit`` (best effort, silent on
+        timeout), this is the checked variant the E03-T06 orphan
+        sweep needs: False means the tree may still be alive and
+        the sweep must fail closed instead of serving with it.
+        """
+        self._destroy_scope_by_unit(unit_name, timeout_s=timeout_s)
+        return self._unit_gone(unit_name)
+
+    @staticmethod
     def _cgroup_of(unit_name: str) -> Path | None:
         try:
             out = subprocess.run(
@@ -1306,6 +1390,19 @@ class ProbeResult:
     available: bool
     checks: dict[str, object]
     reason: str
+
+
+def _process_id_from_unit(unit_name: str) -> str | None:
+    """The process_id encoded in a bridge scope unit name
+    (``slavikai-bridge-<process_id>.scope``), or None when the
+    name does not follow that shape (e.g. the probe unit).
+    Used by the E03-T06 orphan sweep to skip scopes that gained
+    a live record while the sweep was running."""
+    prefix, suffix = "slavikai-bridge-", ".scope"
+    if not unit_name.startswith(prefix) or not unit_name.endswith(suffix):
+        return None
+    process_id = unit_name[len(prefix) : -len(suffix)]
+    return process_id or None
 
 
 def _read_status_file(run_dir: Path) -> dict[str, object] | None:
@@ -1652,6 +1749,18 @@ class _Record:
     state: str  # launching | running | killing | exited | killed | timeout | spawn_failed
     handle: SpawnHandle | None = None
     run_dir: Path | None = None
+    # Ownership binding (E03-T06): the (principal_id, run_id) pair
+    # carried by the request envelope at commit time. Fixed at run
+    # time, never rebindable (I2). None means the process is unbound:
+    # host.process.stop never touches it.
+    run_id: str | None = None
+    principal_id: str | None = None
+    # Set at the spawn adoption point when the run was stopped while
+    # the spawn was in flight: the tree was destroyed before
+    # promotion, so the record finalizes as spawn_failed (never
+    # "killed") once the cgroup is confirmed empty — the process
+    # never ran.
+    spawn_destroyed: bool = False
     started_at: str = ""
     finished_at: str | None = None
     exit_code: int | None = None
@@ -1750,6 +1859,18 @@ class HostProcessService:
         self._spawner = spawner or SystemdRunSpawner()
         self._records: dict[str, _Record] = {}
         self._by_request_id: dict[str, str] = {}
+        # Binding recorded with each request_id (E03-T06): a retry
+        # with the same request_id but a different (principal_id,
+        # run_id) pair is rejected with binding_mismatch instead of
+        # silently handing run B a handle to run A's process.
+        # Pruned together with _by_request_id in _sweep_finished.
+        self._by_request_id_binding: dict[str, tuple[str | None, str | None]] = {}
+        # Runs stopped by host.process.stop (E03-T06): pair ->
+        # monotonic timestamp of the stop. A run commits only when
+        # its pair is absent here (see _run); the mark is dropped
+        # when the last record bound to the run is swept, or when
+        # it expires (STOPPED_RUN_MARK_TTL_S) with no records left.
+        self._stopped_runs: dict[tuple[str | None, str | None], float] = {}
         self._lock = threading.Lock()
         self._probe: ProbeResult | None = None
         self._probe_lock = threading.Lock()
@@ -1785,15 +1906,34 @@ class HostProcessService:
     # -- dispatch ------------------------------------------------------------
 
     def handle(
-        self, capability: str, params: dict[str, object], request_id: str, token: CancelToken
+        self,
+        capability: str,
+        params: dict[str, object],
+        request_id: str,
+        token: CancelToken,
+        *,
+        principal_id: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, object]:
+        """Dispatch one process capability.
+
+        ``principal_id`` / ``run_id`` come from the request envelope
+        (E03-T06): they are recorded on the record as the ownership
+        binding, never used for authorization (ADR-0013 §4).
+        """
         try:
             if capability == "host.process.run":
-                return self._run(params, request_id, token)
+                return self._run(
+                    params, request_id, token, principal_id=principal_id, run_id=run_id
+                )
             if capability == "host.process.poll":
                 return self._poll(params, request_id, token)
             if capability == "host.process.kill":
                 return self._kill(params, request_id, token)
+            if capability == "host.process.stop":
+                return self._stop_run(
+                    params, request_id, token, principal_id=principal_id, run_id=run_id
+                )
         except ProcessError as exc:
             # The client matches error responses by request_id (same
             # pattern as HostFsService.handle): without it the client
@@ -1871,9 +2011,16 @@ class HostProcessService:
         return out
 
     def _run(
-        self, params: dict[str, object], request_id: str, token: CancelToken
+        self,
+        params: dict[str, object],
+        request_id: str,
+        token: CancelToken,
+        *,
+        principal_id: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, object]:
         _check_params(params, frozenset({"profile_id", "args", "timeout_s"}))
+        _check_binding(principal_id, run_id)
         profile_id = _req_str(params, "profile_id")
         profile = self._profiles.get(profile_id)
         if profile is None:
@@ -1894,14 +2041,32 @@ class HostProcessService:
         # Commit the record first: cancellation and launch are one
         # state transition, and a retry with the same request_id finds
         # this exact record instead of spawning a second process.
+        # The (principal_id, run_id) binding is fixed at commit time
+        # (E03-T06, I2): a retry with the same request_id but a
+        # different binding is rejected, never silently rebound.
+        binding = (principal_id, run_id)
         existing: _Record | None = None
         record: _Record | None = None
         with self._lock:
             token.check()
+            recorded_binding = self._by_request_id_binding.get(request_id)
+            if recorded_binding is not None and recorded_binding != binding:
+                raise ProcessError(
+                    "binding_mismatch",
+                    f"request_id {request_id!r} was already bound to "
+                    f"principal {recorded_binding[0]!r} run "
+                    f"{recorded_binding[1]!r}; retry carries a different binding",
+                )
+            self._prune_stopped_marks_locked(time.monotonic())
             existing_id = self._by_request_id.get(request_id)
             if existing_id is not None:
                 existing = self._records.get(existing_id)
             if existing is None:
+                if binding in self._stopped_runs:
+                    # The run was stopped before this commit: fail
+                    # fast with a typed error instead of creating a
+                    # process that then has to be killed (I7).
+                    raise ProcessError("run_stopped", f"run {run_id!r} was already stopped")
                 running = sum(
                     1
                     for record in self._records.values()
@@ -1916,9 +2081,12 @@ class HostProcessService:
                     state="launching",
                     timeout_s=timeout_s,
                     started_mono=time.monotonic(),
+                    run_id=run_id,
+                    principal_id=principal_id,
                 )
                 self._records[process_id] = record
                 self._by_request_id[request_id] = process_id
+                self._by_request_id_binding[request_id] = binding
         if existing is not None:
             # Wait outside the lock: _finalize needs it to settle the
             # original run, and the reaper needs it for every other
@@ -1979,6 +2147,9 @@ class HostProcessService:
             "profile_id": record.profile_id,
             "state": record.state,
             "started_at": record.started_at,
+            # The bound run id, or null when unbound (E03-T06):
+            # additive only, no existing field changes.
+            "run_id": record.run_id,
         }
 
     def _spawn(
@@ -2038,6 +2209,7 @@ class HostProcessService:
         # failure keeps the reaper/cleanup path instead of an
         # immediate finalize.
         record.spawn_started = True
+        stopped_destroy = False
         with self._lock:
             if record.final or self._stop.is_set():
                 # The reaper gave up on this launch while spawn() was
@@ -2047,6 +2219,21 @@ class HostProcessService:
                 # active-process accounting and without daemon
                 # timeout enforcement — or after shutdown.
                 late = True
+            elif (record.principal_id, record.run_id) in self._stopped_runs:
+                # The run was stopped while the spawn was in flight:
+                # the tree exists now and must be destroyed before
+                # promotion, or the run would gain a "running"
+                # process after STOP (I7). Give the record its
+                # handle so _try_finalize can confirm the cgroup is
+                # empty before finalizing it as spawn_failed — the
+                # process never ran, so its final state is
+                # spawn_failed, not "killed". Never finalize here:
+                # all_final:true must mean the tree is confirmed
+                # dead, and kill_all alone does not prove that.
+                record.handle = handle
+                record.spawn_destroyed = True
+                stopped_destroy = True
+                late = False
             else:
                 record.handle = handle
                 late = False
@@ -2058,6 +2245,9 @@ class HostProcessService:
                 # leaving it launching forever.
                 self._finalize(record, "spawn_failed")
             raise ProcessError("spawn_failed", "spawn did not confirm in time")
+        if stopped_destroy:
+            self._spawner.kill_all(handle)
+            raise ProcessError("spawn_failed", "run was stopped during spawn")
         # Wait for the helper to confirm enforcement + exec, bounded by
         # the request deadline (the token) and the spawn timeout.
         deadline = min(
@@ -2343,6 +2533,9 @@ class HostProcessService:
             "started_at": snap.started_at,
             "finished_at": snap.finished_at,
             "elapsed_ms": elapsed_ms,
+            # The bound run id, or null when unbound (E03-T06):
+            # additive only, no existing field changes.
+            "run_id": record.run_id,
             "stdout": stdout_text,
             "stderr": stderr_text,
             "stdout_next_offset": stdout_next,
@@ -2453,6 +2646,93 @@ class HostProcessService:
             "signal": None,
         }
 
+    # -- stop (E03-T06) ------------------------------------------------------
+
+    def _stop_run(
+        self,
+        params: dict[str, object],
+        request_id: str,
+        token: CancelToken,
+        *,
+        principal_id: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, object]:
+        """Kill every non-final process bound to one run (E03-T06).
+
+        The ownership key is the pair (envelope principal_id,
+        params run_id); the principal never comes from params.
+        An unknown run is a successful empty answer, never an
+        error. The wait is a SINGLE shared deadline for the whole
+        STOP (``min(token.remaining_s, 4.0)`` s): per-process
+        deadlines would make STOP latency O(N). ``all_final`` is
+        true only when every listed process reached a final state
+        within the window — a tree that is still dying (or a spawn
+        still in flight) reports ``all_final: false`` and the
+        reaper completes it.
+        """
+        _check_params(params, frozenset({"run_id"}))
+        _check_binding(principal_id, None)
+        target_run_id = _req_str(params, "run_id")
+        if not 1 <= len(target_run_id) <= 256:
+            raise ProcessError(
+                "invalid_params", "params.run_id must be a string of 1..256 characters"
+            )
+        pair = (principal_id, target_run_id)
+        now = time.monotonic()
+        with self._lock:
+            self._stopped_runs[pair] = now
+            targets = [
+                record
+                for record in self._records.values()
+                if (record.principal_id, record.run_id) == pair
+            ]
+            for record in targets:
+                if record.final:
+                    continue
+                # A repeat stop observes the termination already in
+                # progress: it must not move the original deadline,
+                # must not re-signal the tree, and must not
+                # overwrite an existing kill reason (e.g. "timeout")
+                # with "killed" — the same discipline as _kill.
+                if not record.kill_requested:
+                    record.kill_requested = True
+                    record.kill_reason = "killed"
+                    record.state = "killing"
+                    record.kill_deadline = now + KILL_GRACE_S
+                    if record.handle is not None:
+                        self._spawner.signal_tree(record.handle, signal.SIGTERM)
+        deadline = time.monotonic() + min(token.remaining_s, STOP_WAIT_MAX_S)
+        while time.monotonic() < deadline:
+            if all(record.final for record in targets):
+                break
+            for record in targets:
+                if record.final:
+                    continue
+                self._try_finalize(record)
+                if (
+                    not record.final
+                    and record.kill_requested
+                    and record.handle is not None
+                    and time.monotonic() >= record.kill_deadline
+                ):
+                    self._spawner.kill_all(record.handle)
+            if all(record.final for record in targets):
+                break
+            time.sleep(0.05)
+        return {
+            "run_id": target_run_id,
+            "processes": [
+                {
+                    "process_id": record.process_id,
+                    "state": record.state,
+                    "exit_code": record.exit_code,
+                    "signal": record.exit_signal,
+                }
+                for record in targets
+            ],
+            "all_final": all(record.final for record in targets),
+        }
+
     # -- reaper / finalization ------------------------------------------------
 
     def _try_finalize(self, record: _Record) -> bool:
@@ -2470,6 +2750,17 @@ class HostProcessService:
         status_exit_code: object = status.get("exit_code") if status is not None else None
         status_signal: object = status.get("signal") if status is not None else None
         status_finished_at: object = status.get("finished_at") if status is not None else None
+        if record.spawn_destroyed:
+            # The tree was destroyed at the spawn adoption point
+            # because the run was stopped mid-spawn (E03-T06): the
+            # process never ran, so its final state is spawn_failed
+            # — but only once the cgroup is confirmed empty, which
+            # the gates above just proved. This branch precedes
+            # the kill_requested branch on purpose: the record was
+            # marked "killing" by the stop scan, and without it
+            # the never-started process would finalize "killed".
+            self._finalize(record, "spawn_failed")
+            return True
         if status_state == "spawn_failed":
             # The process never started; a kill requested afterwards
             # does not rewrite that.
@@ -2582,6 +2873,22 @@ class HostProcessService:
                     self._finalize(record, "spawn_failed")
         self._sweep_finished()
 
+    def _prune_stopped_marks_locked(self, now_mono: float) -> None:
+        """Drop stopped-run marks that can no longer refuse a commit
+        (E03-T06). Caller must hold ``self._lock``.
+
+        A mark is kept while a record bound to the run still
+        exists — a late retry of that run must still see
+        ``run_stopped``. Once the last record is gone, the mark
+        lives only until STOPPED_RUN_MARK_TTL_S so a STOP of an
+        unknown run (no records at all) does not pin the run
+        forever: after expiry the run may be started again.
+        """
+        live_pairs = {(record.principal_id, record.run_id) for record in self._records.values()}
+        for pair, stopped_mono in list(self._stopped_runs.items()):
+            if pair not in live_pairs and now_mono - stopped_mono > STOPPED_RUN_MARK_TTL_S:
+                del self._stopped_runs[pair]
+
     def _sweep_finished(self) -> None:
         now = time.time()
         with self._lock:
@@ -2608,12 +2915,64 @@ class HostProcessService:
                 self._by_request_id = {
                     k: v for k, v in self._by_request_id.items() if v != record.process_id
                 }
+            # Evicted request_ids must not keep their binding
+            # alive: rebuild the binding map from the surviving
+            # request ids (cheap — at most MAX_FINISHED_RECORDS
+            # entries plus live ones).
+            self._by_request_id_binding = {
+                k: v for k, v in self._by_request_id_binding.items() if k in self._by_request_id
+            }
+            self._prune_stopped_marks_locked(time.monotonic())
         for record in evict:
             run_dir = record.run_dir
             if run_dir is None and record.handle is not None:
                 run_dir = record.handle.run_dir
             if run_dir is not None:
                 shutil.rmtree(run_dir, ignore_errors=True)
+
+    def reap_orphans(self) -> None:
+        """Kill leftover bridge scopes and stale run dirs (E03-T06).
+
+        Called once by the daemon during startup, after exclusive
+        ownership of the socket namespace is established and
+        before the daemon serves requests. No adoption: any scope
+        or run dir found here belongs to a dead daemon, and the
+        process that owned it is gone. Fail-closed: any error
+        raises BridgeConfigError and the daemon refuses to start.
+        """
+        scopes = self._spawner.list_bridge_scopes()
+        for unit_name in scopes:
+            process_id = _process_id_from_unit(unit_name)
+            with self._lock:
+                if process_id is not None and process_id in self._records:
+                    # A live record appeared for this scope between
+                    # the list and the destroy: a concurrent start
+                    # raced us. Leave it to its owner — destroying
+                    # it would kill a process of a live daemon.
+                    continue
+            if not self._spawner.destroy_scope_checked(unit_name):
+                raise BridgeConfigError(
+                    f"orphan sweep failed: scope {unit_name} still present after destroy"
+                )
+        try:
+            run_dirs = list(self._run_base.glob("*"))
+        except OSError as exc:
+            raise BridgeConfigError(f"orphan sweep cannot list run dirs: {exc}") from exc
+        with self._lock:
+            live_dirs = {
+                record.handle.run_dir
+                for record in self._records.values()
+                if record.handle is not None
+            }
+        for run_dir in run_dirs:
+            if run_dir in live_dirs:
+                continue
+            try:
+                shutil.rmtree(run_dir)
+            except OSError as exc:
+                raise BridgeConfigError(
+                    f"orphan sweep cannot remove stale run dir {run_dir}: {exc}"
+                ) from exc
 
     def shutdown(self) -> None:
         self._stop.set()

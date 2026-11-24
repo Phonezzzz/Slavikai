@@ -15,6 +15,8 @@ import json
 import os
 import socket
 import stat
+import subprocess
+import sys
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -159,19 +161,23 @@ def test_shutdown_leaves_replaced_socket_in_place(tmp_path: Path) -> None:
     first = HostBridgeDaemon(socket_path)
     first_thread = _start_daemon(first)
     # Simulate another instance taking over the path: the first socket
-    # file is unlinked and a second daemon binds a fresh socket there.
+    # file is unlinked and a fresh socket is bound there. A real
+    # second daemon can no longer do this while the first holds the
+    # exclusive-ownership lock (E03-T06), so the takeover is
+    # simulated with a raw socket — exactly the case the identity
+    # check in shutdown() still guards.
     socket_path.unlink()
-    second = HostBridgeDaemon(socket_path)
-    second_thread = _start_daemon(second)
+    replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    replacement.bind(str(socket_path))
+    replacement.listen(1)
     try:
         first.shutdown()
         first_thread.join(timeout=2.0)
-        # first.shutdown() must not unlink the second instance's socket
+        # first.shutdown() must not unlink the replacement socket
         assert socket_path.exists()
-        assert client.ping(socket_path) == {"pong": True}
     finally:
-        second.shutdown()
-        second_thread.join(timeout=2.0)
+        replacement.close()
+        socket_path.unlink(missing_ok=True)
 
 
 # --- same-UID capabilities over the real socket ---
@@ -286,3 +292,196 @@ def test_expected_uid_override_is_enforced(tmp_path: Path) -> None:
 def test_client_missing_socket_raises_os_error(tmp_path: Path) -> None:
     with pytest.raises(OSError):
         client.ping(tmp_path / "no-such.sock")
+
+
+# --- E03-T06: exclusive ownership + fail-closed orphan sweep ----------------
+
+
+def test_concurrent_daemon_starts_have_single_winner(tmp_path: Path) -> None:
+    """Approval condition 1: N daemons racing start() on the same
+    socket path — exactly one wins, the rest are refused with
+    "already running" before they can touch the socket, and the
+    winner serves. The flock closes the bind->listen window a
+    single inode check cannot: the losers fail at the lock step,
+    so none of them can mistake the winner's live socket for stale
+    and unlink it. After the winner shuts down, a fresh daemon
+    starts fine (the lock is released, not leaked)."""
+    socket_path = tmp_path / "slavikai" / "host-bridge.sock"
+    results: list[tuple[str, object]] = []
+    barrier = threading.Barrier(4)
+    lock = threading.Lock()
+
+    def attempt() -> None:
+        daemon = HostBridgeDaemon(socket_path)
+        barrier.wait(timeout=10.0)
+        try:
+            daemon.start()
+            outcome: tuple[str, object] = ("ok", daemon)
+        except BridgeConfigError as exc:
+            outcome = ("refused", str(exc))
+        with lock:
+            results.append(outcome)
+
+    threads = [threading.Thread(target=attempt) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15.0)
+    assert len(results) == 4, f"a start attempt hung: {results}"
+    winners = [d for status, d in results if status == "ok"]
+    losers = [m for status, m in results if status == "refused"]
+    assert len(winners) == 1, f"expected exactly one winner, got {len(winners)}"
+    assert len(losers) == 3
+    assert all("already running" in str(m) for m in losers)
+    winner = winners[0]
+    assert isinstance(winner, HostBridgeDaemon)
+    winner_thread = threading.Thread(target=winner.serve_forever, daemon=True)
+    winner_thread.start()
+    try:
+        assert client.ping(socket_path) == {"pong": True}
+    finally:
+        winner.shutdown()
+        winner_thread.join(timeout=2.0)
+    fresh = HostBridgeDaemon(socket_path)
+    thread = _start_daemon(fresh)
+    try:
+        assert client.ping(socket_path) == {"pong": True}
+    finally:
+        fresh.shutdown()
+        thread.join(timeout=2.0)
+
+
+def _write_systemctl_shim(shim_dir: Path, body: str) -> Path:
+    shim = shim_dir / "systemctl"
+    shim.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    shim.chmod(0o755)
+    return shim
+
+
+def test_orphan_sweep_list_failure_fails_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Schema §8 test 12a: with list-units sabotaged, the real
+    start() path raises BridgeConfigError (orphan sweep cannot
+    list scopes), no socket listener exists afterwards, and the
+    failed start releases the exclusive lock — a fresh daemon
+    starts fine once the shim is gone."""
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    _write_systemctl_shim(
+        shim_dir,
+        'for arg in "$@"; do\n'
+        '  if [ "$arg" = "list-units" ]; then\n'
+        '    echo "systemctl shim: list-units sabotaged" >&2\n'
+        "    exit 1\n"
+        "  fi\n"
+        "done\n"
+        'exec /usr/bin/systemctl "$@"\n',
+    )
+    original_path = os.environ["PATH"]
+    monkeypatch.setenv("PATH", f"{shim_dir}:{original_path}")
+    socket_path = tmp_path / "slavikai" / "host-bridge.sock"
+    daemon = HostBridgeDaemon(socket_path)
+    with pytest.raises(BridgeConfigError, match="orphan sweep cannot list scopes"):
+        daemon.start()
+    with pytest.raises(ConnectionRefusedError):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(2.0)
+            conn.connect(str(socket_path))
+    # The failed start released the lock: a fresh daemon starts.
+    monkeypatch.setenv("PATH", original_path)
+    fresh = HostBridgeDaemon(socket_path)
+    thread = _start_daemon(fresh)
+    try:
+        assert client.ping(socket_path) == {"pong": True}
+    finally:
+        fresh.shutdown()
+        thread.join(timeout=2.0)
+
+
+def test_orphan_sweep_destroy_failure_fails_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Schema §8 test 12b: list-units reports an orphan scope but
+    the unit stays active after the bounded destroy wait — the
+    real start() path raises BridgeConfigError and no listener
+    exists afterwards. The shim stands in for a broken systemd;
+    the test exercises the real ordering (bind -> identity
+    re-check -> sweep -> fail), not a mocked service object."""
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    _write_systemctl_shim(
+        shim_dir,
+        'if [ "$2" = "list-units" ]; then\n'
+        '  printf "slavikai-bridge-deadbeef.scope loaded active running\\n"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$2" = "show" ]; then\n'
+        '  printf "LoadState=loaded\\nActiveState=active\\n"\n'
+        "  exit 0\n"
+        "fi\n"
+        'exec /usr/bin/systemctl "$@"\n',
+    )
+    original_path = os.environ["PATH"]
+    monkeypatch.setenv("PATH", f"{shim_dir}:{original_path}")
+    socket_path = tmp_path / "slavikai" / "host-bridge.sock"
+    daemon = HostBridgeDaemon(socket_path)
+    with pytest.raises(BridgeConfigError, match="orphan sweep failed"):
+        daemon.start()
+    with pytest.raises(ConnectionRefusedError):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(2.0)
+            conn.connect(str(socket_path))
+    monkeypatch.setenv("PATH", original_path)
+    fresh = HostBridgeDaemon(socket_path)
+    thread = _start_daemon(fresh)
+    try:
+        assert client.ping(socket_path) == {"pong": True}
+    finally:
+        fresh.shutdown()
+        thread.join(timeout=2.0)
+
+
+def test_main_exits_nonzero_when_sweep_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Schema §8 test 12a through the real entry point: ``python -m
+    host_bridge`` with a sabotaged list-units exits 2 and leaves no
+    listener behind."""
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    _write_systemctl_shim(
+        shim_dir,
+        'for arg in "$@"; do\n'
+        '  if [ "$arg" = "list-units" ]; then\n'
+        '    echo "systemctl shim: list-units sabotaged" >&2\n'
+        "    exit 1\n"
+        "  fi\n"
+        "done\n"
+        'exec /usr/bin/systemctl "$@"\n',
+    )
+    runtime_dir = tmp_path / "run"
+    runtime_dir.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "XDG_RUNTIME_DIR": str(runtime_dir),
+        "PATH": f"{shim_dir}:{os.environ['PATH']}",
+    }
+    (tmp_path / "home").mkdir()
+    repo_root = Path(__file__).resolve().parents[1]
+    proc = subprocess.run(
+        [sys.executable, "-m", "host_bridge"],
+        cwd=str(repo_root),
+        env=env,
+        capture_output=True,
+        timeout=30,
+        text=True,
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "orphan sweep" in proc.stderr
+    socket_path = runtime_dir / "slavikai" / "host-bridge.sock"
+    with pytest.raises((ConnectionRefusedError, FileNotFoundError)):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(2.0)
+            conn.connect(str(socket_path))

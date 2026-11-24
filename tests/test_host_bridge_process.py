@@ -22,6 +22,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -291,6 +292,22 @@ class FakeSpawner:
             handle.popen.kill()
         exit_code = 0 if self.finish_state == "exited" else None
         exit_signal = None if self.finish_state == "exited" else 15
+        # The real helper publishes the final status with the true
+        # stream totals: a kill must not discard the partial output
+        # written so far (E03-T06 test 2 polls it after the stop).
+        totals: dict[str, object] = {}
+        try:
+            previous = json.loads((handle.run_dir / "status.json").read_text(encoding="utf-8"))
+            for key in (
+                "stdout_total_bytes",
+                "stderr_total_bytes",
+                "stdout_retained_from",
+                "stderr_retained_from",
+            ):
+                if isinstance(previous.get(key), int):
+                    totals[key] = previous[key]
+        except (OSError, ValueError):
+            pass
         (handle.run_dir / "status.json").write_text(
             json.dumps(
                 self._status(
@@ -299,10 +316,23 @@ class FakeSpawner:
                     finished_at=_now_iso(),
                     exit_code=exit_code,
                     signal=exit_signal,
+                    **totals,
                 )
             ),
             encoding="utf-8",
         )
+
+    def list_bridge_scopes(self) -> list[str]:
+        """Units this fake currently owns (E03-T06 orphan sweep)."""
+        return list(self.units)
+
+    def destroy_scope_checked(self, unit_name: str, timeout_s: float = 5.0) -> bool:
+        unit = self.units.pop(unit_name, None)
+        if unit is not None:
+            handle = unit["handle"]
+            if handle.popen is not None and handle.popen.poll() is None:
+                handle.popen.kill()
+        return True
 
     def cgroup_empty(self, handle: SpawnHandle) -> bool:
         unit = self.units.get(handle.unit_name)
@@ -436,6 +466,45 @@ def _run(
         {"profile_id": profile_id, **params},
         request_id,
         _token(),
+    )
+
+
+def _run_bound(
+    svc: HostProcessService,
+    profile_id: str,
+    request_id: str,
+    *,
+    principal_id: str | None = None,
+    run_id: str | None = None,
+    **params: object,
+) -> dict[str, object]:
+    """_run with the E03-T06 ownership binding from the envelope."""
+    return svc.handle(
+        "host.process.run",
+        {"profile_id": profile_id, **params},
+        request_id,
+        _token(),
+        principal_id=principal_id,
+        run_id=run_id,
+    )
+
+
+def _stop(
+    svc: HostProcessService,
+    run_id: str,
+    *,
+    principal_id: str | None = None,
+    request_id: str = "stop-req",
+    deadline_s: float = 5.0,
+) -> dict[str, object]:
+    """host.process.stop for one (principal_id, run_id) pair."""
+    return svc.handle(
+        "host.process.stop",
+        {"run_id": run_id},
+        request_id,
+        _token(deadline_s),
+        principal_id=principal_id,
+        run_id=run_id,
     )
 
 
@@ -2222,6 +2291,490 @@ def test_run_rejects_missing_required_arg_after_optional(
     assert result["state"] == "running"
 
 
+# --- E03-T06: run-scoped STOP and process ownership --------------------------
+
+
+def test_stop_kills_only_its_own_run(service: HostProcessService, spawner: FakeSpawner) -> None:
+    """Schema §8 test 1 (the ticket's Negative): stop(A) kills A,
+    B keeps running; then stop(B) kills B."""
+    a = _run_bound(service, "sleep", "req-stop-a", principal_id="p1", run_id="run-A", args=["5"])
+    b = _run_bound(service, "sleep", "req-stop-b", principal_id="p1", run_id="run-B", args=["5"])
+    stopped = _stop(service, "run-A", principal_id="p1")
+    assert stopped["run_id"] == "run-A"
+    assert stopped["all_final"] is True
+    by_id = {p["process_id"]: p for p in stopped["processes"]}
+    assert by_id[a["process_id"]]["state"] == "killed"
+    assert b["process_id"] not in by_id
+    assert _poll(service, b["process_id"])["state"] == "running"
+    stopped_b = _stop(service, "run-B", principal_id="p1")
+    assert stopped_b["all_final"] is True
+    assert stopped_b["processes"][0]["state"] == "killed"
+
+
+def test_stop_preserves_partial_state(service: HostProcessService, spawner: FakeSpawner) -> None:
+    """Schema §8 test 2: stop mid-run, poll shows killed plus the
+    lines printed so far (the ticket's "partial state logged")."""
+    result = _run_bound(
+        service, "sleep", "req-stop-partial", principal_id="p1", run_id="run-A", args=["5"]
+    )
+    process_id = result["process_id"]
+    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    spawner.set_output(handle, stdout=b"line0\nline1\nline2\n")
+    stopped = _stop(service, "run-A", principal_id="p1")
+    assert stopped["all_final"] is True
+    polled = _poll(service, process_id)
+    assert polled["state"] == "killed"
+    assert "line0" in polled["stdout"]
+    assert "line2" in polled["stdout"]
+
+
+def test_stop_unknown_run_is_empty_success(service: HostProcessService) -> None:
+    """Schema §8 test 3: stop for a run that never existed is a
+    successful empty answer, never an error."""
+    result = _stop(service, "run-never-existed", principal_id="p1")
+    assert result == {"run_id": "run-never-existed", "processes": [], "all_final": True}
+
+
+def test_stop_lists_final_without_rekill(service: HostProcessService, spawner: FakeSpawner) -> None:
+    """Schema §8 test 4: already-final processes are listed with
+    their final states and are not re-killed (no new signals)."""
+    result = _run_bound(service, "true", "req-stop-final", principal_id="p1", run_id="run-A")
+    process_id = result["process_id"]
+    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    spawner.finish(handle, state="exited", exit_code=0)
+    assert _wait_state(service, process_id, "exited")["state"] == "exited"
+    signals_before = len(spawner.signal_calls)
+    kills_before = len(spawner.kill_calls)
+    stopped = _stop(service, "run-A", principal_id="p1")
+    assert stopped["all_final"] is True
+    assert stopped["processes"] == [
+        {"process_id": process_id, "state": "exited", "exit_code": 0, "signal": None}
+    ]
+    assert len(spawner.signal_calls) == signals_before
+    assert len(spawner.kill_calls) == kills_before
+
+
+def test_stop_leaves_unbound_processes_alone(
+    service: HostProcessService, spawner: FakeSpawner
+) -> None:
+    """Schema §8 test 5: processes with no run binding survive a
+    stop for any run; a stop for another principal matches nothing."""
+    bound = _run_bound(
+        service, "sleep", "req-stop-bound", principal_id="p1", run_id="run-A", args=["5"]
+    )
+    unbound = _run(service, "sleep", "req-stop-unbound", args=["5"])
+    stopped = _stop(service, "run-A", principal_id="p1")
+    assert [p["process_id"] for p in stopped["processes"]] == [bound["process_id"]]
+    assert _poll(service, unbound["process_id"])["state"] == "running"
+    assert _stop(service, "run-A", principal_id="p2")["processes"] == []
+
+
+def test_run_poll_echo_bound_run_id(service: HostProcessService, spawner: FakeSpawner) -> None:
+    """Schema §8 test 6: run/poll echo the bound run_id (null when
+    unbound); a stop for a different run id does not match."""
+    result = _run_bound(service, "sleep", "req-echo", principal_id="p1", run_id="run-A", args=["5"])
+    assert result["run_id"] == "run-A"
+    assert _poll(service, result["process_id"])["run_id"] == "run-A"
+    unbound = _run(service, "sleep", "req-echo-unbound", args=["5"])
+    assert unbound["run_id"] is None
+    assert _poll(service, unbound["process_id"])["run_id"] is None
+    assert _stop(service, "run-B", principal_id="p1")["processes"] == []
+    assert _poll(service, result["process_id"])["state"] == "running"
+
+
+def test_kill_from_other_run_still_succeeds(
+    service: HostProcessService, spawner: FakeSpawner
+) -> None:
+    """Schema §8 test 7 (characterization, Fork 6): daemon-side kill
+    takes no run identity — a kill by process_id from a different
+    run_id still succeeds. Ownership is enforced server-side; the
+    out-of-band run-authorization mechanism (ADR-0013 §4) is the
+    open item that would close this. Do not "fix" by adding a run
+    check to _kill: that would be authorization from attribution
+    data."""
+    result = _run_bound(
+        service, "sleep", "req-kill-other", principal_id="p1", run_id="run-A", args=["5"]
+    )
+    process_id = result["process_id"]
+    killed = _kill(service, process_id)
+    assert killed["state"] in ("killed", "killing")
+    assert _wait_state(service, process_id, "killed")["state"] == "killed"
+
+
+def test_stop_returns_killing_for_slow_tree(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Schema §8 test 10: a tree that needs the full grace period is
+    listed "killing" with all_final false; the reaper completes it
+    and a follow-up poll shows it final. The stop wait is bounded
+    (STOP_WAIT_MAX_S patched small) so the test does not wait out
+    the real grace."""
+    monkeypatch.setattr(process_module, "STOP_WAIT_MAX_S", 0.05)
+    spawner = FakeSpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    try:
+        result = _run_bound(
+            svc, "sleep", "req-stop-slow", principal_id="p1", run_id="run-A", args=["5"]
+        )
+        process_id = result["process_id"]
+        stopped = _stop(svc, "run-A", principal_id="p1")
+        assert stopped["all_final"] is False
+        assert stopped["processes"][0]["state"] == "killing"
+        final = _wait_state(svc, process_id, "killed", timeout_s=8.0)
+        assert final["state"] == "killed"
+    finally:
+        svc.shutdown()
+
+
+def test_run_after_stop_is_refused(service: HostProcessService, spawner: FakeSpawner) -> None:
+    """Schema §8 test 13a: a run issued after its run was stopped is
+    refused with typed run_stopped — no record is created and no
+    running slot is consumed; other runs are unaffected."""
+    _stop(service, "run-A", principal_id="p1")
+    with pytest.raises(ProcessError) as excinfo:
+        _run_bound(
+            service, "sleep", "req-after-stop", principal_id="p1", run_id="run-A", args=["5"]
+        )
+    assert excinfo.value.code == "run_stopped"
+    assert "req-after-stop" not in service._by_request_id
+    assert len(service._records) == 0
+    ok = _run_bound(
+        service, "sleep", "req-after-stop-ok", principal_id="p1", run_id="run-B", args=["5"]
+    )
+    assert ok["state"] == "running"
+
+
+def test_spawn_crossing_stop_is_destroyed(
+    fs_service: HostFsService, registry: RootsRegistry, tmp_path: Path
+) -> None:
+    """Schema §8 test 13b: a slow-confirming spawn whose run is
+    stopped mid-flight is destroyed at the adoption point — poll
+    never shows it "running", and the stop lists it spawn_failed
+    (never "killed": the process never ran)."""
+    spawner = _DelayedSpawner(delay=0.6)
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    try:
+        errors: list[BaseException] = []
+
+        def run() -> None:
+            try:
+                _run_bound(svc, "true", "req-crossing", principal_id="p1", run_id="run-A")
+            except BaseException as exc:  # noqa: BLE001 - captured for the test
+                errors.append(exc)
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        time.sleep(0.2)  # the record committed; the spawn is still in flight
+        stopped = _stop(svc, "run-A", principal_id="p1")
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "the launch did not return after the stop"
+        assert errors and isinstance(errors[0], ProcessError)
+        assert errors[0].code == "spawn_failed"
+        process_id = svc._by_request_id["req-crossing"]
+        by_id = {p["process_id"]: p for p in stopped["processes"]}
+        assert by_id[process_id]["state"] == "spawn_failed"
+        assert stopped["all_final"] is True
+        assert _poll(svc, process_id)["state"] == "spawn_failed"
+    finally:
+        svc.shutdown()
+        for unit in spawner.units.values():
+            handle = unit["handle"]
+            if handle.popen is not None and handle.popen.poll() is None:
+                handle.popen.kill()
+
+
+def test_run_retry_with_different_binding_is_rejected(
+    service: HostProcessService, spawner: FakeSpawner
+) -> None:
+    """Schema §8 test 14 (rev. 1, I9): a retry with the same
+    request_id but a different binding is rejected with
+    binding_mismatch, never rebound; the original record is
+    untouched."""
+    first = _run_bound(service, "sleep", "req-bind", principal_id="p1", run_id="run-A", args=["5"])
+    process_id = first["process_id"]
+    again = _run_bound(service, "sleep", "req-bind", principal_id="p1", run_id="run-A", args=["5"])
+    assert again["process_id"] == process_id
+    with pytest.raises(ProcessError) as excinfo:
+        _run_bound(service, "sleep", "req-bind", principal_id="p1", run_id="run-B", args=["5"])
+    assert excinfo.value.code == "binding_mismatch"
+    assert "run-A" in str(excinfo.value)
+    with pytest.raises(ProcessError) as excinfo:
+        _run_bound(service, "sleep", "req-bind", principal_id="p2", run_id="run-A", args=["5"])
+    assert excinfo.value.code == "binding_mismatch"
+    _run(service, "sleep", "req-bind-none", args=["5"])
+    with pytest.raises(ProcessError) as excinfo:
+        _run_bound(service, "sleep", "req-bind-none", principal_id="p1", run_id="run-A", args=["5"])
+    assert excinfo.value.code == "binding_mismatch"
+    with pytest.raises(ProcessError) as excinfo:
+        _run(service, "sleep", "req-bind", args=["5"])
+    assert excinfo.value.code == "binding_mismatch"
+    assert _poll(service, process_id)["state"] == "running"
+
+
+class _SlowKillSpawner(FakeSpawner):
+    """kill_all empties the cgroup only after a delay: the trees
+    need the full grace period, so a per-process STOP deadline
+    would take N x grace. The delayed emptying models a tree
+    whose descendants ignore SIGTERM."""
+
+    def __init__(self, kill_delay: float = 5.0) -> None:
+        super().__init__()
+        self.kill_delay = kill_delay
+
+    def kill_all(self, handle: SpawnHandle) -> None:
+        self.kill_calls.append(handle.unit_name)
+
+        def _empty_later() -> None:
+            time.sleep(self.kill_delay)
+            unit = self.units.get(handle.unit_name)
+            if unit is not None:
+                unit["procs"] = []
+            if handle.popen is not None and handle.popen.poll() is None:
+                handle.popen.kill()
+            (handle.run_dir / "status.json").write_text(
+                json.dumps(
+                    self._status(handle.run_dir, "killed", finished_at=_now_iso(), signal=15)
+                ),
+                encoding="utf-8",
+            )
+
+        threading.Thread(target=_empty_later, daemon=True).start()
+
+
+def test_stop_shares_one_deadline(
+    fs_service: HostFsService, registry: RootsRegistry, tmp_path: Path
+) -> None:
+    """Schema §8 test 15 (rev. 1): N slow trees of one run — stop
+    returns within ~4 s wall-clock (not N x 4 s) with all_final
+    false and all listed "killing"; a retry observes the
+    in-progress termination without re-signalling, and a
+    follow-up poll shows them final."""
+    spawner = _SlowKillSpawner(kill_delay=5.0)
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    try:
+        ids = [
+            _run_bound(
+                svc, "sleep", f"req-deadline-{i}", principal_id="p1", run_id="run-A", args=["5"]
+            )["process_id"]
+            for i in range(2)
+        ]
+        started = time.monotonic()
+        stopped = _stop(svc, "run-A", principal_id="p1")
+        elapsed = time.monotonic() - started
+        assert elapsed < 6.0, f"stop took {elapsed:.1f}s for 2 trees (per-process deadline?)"
+        assert stopped["all_final"] is False
+        assert {p["process_id"] for p in stopped["processes"]} == set(ids)
+        assert {p["state"] for p in stopped["processes"]} == {"killing"}
+        signals = len(spawner.signal_calls)
+        retry = _stop(svc, "run-A", principal_id="p1", deadline_s=0.5)
+        assert retry["all_final"] is False
+        assert len(spawner.signal_calls) == signals
+        for process_id in ids:
+            assert _wait_state(svc, process_id, "killed", timeout_s=10.0)["state"] == "killed"
+    finally:
+        svc.shutdown()
+
+
+def test_repeat_stop_preserves_kill_reason_and_deadline(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Approval condition 3: a repeat STOP observes the termination
+    already in progress — it must not move the original kill
+    deadline, re-signal the tree, or overwrite an existing kill
+    reason (modelled on test_repeated_kill_preserves_original_deadline)."""
+    monkeypatch.setattr(process_module, "KILL_GRACE_S", 0.3)
+    spawner = _StubbornSpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    try:
+        result = _run_bound(
+            svc, "sleep", "req-stop-twice", principal_id="p1", run_id="run-A", args=["5"]
+        )
+        process_id = result["process_id"]
+        first = _stop(svc, "run-A", principal_id="p1", deadline_s=0.5)
+        assert first["all_final"] is False
+        record = svc._records[process_id]
+        deadline = record.kill_deadline
+        assert deadline is not None
+        assert record.kill_reason == "killed"
+        signals = len(spawner.signal_calls)
+        second = _stop(svc, "run-A", principal_id="p1", deadline_s=0.5)
+        assert second["all_final"] is False
+        assert record.kill_deadline == deadline
+        assert record.kill_reason == "killed"
+        assert len(spawner.signal_calls) == signals
+    finally:
+        svc.shutdown()
+
+
+def test_stop_after_timeout_keeps_timeout_reason(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Approval condition 3 (timeout variant): a STOP that arrives
+    while a timeout kill is already in progress must not overwrite
+    the "timeout" reason with "killed" or move its deadline."""
+    monkeypatch.setattr(process_module, "KILL_GRACE_S", 0.3)
+    spawner = _StubbornSpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    try:
+        result = _run_bound(
+            svc,
+            "sleep",
+            "req-stop-timeout",
+            principal_id="p1",
+            run_id="run-A",
+            args=["5"],
+            timeout_s=1,
+        )
+        process_id = result["process_id"]
+        record = svc._records[process_id]
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            if record.state == "killing" and record.kill_reason == "timeout":
+                break
+            time.sleep(0.02)
+        assert record.state == "killing"
+        assert record.kill_reason == "timeout"
+        original_deadline = record.kill_deadline
+        assert original_deadline is not None
+        signals = len(spawner.signal_calls)
+        stopped = _stop(svc, "run-A", principal_id="p1", deadline_s=0.5)
+        assert stopped["all_final"] is False
+        assert record.kill_reason == "timeout"
+        assert record.kill_deadline == original_deadline
+        assert len(spawner.signal_calls) == signals
+    finally:
+        svc.shutdown()
+
+
+def test_stop_isolates_same_run_id_across_principals(
+    service: HostProcessService, spawner: FakeSpawner
+) -> None:
+    """Approval condition 3: two different principals using the
+    same run_id string are separate runs — a stop for (P1, X)
+    never touches (P2, X) records."""
+    a = _run_bound(service, "sleep", "req-iso-a", principal_id="p1", run_id="run-X", args=["5"])
+    b = _run_bound(service, "sleep", "req-iso-b", principal_id="p2", run_id="run-X", args=["5"])
+    stopped = _stop(service, "run-X", principal_id="p1")
+    assert [p["process_id"] for p in stopped["processes"]] == [a["process_id"]]
+    assert _poll(service, b["process_id"])["state"] == "running"
+    stopped_b = _stop(service, "run-X", principal_id="p2")
+    assert [p["process_id"] for p in stopped_b["processes"]] == [b["process_id"]]
+
+
+def test_stopped_run_mark_expires(
+    service: HostProcessService,
+    spawner: FakeSpawner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Approval condition 2: a stopped-run mark has a bounded
+    lifetime — a STOP of an unknown run refuses a later run with
+    that id while the mark lives, and allows it after expiry."""
+    monkeypatch.setattr(process_module, "STOPPED_RUN_MARK_TTL_S", 0.3)
+    _stop(service, "run-A", principal_id="p1")
+    with pytest.raises(ProcessError) as excinfo:
+        _run_bound(service, "sleep", "req-mark-live", principal_id="p1", run_id="run-A", args=["5"])
+    assert excinfo.value.code == "run_stopped"
+    time.sleep(0.5)
+    ok = _run_bound(
+        service, "sleep", "req-mark-expired", principal_id="p1", run_id="run-A", args=["5"]
+    )
+    assert ok["state"] == "running"
+
+
+def test_reap_orphans_removes_stale_scopes_and_run_dirs(
+    fs_service: HostFsService, registry: RootsRegistry, tmp_path: Path
+) -> None:
+    """Schema §5.3 at unit level: the startup sweep destroys scopes
+    with no live record and removes stale run dirs; a scope that
+    gained a live record in the meantime is left alone."""
+    spawner = FakeSpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    try:
+        stale_dir = svc._run_base / "deadbeef"
+        stale_dir.mkdir(parents=True)
+        (stale_dir / "status.json").write_text("{}", encoding="utf-8")
+        stale_handle = SpawnHandle(
+            popen=None,
+            unit_name="slavikai-bridge-deadbeef.scope",
+            cgroup_path=None,
+            run_dir=stale_dir,
+        )
+        spawner.units["slavikai-bridge-deadbeef.scope"] = {
+            "handle": stale_handle,
+            "procs": ["4242"],
+        }
+        result = _run(svc, "sleep", "req-sweep-live", args=["5"])
+        live_id = result["process_id"]
+        live_unit = f"slavikai-bridge-{live_id}.scope"
+        assert live_unit in spawner.units
+        svc.reap_orphans()
+        assert "slavikai-bridge-deadbeef.scope" not in spawner.units
+        assert not stale_dir.exists()
+        assert live_unit in spawner.units
+        assert _poll(svc, live_id)["state"] == "running"
+    finally:
+        svc.shutdown()
+
+
+class _FailingListSpawner(FakeSpawner):
+    """list_bridge_scopes fails: the sweep must fail closed."""
+
+    def list_bridge_scopes(self) -> list[str]:
+        raise BridgeConfigError("list-units failed")
+
+
+class _FailingDestroySpawner(FakeSpawner):
+    """destroy_scope_checked reports the scope still present."""
+
+    def destroy_scope_checked(self, unit_name: str, timeout_s: float = 5.0) -> bool:
+        return False
+
+
+def test_reap_orphans_list_failure_is_fatal(
+    fs_service: HostFsService, registry: RootsRegistry, tmp_path: Path
+) -> None:
+    """Schema §5.3: a sweep that cannot list scopes fails the
+    start instead of serving with unknown trees alive."""
+    svc = _service_with_spawner(fs_service, registry, tmp_path, _FailingListSpawner())
+    try:
+        with pytest.raises(BridgeConfigError):
+            svc.reap_orphans()
+    finally:
+        svc.shutdown()
+
+
+def test_reap_orphans_destroy_failure_is_fatal(
+    fs_service: HostFsService, registry: RootsRegistry, tmp_path: Path
+) -> None:
+    """Schema §5.3: a scope that survives the destroy fails the
+    start instead of serving with its tree alive."""
+    spawner = _FailingDestroySpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    try:
+        spawner.units["slavikai-bridge-deadbeef.scope"] = {
+            "handle": SpawnHandle(
+                popen=None,
+                unit_name="slavikai-bridge-deadbeef.scope",
+                cgroup_path=None,
+                run_dir=tmp_path / "run" / "host-bridge-proc" / "deadbeef",
+            ),
+            "procs": ["4242"],
+        }
+        with pytest.raises(BridgeConfigError, match="orphan sweep failed"):
+            svc.reap_orphans()
+    finally:
+        svc.shutdown()
+
+
 class _RaisingSpawner:
     """spawn() always fails before any handle exists."""
 
@@ -2326,6 +2879,7 @@ def test_capabilities_show_profiles_when_available(bridge: Path) -> None:
     assert "host.process.run" in caps
     assert "host.process.poll" in caps
     assert "host.process.kill" in caps
+    assert "host.process.stop" in caps
     payload = client.call(bridge, "bridge.capabilities")
     profiles = payload["profiles"]
     assert {"id": "true", "args": []} in profiles
@@ -2382,6 +2936,35 @@ def test_wire_run_poll_kill(bridge: Path) -> None:
     assert killed["state"] == "killed"
     polled = client.call(bridge, "host.process.poll", params={"process_id": process_id})
     assert polled["state"] == "killed"
+
+
+def test_wire_stop(bridge: Path) -> None:
+    """E03-T06 over the real socket: the envelope binding reaches
+    the service, stop kills only its own run, poll echoes run_id."""
+    run = client.call(
+        bridge,
+        "host.process.run",
+        params={"profile_id": "sleep", "args": ["5"]},
+        request_id="wire-stop-1",
+        principal_id="p1",
+        run_id="run-A",
+    )
+    assert run["run_id"] == "run-A"
+    other = client.call(
+        bridge,
+        "host.process.run",
+        params={"profile_id": "sleep", "args": ["5"]},
+        request_id="wire-stop-2",
+        principal_id="p1",
+        run_id="run-B",
+    )
+    stopped = client.stop(bridge, "run-A", principal_id="p1")
+    assert stopped["all_final"] is True
+    assert [p["process_id"] for p in stopped["processes"]] == [run["process_id"]]
+    polled = client.call(bridge, "host.process.poll", params={"process_id": other["process_id"]})
+    assert polled["state"] == "running"
+    assert polled["run_id"] == "run-B"
+    client.call(bridge, "host.process.kill", params={"process_id": other["process_id"]})
 
 
 def test_wire_fs_validator_error_keeps_request_id(bridge: Path) -> None:
@@ -3624,6 +4207,71 @@ def _live_profiles(work: Path, bin_dir: Path) -> list[dict[str, object]]:
     )
     profiles.append(
         {
+            "id": "py_setsid",
+            "binary": _PY,
+            "argv_prefix": [
+                # The leader is a process-group leader (the helper
+                # does setpgid(0, 0)), so setsid() must run in the
+                # forked child, which is not a group leader. The
+                # child escapes killpg but not the cgroup kill.
+                "-c",
+                "import os, time; 'SETSIDT06'; pid = os.fork(); "
+                "pid == 0 and (os.setsid(), time.sleep(47)); time.sleep(1)",
+            ],
+            "cwd": {"root_id": "work", "path": "."},
+            "timeout_s": 30,
+        }
+    )
+    profiles.append(
+        {
+            "id": "py_lines",
+            "binary": _PY,
+            "argv_prefix": [
+                "-c",
+                "import sys, time\n"
+                "print('line0', flush=True)\n"
+                "time.sleep(1)\n"
+                "print('line1', flush=True)\n"
+                "time.sleep(1)\n"
+                "print('line2', flush=True)\n"
+                "time.sleep(5)\n",
+            ],
+            "cwd": {"root_id": "work", "path": "."},
+            "timeout_s": 30,
+        }
+    )
+    profiles.append(
+        {
+            # Distinct markers for the crash-recovery test: the
+            # shared TREEKILL47/SETSIDT06 markers are also used by
+            # other live tests, and a leaked process from one of
+            # them must not fail this test's pgrep assertions.
+            "id": "py_spawn_crash",
+            "binary": _PY,
+            "argv_prefix": [
+                "-c",
+                "import os, time; 'CRASHREC47'; pid = os.fork(); "
+                "pid == 0 and time.sleep(47); time.sleep(1)",
+            ],
+            "cwd": {"root_id": "work", "path": "."},
+            "timeout_s": 30,
+        }
+    )
+    profiles.append(
+        {
+            "id": "py_setsid_crash",
+            "binary": _PY,
+            "argv_prefix": [
+                "-c",
+                "import os, time; 'CRASHSET47'; pid = os.fork(); "
+                "pid == 0 and (os.setsid(), time.sleep(47)); time.sleep(1)",
+            ],
+            "cwd": {"root_id": "work", "path": "."},
+            "timeout_s": 30,
+        }
+    )
+    profiles.append(
+        {
             "id": "py_excl",
             "binary": _PY,
             "argv_prefix": [
@@ -4133,3 +4781,233 @@ def test_live_excluded_subtree_isolated(
     assert (work / "allowed" / "moved.txt").exists()
     assert not (work / "allowed" / "del.txt").exists()
     assert (work / "allowed" / "newdir").is_dir()
+
+
+# --- E03-T06 live: stop over the real spawner -------------------------------
+
+
+def _marker_alive(marker: str) -> bool:
+    found = subprocess.run(["pgrep", "-f", marker], capture_output=True, timeout=5, text=True)
+    return found.returncode == 0
+
+
+def test_live_stop_kills_only_its_own_run(live: tuple[HostProcessService, Path]) -> None:
+    """Schema §8 test 1, live: stop(A) kills A's real tree, B's
+    real process keeps running."""
+    svc, _ = live
+    a = _run_bound(svc, "sleep", "live-stop-a", principal_id="p1", run_id="run-A", args=["5"])
+    b = _run_bound(svc, "sleep", "live-stop-b", principal_id="p1", run_id="run-B", args=["5"])
+    stopped = _stop(svc, "run-A", principal_id="p1")
+    assert stopped["all_final"] is True
+    assert _poll(svc, a["process_id"])["state"] == "killed"
+    assert _poll(svc, b["process_id"])["state"] == "running"
+    _stop(svc, "run-B", principal_id="p1")
+    assert _poll(svc, b["process_id"])["state"] == "killed"
+
+
+def test_live_stop_preserves_partial_state(live: tuple[HostProcessService, Path]) -> None:
+    """Schema §8 test 2, live: stop mid-run, poll shows killed plus
+    the lines printed so far."""
+    svc, _ = live
+    run = _run_bound(
+        svc, "py_lines", "live-stop-partial", principal_id="p1", run_id="run-A-partial"
+    )
+    process_id = run["process_id"]
+    deadline = time.monotonic() + 10.0
+    saw = False
+    while time.monotonic() < deadline:
+        if "line0" in _poll(svc, process_id)["stdout"]:
+            saw = True
+            break
+        time.sleep(0.1)
+    assert saw, "the process printed nothing before the stop"
+    stopped = _stop(svc, "run-A-partial", principal_id="p1")
+    assert stopped["all_final"] is True
+    final = _poll(svc, process_id)
+    assert final["state"] == "killed"
+    assert "line0" in final["stdout"]
+
+
+def test_live_setsid_child_killed_by_stop(live: tuple[HostProcessService, Path]) -> None:
+    """Schema §8 test 9, live: a target that setsid()s and sleeps is
+    killed whole by stop — cgroup.kill, not killpg. With the daemon
+    dead the same target would survive the helper timeout; that case
+    is bounded by the startup orphan sweep (test 11), not by stop."""
+    svc, _ = live
+    run = _run_bound(svc, "py_setsid", "live-setsid-stop", principal_id="p1", run_id="run-A-setsid")
+    process_id = run["process_id"]
+    deadline = time.monotonic() + 10.0
+    saw_child = False
+    while time.monotonic() < deadline:
+        polled = _poll(svc, process_id)
+        if polled["state"] == "running" and _marker_alive("SETSIDT06"):
+            saw_child = True
+            break
+        time.sleep(0.1)
+    assert saw_child, "the setsid child never appeared"
+    stopped = _stop(svc, "run-A-setsid", principal_id="p1")
+    assert stopped["all_final"] is True
+    final = _live_wait(svc, process_id, "killed")
+    assert final["state"] == "killed"
+    assert not _marker_alive("SETSIDT06"), "the setsid descendant survived the stop"
+
+
+def _wait_ping(socket_path: Path, *, timeout_s: float = 20.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    last: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            if client.ping(socket_path) == {"pong": True}:
+                return
+        except BaseException as exc:  # noqa: BLE001 - retried until the deadline
+            last = exc
+        time.sleep(0.2)
+    raise AssertionError(f"daemon at {socket_path} never answered ping: {last!r}")
+
+
+def _scope_gone(unit_name: str) -> bool:
+    out = subprocess.run(
+        ["systemctl", "--user", "show", unit_name, "-p", "LoadState,ActiveState"],
+        capture_output=True,
+        timeout=5,
+        text=True,
+    )
+    fields = dict(line.split("=", 1) for line in out.stdout.splitlines() if "=" in line)
+    return fields.get("LoadState") == "not-found" or fields.get("ActiveState") == "inactive"
+
+
+def test_live_crash_recovery_whole_tree(
+    live: tuple[HostProcessService, Path], tmp_path: Path
+) -> None:
+    """Schema §8 test 11 (rev. 1, integration acceptance): a real
+    daemon is kill -9'd mid-run; on restart the orphan sweep kills
+    the whole tree — including the setsid'd descendant — the old
+    process ids are unknown, the orphaned run dirs are gone, and
+    the restarted daemon serves new runs. ``live`` is only the
+    gate: the test is skipped when the enforcement probe fails."""
+    repo_root = Path(__file__).resolve().parents[1]
+    base = tmp_path / "crash"
+    home = base / "home"
+    work = home / "Project" / "work"
+    work.mkdir(parents=True)
+    (home / "Documents" / "docs").mkdir(parents=True)
+    (work / "notes.txt").write_text("hello\nworld\n", encoding="utf-8")
+    (work / ".env").write_text("SECRET=do-not-leak\n", encoding="utf-8")
+    bin_dir = base / "bin"
+    bin_dir.mkdir()
+    shutil.copy(_TRUE, bin_dir / "tool")
+    _write_config(home, _live_profiles(work, bin_dir))
+    runtime_dir = base / "run"
+    runtime_dir.mkdir()
+    # The daemon subprocess needs a working user systemd bus for the
+    # fail-closed orphan sweep and for systemd-run spawns, while its
+    # socket stays isolated in runtime_dir: link the real manager
+    # sockets in instead of overriding them away. Without these,
+    # systemctl --user fails (it connects to
+    # $XDG_RUNTIME_DIR/systemd/private) and the sweep refuses to
+    # start the daemon (BridgeConfigError, exit 2).
+    real_runtime = Path(f"/run/user/{os.getuid()}")
+    if not (real_runtime / "systemd" / "private").exists():
+        pytest.skip("no user systemd manager for the crash daemon to sweep/spawn with")
+    (runtime_dir / "systemd").symlink_to(real_runtime / "systemd", target_is_directory=True)
+    (runtime_dir / "bus").symlink_to(real_runtime / "bus")
+    socket_path = runtime_dir / "slavikai" / "host-bridge.sock"
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "XDG_RUNTIME_DIR": str(runtime_dir),
+    }
+    units: list[str] = []
+    proc: subprocess.Popen[bytes] | None = None
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "host_bridge"],
+            cwd=str(repo_root),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        _wait_ping(socket_path)
+        normal = client.call(
+            socket_path,
+            "host.process.run",
+            params={"profile_id": "py_spawn_crash"},
+            request_id="crash-normal",
+            principal_id="p1",
+            run_id="run-A",
+        )
+        setsid = client.call(
+            socket_path,
+            "host.process.run",
+            params={"profile_id": "py_setsid_crash"},
+            request_id="crash-setsid",
+            principal_id="p1",
+            run_id="run-A",
+        )
+        units = [
+            f"slavikai-bridge-{normal['process_id']}.scope",
+            f"slavikai-bridge-{setsid['process_id']}.scope",
+        ]
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if _marker_alive("CRASHREC47") and _marker_alive("CRASHSET47"):
+                break
+            time.sleep(0.1)
+        assert _marker_alive("CRASHREC47"), "the normal child never appeared"
+        assert _marker_alive("CRASHSET47"), "the setsid child never appeared"
+        # Kill -9 the daemon: the scopes (and their trees) survive.
+        proc.kill()
+        assert proc.wait(timeout=5.0) == -9
+        proc = None
+        assert _marker_alive("CRASHREC47"), "the tree died with the daemon (no orphan to sweep)"
+        assert _marker_alive("CRASHSET47"), "the setsid tree died with the daemon"
+        # Restart: the sweep must kill both trees before serving.
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "host_bridge"],
+            cwd=str(repo_root),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        _wait_ping(socket_path)
+        assert not _marker_alive("CRASHREC47"), "a normal descendant survived the restart sweep"
+        assert not _marker_alive("CRASHSET47"), "the setsid descendant survived the restart sweep"
+        for unit in units:
+            assert _scope_gone(unit), f"orphan scope {unit} survived the restart"
+        for process_id in (normal["process_id"], setsid["process_id"]):
+            with pytest.raises(client.BridgeClientError) as excinfo:
+                client.call(socket_path, "host.process.poll", params={"process_id": process_id})
+            assert excinfo.value.code == "process_not_found"
+            assert not (socket_path.parent / "host-bridge-proc" / str(process_id)).exists()
+        # The restarted daemon serves new runs normally.
+        # "sleep", not "true": an instantly-exiting profile may
+        # already be "exited" when run returns (still proof the
+        # daemon serves runs), but this assertion wants a
+        # deterministically live process to kill afterwards.
+        fresh = client.call(
+            socket_path,
+            "host.process.run",
+            params={"profile_id": "sleep", "args": ["5"]},
+            request_id="crash-fresh",
+        )
+        assert fresh["state"] == "running"
+        client.call(socket_path, "host.process.kill", params={"process_id": fresh["process_id"]})
+    finally:
+        if proc is not None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5.0)
+        for unit in units:
+            subprocess.run(
+                ["systemctl", "--user", "kill", "--signal=SIGKILL", unit],
+                capture_output=True,
+                timeout=5,
+            )
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and (
+            _marker_alive("CRASHREC47") or _marker_alive("CRASHSET47")
+        ):
+            time.sleep(0.05)
