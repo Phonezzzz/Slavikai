@@ -420,13 +420,15 @@ Final outcome
 | E00 — baseline/docs | 3 | E00-T01 DONE; E00-T02 DONE; E00-T03 DONE |
 | E01 — canonical execution | 9 | E01 T01–T09 DONE (PR #163, main 0f894c6) |
 | E02 — persistent browser | 10 | T01 DONE (PR #166); T02 DONE (PR #167); T03 DONE (PR #180, main f2e94ba); T04 DONE (PR #181, main 30bd0da); T05 DONE (PR #182, main b2a4257); T06 DONE (PR #183, main dd207de; acceptance закрыт PR #188); T07 DONE (PR #186, main 20af69c); T09 DONE (PR #187, main 421314c); T10 DONE (PR #188, main f581132) |
-| E03 — Host Bridge / Desktop Commander | 11 | T01 DONE (PR #193, main 325d2f9); T02 DONE (PR #194, main cd6f0d4); T03 DONE (PR #195, main 8147223); T04 DONE (PR #196, main 2020b81) |
+| E03 — Host Bridge / Desktop Commander | 11 | T01 DONE (PR #193, main 325d2f9); T02 DONE (PR #194, main cd6f0d4); T03 DONE (PR #195, main 8147223); T04 DONE (PR #196, main 2020b81); T05 DONE (PR #198, main 0dd07de) |
 | E04 — workspace/executor | 6 | T03 slice DONE (PR #164, main 7affb3f); остальное NEEDS_REFINEMENT |
 | E05 — verification/recovery | 7 | NEEDS_REFINEMENT |
 | E06 — modes/policy/UI | 6 | NEEDS_REFINEMENT |
 | E07 — memory/context | 5 | NEEDS_REFINEMENT |
 | E08 — cleanup/operations | 8 | NEEDS_REFINEMENT |
 | **Всего** | **65** | **33 READY, 32 предварительный, 0 заблокировано** |
+
+**Зависимости (решение владельца 2026-11-24).** DB-06/01/02 — versioned migrations для UI storage — prerequisite для расширения UI storage (FOUNDATION-механизм до появления ценных данных; миграций реальных данных нет — прод не запущен).
 
 **E04–E08 — не исполнимые ticket specs до refinement.** Перед соответствующим эпиком Muse доводит каждый до полного шаблона: ЧТО, ЗАЧЕМ, проверенный code touchpoint/unknown, зависимости, scope, steps, delete-vs-wrap, positive/negative/E2E acceptance, postconditions, разрешения/запреты, evidence, `make check`, CI и независимый Codex review. До этого в `STATE.md` фиксируется `BLOCKED: ROADMAP_REFINEMENT`, в том числе E07-T04 и однострочные E08.
 
@@ -1462,6 +1464,8 @@ custom_command
 **ЧТО.** Approved Plan → execute Run.
 
 **Acceptance.** Нет самостоятельного act orchestrator в production path.
+
+**Зависимость.** Prerequisite (решение владельца 2026-11-24): PLAN-01/02 — атомарный CAS в plan/edit (audit-backlog); без него E06-T02 не начинать.
 
 #### E06-T03 — remove Auto runtime concept
 

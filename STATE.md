@@ -195,6 +195,7 @@
 - **E03-T02 — DONE** (минимальный AF_UNIX host bridge daemon: `ping/version/capabilities`, systemd user service, SO_PEERCRED auth). Evidence: PR #194 MERGED (main cd6f0d4).
 - **E03-T03 — DONE** (protocol v1 schema: versioned request schema, frame limit, request ID, timeout, deterministic rejection). Evidence: PR #195 MERGED (main 8147223).
 - **E03-T04 — DONE** (bounded host filesystem API: `host.fs.stat/list/read/write/patch/move/delete/search` только для approved roots, dir_fd-операции, cancel-before-commit, trash-only delete; 13 rework-раундов по Codex review, все findings закрыты регрессионными тестами). Evidence: PR #196 MERGED 2026-11-24 (main 2020b81), `tests/test_host_bridge_fs.py` (82 теста), `make check` зелёный (2887 passed, coverage 84%); ветка `pr-e03-t04-fs-api`.
+- **E03-T05 — DONE** (process run/poll/kill: `host.process.run/poll/kill` только для approved command profiles; enforcement Landlock + NEWUSER|NEWNET|NEWIPC + NO_NEW_PRIVS + обязательный seccomp-запрет сокетов и метаданных; helper закрывает служебные FD до exec; startup-probe через тот же helper под реальным systemd user unit; tree kill — отдельный cgroup v2 на process_id, финальный статус — после опустошения cgroup и reap лидера; poll — SHA-256 хвостов + frozen snapshot, абсолютные offsets + retained_from; 14 rework-раундов по Codex review, 22 треда закрыты ответами с фиксами+тестами по прецеденту #196 на «ок» владельца). Evidence: PR #198 MERGED 2026-11-24 (main 0dd07de), `tests/test_host_bridge_process.py` (107 тестов), `make check` зелёный (2994 passed, coverage 83.28%); ветка `pr-e03-t05-process`.
 
 ## Readiness: 65 последовательных тикетов
 
@@ -203,7 +204,7 @@
 | E00 | T01–T03 | 3 | E00-T01 done; E00-T02 done; E00-T03 done |
 | E01 | T01–T09 | 9 | E01 T01–T09 DONE |
 | E02 | T01–T10 | 10 | T01 DONE (PR #166); T02 DONE (PR #167); T03 DONE (PR #180); T04 DONE (PR #181); T05 DONE (PR #182); T06 DONE (PR #183, main dd207de; acceptance закрыт PR #188); T07 DONE (PR #186, main 20af69c); T08 DONE (PR #191, main c779bff; ручная приёмка шагов 2 и 8 — 2026-11-23); T09 DONE (PR #187, main 421314c); T10 DONE (PR #188, main f581132) |
-| E03 | T01–T11 | 11 | T01 DONE (PR #193, main 325d2f9); T02 DONE (PR #194, main cd6f0d4); T03 DONE (PR #195, main 8147223); T04 DONE (PR #196, main 2020b81) |
+| E03 | T01–T11 | 11 | T01 DONE (PR #193, main 325d2f9); T02 DONE (PR #194, main cd6f0d4); T03 DONE (PR #195, main 8147223); T04 DONE (PR #196, main 2020b81); T05 DONE (PR #198, main 0dd07de) |
 | E04 | T01–T06 | 6 | T03 slice DONE (PR #164); остальное NEEDS_REFINEMENT |
 | E05 | T01–T07 | 7 | NEEDS_REFINEMENT |
 | E06 | T01–T06 | 6 | NEEDS_REFINEMENT |
@@ -222,4 +223,4 @@
 
 ## Resume
 
-**Next active:** E03-T05 (process run/poll/kill) — E03-T01 — DONE (PR #193 MERGED, main `325d2f9`, ADR-0013); E03-T02 — DONE (PR #194 MERGED, main `cd6f0d4`); E03-T03 — DONE (PR #195 MERGED, main `8147223`); E03-T04 — DONE (PR #196 MERGED, main `2020b81`). **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.
+**Next active:** E03-T06 (STOP and process ownership) — порядок владельца (2026-11-24): после T05 — отдельный PR с фиксом SEC-04 и проверкой SEC-03, затем E03-T06. E03-T01 — DONE (PR #193 MERGED, main `325d2f9`, ADR-0013); E03-T02 — DONE (PR #194 MERGED, main `cd6f0d4`); E03-T03 — DONE (PR #195 MERGED, main `8147223`); E03-T04 — DONE (PR #196 MERGED, main `2020b81`); E03-T05 — DONE (PR #198 MERGED 2026-11-24, main `0dd07de`). **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.
