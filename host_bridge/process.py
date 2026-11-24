@@ -152,7 +152,8 @@ _PROBE_CODE = r"""
 import json, os, socket, sys, time
 result = {"tcp": "unknown", "udp": "unknown", "unix": "unknown",
           "protected": "unknown", "allowed": "unknown", "uid": None,
-          "signal": "unknown", "metadata": "unknown", "prlimit": "unknown"}
+          "signal": "unknown", "metadata": "unknown", "prlimit": "unknown",
+          "fifo": "unknown", "setpriority": "unknown"}
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(2)
@@ -230,6 +231,42 @@ finally:
         pass
     try:
         os.waitpid(_child, 0)
+    except OSError:
+        pass
+# mkfifo is outside Landlock's granted rights: MAKE_FIFO is in the
+# handled mask with no allowing grant, so creating a named pipe must
+# be refused even inside the writable cwd — otherwise a profile
+# could create a rendezvous point in any owner-accessible directory.
+try:
+    os.mkfifo("probe.fifo")
+    result["fifo"] = "allowed"
+    try:
+        os.unlink("probe.fifo")
+    except OSError:
+        pass
+except OSError as e:
+    result["fifo"] = "refused" if e.errno in (1, 13) else f"error:{e.errno}"
+# setpriority is outside Landlock and signal scope, like prlimit64:
+# with no PID namespace and matching kernel credentials, the target
+# must not renice another process. Fork a sacrificial child and try
+# to lower its priority; the child is killed right after, so a
+# missing ban cannot hurt a real process.
+_child2 = os.fork()
+if _child2 == 0:
+    time.sleep(2)
+    os._exit(0)
+try:
+    os.setpriority(os.PRIO_PROCESS, _child2, 19)
+    result["setpriority"] = "allowed"
+except OSError as e:
+    result["setpriority"] = "refused" if e.errno in (1, 13) else f"error:{e.errno}"
+finally:
+    try:
+        os.kill(_child2, 9)
+    except OSError:
+        pass
+    try:
+        os.waitpid(_child2, 0)
     except OSError:
         pass
 result["uid"] = os.getuid()
@@ -781,6 +818,18 @@ def _compute_cwd_grants(
             return [Grant(directory, access, dev=st.st_dev, ino=st.st_ino)], False
         return local, True
 
+    # The walk classifies every child, but never the cwd itself: a
+    # profile with cwd="credentials" would get one rw grant over the
+    # whole directory even though _classify(credentials) is "deny"
+    # (the children classify "normal" one by one, so the parent is
+    # granted as a single clean rule). The cwd itself must classify
+    # "normal" before it can be granted at all.
+    try:
+        cwd_classification = fs_service._classify(cwd, mutation=False)
+    except FsError as exc:
+        raise ProcessError("spawn_failed", f"cwd cannot be classified: {exc}") from exc
+    if cwd_classification != "normal":
+        raise ProcessError("spawn_failed", "cwd is protected by host policy")
     cwd_grants, _ = walk(cwd, 0, access)
     grants.extend(cwd_grants)
     if len(grants) > GRANT_WALK_MAX_GRANTS:
@@ -951,9 +1000,12 @@ def run_enforcement_probe(
     (chmod/chown/setxattr/utime — outside Landlock, closed by the
     seccomp ban), cannot change another process's limits via
     prlimit64 (outside Landlock and signal scope, closed by the
-    seccomp ban), CAN read an allowed file, runs with the mapped uid,
-    cannot signal processes outside its Landlock domain, and is
-    placed in its own scope cgroup.
+    seccomp ban), cannot renice another process via setpriority
+    (same family, same ban), cannot create a named pipe via mkfifo
+    (MAKE_FIFO is handled by Landlock with no allowing grant), CAN
+    read an allowed file, runs with the mapped uid, cannot signal
+    processes outside its Landlock domain, and is placed in its own
+    scope cgroup.
     Any failure makes the process API unavailable (fail-closed).
     """
     probe_dir: Path | None = None
@@ -1081,6 +1133,8 @@ def run_enforcement_probe(
                 "signal": verdict.get("signal"),
                 "metadata": verdict.get("metadata"),
                 "prlimit": verdict.get("prlimit"),
+                "fifo": verdict.get("fifo"),
+                "setpriority": verdict.get("setpriority"),
                 "placement": placement_ok,
                 "landlock_abi": landlock_abi(),
             }
@@ -1094,6 +1148,8 @@ def run_enforcement_probe(
                 and verdict.get("signal") == "refused"
                 and verdict.get("metadata") == "refused"
                 and verdict.get("prlimit") == "refused"
+                and verdict.get("fifo") == "refused"
+                and verdict.get("setpriority") == "refused"
                 and placement_ok
             )
             if not ok:
@@ -1145,6 +1201,10 @@ class _Record:
     stderr_total: int = 0
     stdout_retained_from: int = 0
     stderr_retained_from: int = 0
+    # Publication generation of the last status read: the tail and
+    # its counters are one snapshot only when the generation did not
+    # change across the read (see _poll).
+    status_generation: int = 0
     settled: threading.Event = field(default_factory=threading.Event)
     final: bool = False
 
@@ -1500,7 +1560,26 @@ class HostProcessService:
                     record.settled.set()
                     return
             if handle.leader_done():
-                self._finalize(record, "spawn_failed")
+                # The leader died before publishing a status. If the
+                # cgroup is already empty, no tree survives: finalize
+                # spawn_failed at once (a retry waiting on this
+                # launch settles with it). If a descendant is still
+                # alive in the cgroup, PDEATHSIG protects only the
+                # direct child — finalizing here would leave the tree
+                # outside every cleanup path (_reap_once skips final
+                # records, _kill and shutdown do not touch them).
+                # Hand the record to the reaper instead: destroy the
+                # tree now, and let it finalize once the cgroup is
+                # confirmed empty. The spawn itself still fails for
+                # the caller either way.
+                if self._spawner.cgroup_empty(handle):
+                    self._finalize(record, "spawn_failed")
+                elif not record.final:
+                    record.kill_requested = True
+                    record.kill_reason = "cancelled"
+                    record.state = "killing"
+                    record.kill_deadline = time.monotonic() + KILL_GRACE_S
+                    self._spawner.kill_all(handle)
                 raise ProcessError("spawn_failed", "leader exited before start")
             time.sleep(0.05)
         # The deadline hit: cancel the launch first (the kill is
@@ -1538,6 +1617,7 @@ class HostProcessService:
         record.stderr_total = _status_int(status, "stderr_total_bytes")
         record.stdout_retained_from = _status_int(status, "stdout_retained_from")
         record.stderr_retained_from = _status_int(status, "stderr_retained_from")
+        record.status_generation = _status_int(status, "generation")
         if record.started_at == "" and status.get("started_at"):
             record.started_at = str(status.get("started_at"))
         if not record.final:
@@ -1574,22 +1654,30 @@ class HostProcessService:
         run_dir = record.handle.run_dir
         # The tail and its counters must be one consistent snapshot:
         # the helper publishes the tail before the status, so a tail
-        # newer than the status is possible, and after a 256 KiB tail
-        # rotation a stale retained_from misaligns every offset. In a
-        # consistent snapshot total - retained_from == len(tail) for
-        # each stream; when it does not hold, re-read status + tails
-        # (the helper writes both on every flush, so the fresh
-        # counters cover the tail). The growth case is still clamped
-        # below, so a stale status can never publish an offset beyond
-        # the bytes actually read.
+        # newer than the status is possible. A length check alone
+        # cannot prove consistency: after a 256 KiB tail rotation the
+        # tail keeps its length while its content changes, so an old
+        # status plus a new tail passes the length check and hands
+        # new bytes out at old absolute offsets (and repeats them on
+        # the next poll). The binding is the publication generation
+        # the helper bumps on every status write: read status, read
+        # the tails, read the status again — the snapshot is
+        # consistent only when the generation did not change AND
+        # total - retained_from == len(tail) for each stream. The
+        # growth case is still clamped below, so a stale status can
+        # never publish an offset beyond the bytes actually read.
         for _ in range(5):
+            self._refresh(record)
+            generation = record.status_generation
             stdout_tail = self._tail_bytes(run_dir, "stdout")
             stderr_tail = self._tail_bytes(run_dir, "stderr")
-            if record.stdout_total - record.stdout_retained_from == len(
-                stdout_tail
-            ) and record.stderr_total - record.stderr_retained_from == len(stderr_tail):
-                break
             self._refresh(record)
+            if (
+                record.status_generation == generation
+                and record.stdout_total - record.stdout_retained_from == len(stdout_tail)
+                and record.stderr_total - record.stderr_retained_from == len(stderr_tail)
+            ):
+                break
         stdout_total = max(record.stdout_total, record.stdout_retained_from + len(stdout_tail))
         stderr_total = max(record.stderr_total, record.stderr_retained_from + len(stderr_tail))
         if stdout_offset > stdout_total or stderr_offset > stderr_total:

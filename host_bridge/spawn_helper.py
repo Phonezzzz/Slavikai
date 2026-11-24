@@ -92,6 +92,15 @@ _LL_REMOVE_DIR = 16
 _LL_REMOVE_FILE = 32
 _LL_MAKE_DIR = 128
 _LL_MAKE_REG = 256
+# Node-creation rights that are never granted (no profile needs to
+# create a device node, a named pipe, or a UNIX socket object):
+# they must still be listed in handled_access_fs, or Landlock
+# allows them by default (unlisted handled rights are allowed,
+# not denied — /usr/include/linux/landlock.h).
+_LL_MAKE_CHAR = 64
+_LL_MAKE_SOCK = 512
+_LL_MAKE_FIFO = 1024
+_LL_MAKE_BLOCK = 2048
 _LL_MAKE_SYM = 4096
 _LL_REFER = 8192
 _LL_TRUNCATE = 16384
@@ -146,8 +155,12 @@ _SCMP_ACT_ERRNO = 0x00050000
 # denied for the same reason Landlock's signal scope exists: with no
 # PID namespace and matching kernel credentials, a profile that knows
 # the daemon/server PID could zero its RLIMIT_NOFILE and deny it files
-# and connections. The startup probe verifies the metadata and
-# prlimit bans live. Landlock + the empty network namespace are the
+# and connections. setpriority is banned for the same reason: a
+# profile could otherwise renice the daemon/server to 19 and leave
+# it degraded after the profile ends (nice can only be lowered back
+# by a privileged process). The startup probe verifies the metadata,
+# prlimit and setpriority bans live. Landlock + the empty network
+# namespace are the
 # other layers; the seccomp bans are mandatory (owner correction
 # 2026-11-24).
 _DENIED_SYSCALLS: tuple[str, ...] = (
@@ -174,6 +187,7 @@ _DENIED_SYSCALLS: tuple[str, ...] = (
     "process_vm_readv",
     "process_vm_writev",
     "prlimit64",
+    "setpriority",
     "bpf",
     "open_by_handle_at",
     "name_to_handle_at",
@@ -380,6 +394,13 @@ def _apply_landlock(grants: list[dict[str, object]]) -> tuple[int, str]:
         | _LL_MAKE_SYM
         | _LL_REFER
         | _LL_TRUNCATE
+        # Node creation is handled but never granted by any rule:
+        # a profile cannot mkfifo/mknod anywhere, inside an
+        # allowed root or outside it.
+        | _LL_MAKE_CHAR
+        | _LL_MAKE_SOCK
+        | _LL_MAKE_FIFO
+        | _LL_MAKE_BLOCK
     )
     attr.handled_access_net = 0
     # Signal scope: a restricted process may only signal processes in
@@ -611,12 +632,22 @@ class _Supervisor:
         self.stdout_tail = _Tail()
         self.stderr_tail = _Tail()
         self.terminate_requested = False
+        # Publication generation: bumped on every status write, so
+        # the daemon can tell a tail + counters snapshot is torn.
+        # The tail is written before the status, and a tail rotation
+        # keeps the tail length constant — so a length check alone
+        # cannot distinguish a new tail from the counters that
+        # describe it. A generation that changed between two status
+        # reads means a publication happened in between, and the
+        # snapshot must be re-read.
+        self.generation = 0
 
     def _status(self, state: str, **extra: object) -> dict[str, object]:
         status: dict[str, object] = {
             "version": 1,
             "process_id": self.process_id,
             "state": state,
+            "generation": self.generation,
             "pid": self.child_pid,
             "helper_pid": self.helper_pid,
             "cgroup": _read_cgroup(),
@@ -634,6 +665,10 @@ class _Supervisor:
         return status
 
     def _write_status(self, state: str, **extra: object) -> None:
+        # Bump first: the status that describes a just-flushed tail
+        # must carry a newer generation than any status read before
+        # the flush, or the daemon cannot tell the two apart.
+        self.generation += 1
         try:
             _write_atomic(
                 self.status_path,

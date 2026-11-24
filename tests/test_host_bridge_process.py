@@ -768,6 +768,47 @@ def test_cwd_grants_carry_identity(home: Path, tmp_path: Path) -> None:
         assert grant["ino"] == st.st_ino
 
 
+def test_cwd_grant_refuses_protected_cwd(home: Path, tmp_path: Path) -> None:
+    """A cwd that classifies as protected ("credentials") gets no
+    grant at all: the walk classifies every child, never the cwd
+    itself, so without this check one clean child would grant the
+    whole protected directory as a single rw rule."""
+    creds = home / "Project" / "work" / "credentials"
+    creds.mkdir()
+    (creds / "token.txt").write_text("token\n", encoding="utf-8")
+    config = _write_config(
+        home,
+        _profiles(
+            [
+                {
+                    "id": "creds",
+                    "binary": _TRUE,
+                    "cwd": {"root_id": "work", "path": "credentials"},
+                }
+            ]
+        ),
+    )
+    registry = RootsRegistry(
+        roots=(
+            Root(id="work", path=(home / "Project" / "work").resolve(), mode="rw"),
+            Root(id="docs", path=(home / "Documents" / "docs").resolve(), mode="ro"),
+        ),
+        write_excluded=(),
+        home=home.resolve(),
+        config_path=config,
+        socket_dir=None,
+    )
+    fs = HostFsService(registry, trash_root=tmp_path / "Trash")
+    spawner = FakeSpawner()
+    svc = _service_with_spawner(fs, registry, tmp_path, spawner)
+    try:
+        with pytest.raises(ProcessError) as excinfo:
+            _run(svc, "creds", "req-creds")
+        assert excinfo.value.code == "spawn_failed"
+    finally:
+        svc.shutdown()
+
+
 def test_cwd_grants_split_nested_checkout(home: Path, tmp_path: Path) -> None:
     """A SlavikAI checkout nested inside the root is not rw-granted."""
     clone = home / "Project" / "work" / "clone"
@@ -995,6 +1036,67 @@ def test_poll_pairs_tail_with_consistent_counters(
     assert first["stdout"] + second["stdout"] == "abcdef"
 
 
+def test_poll_rotation_snapshot_is_generation_bound(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a 256 KiB tail rotation the tail keeps its length while
+    its content changes, so a length check alone accepts a torn
+    snapshot: an old status plus a new tail hands new bytes out at
+    old absolute offsets (and repeats them on the next poll). The
+    publication generation binds the tail to its counters: a poll
+    that reads across a publication retries and answers from the new
+    counters instead."""
+    spawner = FakeSpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    # The reaper thread would consume scripted status reads (and
+    # update the record's totals) out of order; park it — this test
+    # drives _refresh explicitly. (Stopping it via _stop would make
+    # _run treat the spawn as a late launch instead.)
+    monkeypatch.setattr(svc, "_reap_once", lambda: None)
+    try:
+        result = _run(svc, "true", "req-gen")
+        process_id = result["process_id"]
+        handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+        # Rotated tail: A x 262140 then B x 4 (absolute 262144..262147).
+        (handle.run_dir / "stdout").write_bytes(b"A" * 262140 + b"B" * 4)
+        (handle.run_dir / "stderr").write_bytes(b"")
+        old = {
+            "version": 1,
+            "state": "running",
+            "stdout_total_bytes": 262144,
+            "stdout_retained_from": 0,
+            "stderr_total_bytes": 0,
+            "stderr_retained_from": 0,
+            "generation": 1,
+        }
+        new = dict(old, stdout_total_bytes=262148, stdout_retained_from=4, generation=2)
+        script = [old, old, new, new, new, new, new, new]
+        calls = {"n": 0}
+
+        def _scripted_status(run_dir: Path) -> dict[str, object] | None:
+            index = min(calls["n"], len(script) - 1)
+            calls["n"] += 1
+            return dict(script[index])
+
+        monkeypatch.setattr(process_module, "_read_status_file", _scripted_status)
+        # Absolute offset 262140 is the last four A's; with the torn
+        # snapshot (old counters, new tail) it would read BBBB.
+        polled = _poll(svc, process_id, stdout_offset=262140, max_bytes=4)
+        assert polled["stdout"] == "AAAA"
+        assert polled["stdout_next_offset"] == 262144
+        assert polled["stdout_total_bytes"] == 262148
+        assert polled["stdout_retained_from"] == 4
+        # And the new bytes follow exactly once, at their own offsets.
+        following = _poll(svc, process_id, stdout_offset=262144, max_bytes=4)
+        assert following["stdout"] == "BBBB"
+        assert following["stdout_next_offset"] == 262148
+    finally:
+        svc.shutdown()
+
+
 def test_poll_frame_budget_keeps_source_byte_offsets(
     service: HostProcessService, spawner: FakeSpawner
 ) -> None:
@@ -1206,6 +1308,67 @@ def test_kill_after_timeout_keeps_timeout_reason(
         assert record.kill_reason == "timeout"
         assert record.kill_deadline == original_deadline
         assert len(spawner.signal_calls) == signals
+    finally:
+        svc.shutdown()
+
+
+class _CrashedHelperSpawner(FakeSpawner):
+    """A spawner whose leader exits at once, no status file is ever
+    published, and the cgroup stays non-empty until kill_all: the
+    helper crashed after the target started, before its first
+    status.json."""
+
+    def spawn(self, spec_path: Path, *, unit_name: str, run_dir: Path) -> SpawnHandle:
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        self.spawns.append(spec)
+        leader = subprocess.Popen(
+            ["sleep", "30"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        handle = SpawnHandle(popen=leader, unit_name=unit_name, cgroup_path=None, run_dir=run_dir)
+        self.units[unit_name] = {"handle": handle, "procs": [str(leader.pid)]}
+        leader.kill()
+        leader.wait()
+        return handle
+
+    def kill_all(self, handle: SpawnHandle) -> None:
+        self.kill_calls.append(handle.unit_name)
+        unit = self.units.get(handle.unit_name)
+        if unit is not None:
+            unit["procs"] = []
+        # No status file is ever written: the helper died before its
+        # first publication, so the reaper must finalize from the
+        # cgroup state alone.
+
+
+def test_helper_crash_before_first_status_kills_tree(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+) -> None:
+    """If the helper dies after the target started but before its
+    first status.json, the record must not finalize while the cgroup
+    is non-empty: the tree is destroyed first, and the reaper
+    finalizes once the cgroup is empty. Finalizing on leader death
+    would leave descendants outside every cleanup path."""
+    spawner = _CrashedHelperSpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    try:
+        with pytest.raises(ProcessError) as excinfo:
+            _run(svc, "true", "req-crash")
+        assert excinfo.value.code == "spawn_failed"
+        process_id = svc._by_request_id["req-crash"]
+        record = svc._records[process_id]
+        assert not record.final
+        assert record.state == "killing"
+        assert spawner.kill_calls, "the tree was never destroyed"
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not record.final:
+            svc._reap_once()
+            time.sleep(0.02)
+        assert record.final
+        assert record.state == "killed"
     finally:
         svc.shutdown()
 
@@ -1828,9 +1991,18 @@ def test_landlock_grant_refuses_replaced_object(tmp_path: Path) -> None:
         *spec["grants"],
         {"path": str(sub), "access": "rw", "dev": dev, "ino": ino},
     ]
+    # Swap in a different directory object via rename, not
+    # rmtree+mkdir: a fresh mkdir can reuse the freed inode on some
+    # filesystems (CI), which makes the replacement identical by
+    # (dev, ino) and the grant legitimately accepted. A renamed
+    # directory keeps its own inode, so the two objects are
+    # guaranteed different.
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / "data.txt").write_text("EVIL\n", encoding="utf-8")
     shutil.rmtree(sub)
-    sub.mkdir()
-    (sub / "data.txt").write_text("EVIL\n", encoding="utf-8")
+    os.rename(replacement, sub)
+    assert _grant_identity(sub) != (dev, ino)
     code, _ = _run_supervisor(spec, run_dir)
     assert code == 1
     status = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
@@ -1838,6 +2010,102 @@ def test_landlock_grant_refuses_replaced_object(tmp_path: Path) -> None:
     # A failed spawn never writes a stdout tail: the replacement
     # directory was never granted, so its content cannot leak.
     assert not (run_dir / "stdout").exists() or b"EVIL" not in (run_dir / "stdout").read_bytes()
+
+
+def test_landlock_mkfifo_denied_even_in_granted_cwd(tmp_path: Path) -> None:
+    """mkfifo inside a rw-granted cwd is refused: MAKE_FIFO is in
+    the handled mask with no allowing grant. Unlisted handled rights
+    are allowed by Landlock by default, so the mask must list it —
+    otherwise a profile could create a named pipe in any
+    owner-accessible directory."""
+    from host_bridge.spawn_helper import landlock_abi
+
+    if landlock_abi() is None:
+        pytest.skip("Landlock is unavailable in this environment")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    spec = _supervisor_spec(
+        run_dir,
+        work,
+        "import os\n"
+        "try:\n"
+        "    os.mkfifo('newfifo')\n"
+        "    print('allowed')\n"
+        "except OSError as e:\n"
+        "    print('refused' if e.errno in (1, 13) else 'error:%d' % e.errno)\n",
+    )
+    spec["grants"] = [
+        *spec["grants"],
+        {"path": str(work), "access": "rw"},
+    ]
+    code, _ = _run_supervisor(spec, run_dir)
+    assert code == 0
+    assert (run_dir / "stdout").read_bytes() == b"refused\n"
+
+
+def test_seccomp_setpriority_foreign_pid_denied(tmp_path: Path) -> None:
+    """setpriority on another process is refused by the seccomp ban:
+    with no PID namespace and matching kernel credentials, a profile
+    could otherwise renice the daemon/server to 19 and leave it
+    degraded after the profile ends (lowering nice back needs a
+    privileged process)."""
+    from host_bridge.spawn_helper import landlock_abi
+
+    if landlock_abi() is None:
+        pytest.skip("Landlock is unavailable in this environment")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    spec = _supervisor_spec(
+        run_dir,
+        work,
+        "import os, time\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    time.sleep(2)\n"
+        "    os._exit(0)\n"
+        "try:\n"
+        "    os.setpriority(os.PRIO_PROCESS, pid, 19)\n"
+        "    print('allowed')\n"
+        "except OSError as e:\n"
+        "    print('refused' if e.errno in (1, 13) else 'error:%d' % e.errno)\n"
+        "finally:\n"
+        "    try:\n"
+        "        os.kill(pid, 9)\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    try:\n"
+        "        os.waitpid(pid, 0)\n"
+        "    except OSError:\n"
+        "        pass\n",
+    )
+    code, _ = _run_supervisor(spec, run_dir)
+    assert code == 0
+    assert (run_dir / "stdout").read_bytes() == b"refused\n"
+
+
+def test_supervisor_status_carries_generation(tmp_path: Path) -> None:
+    """Every status publication bumps the generation counter the
+    daemon uses to bind a tail to its counters (see
+    test_poll_rotation_snapshot_is_generation_bound)."""
+    from host_bridge.spawn_helper import landlock_abi
+
+    if landlock_abi() is None:
+        pytest.skip("Landlock is unavailable in this environment")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    spec = _supervisor_spec(run_dir, work, "print('hi')")
+    code, _ = _run_supervisor(spec, run_dir)
+    assert code == 0
+    status = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
+    assert status["state"] == "exited"
+    assert isinstance(status.get("generation"), int)
+    assert status["generation"] >= 1
 
 
 # --- integration: real spawner + helper (skipped when the probe fails) ---
@@ -1889,6 +2157,51 @@ def _live_profiles(work: Path, bin_dir: Path) -> list[dict[str, object]]:
                 "    os._exit(0)\n"
                 "try:\n"
                 "    resource.prlimit(pid, resource.RLIMIT_NOFILE, (0, 0))\n"
+                "    print('allowed')\n"
+                "except OSError as e:\n"
+                "    print('refused' if e.errno in (1, 13) else 'error:%d' % e.errno)\n"
+                "finally:\n"
+                "    try:\n"
+                "        os.kill(pid, 9)\n"
+                "    except OSError:\n"
+                "        pass\n"
+                "    try:\n"
+                "        os.waitpid(pid, 0)\n"
+                "    except OSError:\n"
+                "        pass\n",
+            ],
+            "cwd": {"root_id": "work", "path": "."},
+        }
+    )
+    profiles.append(
+        {
+            "id": "py_fifo",
+            "binary": _PY,
+            "argv_prefix": [
+                "-c",
+                "import os\n"
+                "try:\n"
+                "    os.mkfifo('newfifo')\n"
+                "    print('allowed')\n"
+                "except OSError as e:\n"
+                "    print('refused' if e.errno in (1, 13) else 'error:%d' % e.errno)\n",
+            ],
+            "cwd": {"root_id": "work", "path": "."},
+        }
+    )
+    profiles.append(
+        {
+            "id": "py_setpriority",
+            "binary": _PY,
+            "argv_prefix": [
+                "-c",
+                "import os, time\n"
+                "pid = os.fork()\n"
+                "if pid == 0:\n"
+                "    time.sleep(2)\n"
+                "    os._exit(0)\n"
+                "try:\n"
+                "    os.setpriority(os.PRIO_PROCESS, pid, 19)\n"
                 "    print('allowed')\n"
                 "except OSError as e:\n"
                 "    print('refused' if e.errno in (1, 13) else 'error:%d' % e.errno)\n"
@@ -1978,6 +2291,8 @@ def test_live_probe_reports_all_layers(live: tuple[HostProcessService, Path]) ->
     assert probe.checks["signal"] == "refused"
     assert probe.checks["metadata"] == "refused"
     assert probe.checks["prlimit"] == "refused"
+    assert probe.checks["fifo"] == "refused"
+    assert probe.checks["setpriority"] == "refused"
     assert probe.checks["uid"] == 0
     assert probe.checks["placement"] is True
     assert probe.checks["landlock_abi"] == 8
@@ -2137,6 +2452,24 @@ def test_live_prlimit_foreign_pid_denied(live: tuple[HostProcessService, Path]) 
     and the uid/gid mapping keeps matching kernel credentials)."""
     svc, _ = live
     run = _run(svc, "py_prlimit", "live-prlimit")
+    final = _live_wait(svc, run["process_id"], "exited")
+    assert "refused" in final["stdout"], final
+
+
+def test_live_mkfifo_denied(live: tuple[HostProcessService, Path]) -> None:
+    """A profile cannot mkfifo even in its writable cwd: MAKE_FIFO
+    is handled by Landlock with no allowing grant."""
+    svc, _ = live
+    run = _run(svc, "py_fifo", "live-fifo")
+    final = _live_wait(svc, run["process_id"], "exited")
+    assert "refused" in final["stdout"], final
+
+
+def test_live_setpriority_foreign_pid_denied(live: tuple[HostProcessService, Path]) -> None:
+    """A profile cannot renice another process: setpriority is
+    banned by seccomp (same family as prlimit64)."""
+    svc, _ = live
+    run = _run(svc, "py_setpriority", "live-setpriority")
     final = _live_wait(svc, run["process_id"], "exited")
     assert "refused" in final["stdout"], final
 
