@@ -1318,6 +1318,179 @@ def test_kill_signal_timeout_keeps_projection_for_retry(
         svc.shutdown()
 
 
+class _BlockingSignalSpawner(FakeSpawner):
+    """Spawner whose signal_tree kills the tree, then blocks until
+    released — reproduces Codex round 7: the original kill is still
+    inside signal_tree() when the retry finalizes the stored kill
+    projection."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.signal_started = threading.Event()
+        self.release_signal = threading.Event()
+
+    def signal_tree(self, handle: SpawnHandle, sig: int, *, timeout_s: float = 5.0) -> None:
+        super().signal_tree(handle, sig, timeout_s=timeout_s)
+        self.signal_started.set()
+        assert self.release_signal.wait(timeout=10)
+
+
+def test_kill_original_call_does_not_refinalize_after_retry(
+    fs_service: HostFsService, registry: RootsRegistry, tmp_path: Path
+) -> None:
+    """Codex round 7: a retry arriving while the original kill is
+    still inside signal_tree() finalizes the stored kill projection
+    (seq N). When the original call reaches _answer(), its stale
+    local new_kill flag must NOT finalize the same projection again:
+    one kill is one daemon seq, and the retry's already-delivered
+    answer must keep its seq. Before the fix the original call
+    consumed seq N+1 and rewrote the retry answer's seq in place."""
+    spawner = _BlockingSignalSpawner()
+    svc = HostProcessService(
+        fs_service,
+        registry,
+        runtime_dir=tmp_path / "run-kill-refinalize",
+        profiles=load_profiles(registry),
+        spawner=spawner,  # type: ignore[arg-type]
+    )
+    svc._probe = ProbeResult(available=True, checks={}, reason="unit-test")
+    try:
+        run = svc.handle(
+            "host.process.run",
+            {"profile_id": "sleep", "args": ["5"]},
+            "run-kill-refinalize",
+            _token(),
+            principal_id=_OWNER,
+            run_id="run-A",
+        )
+        assert run["state"] == "running"
+        process_id = run["process_id"]
+        assert isinstance(process_id, str)
+        outcome: dict[str, object] = {}
+        errors: dict[str, Exception] = {}
+
+        def _original() -> None:
+            try:
+                outcome["original"] = svc.handle(
+                    "host.process.kill",
+                    {"process_id": process_id},
+                    "kill-1",
+                    _token(deadline_s=30),
+                    principal_id=_OWNER,
+                    run_id="run-A",
+                )
+            except Exception as exc:  # noqa: BLE001 - recorded for the assertions below
+                errors["original"] = exc
+
+        thread = threading.Thread(target=_original, daemon=True)
+        thread.start()
+        assert spawner.signal_started.wait(timeout=5)
+        # The signal landed (the sleep is dead) but the original
+        # call is still inside signal_tree().
+        for unit in spawner.units.values():
+            unit["procs"] = []
+        retry = svc.handle(
+            "host.process.kill",
+            {"process_id": process_id},
+            "kill-1",
+            _token(),
+            principal_id=_OWNER,
+            run_id="run-A",
+        )
+        assert retry["state"] == "killed"
+        retry_effect = _assert_effect_shape(retry.get("effect"), kind="process.kill")
+        retry_seq = retry_effect["seq"]
+        assert isinstance(retry_seq, int)
+        spawner.release_signal.set()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        assert "original" not in errors
+        original = outcome["original"]
+        assert isinstance(original, dict)
+        assert original["state"] == "killed"
+        original_effect = _assert_effect_shape(original.get("effect"), kind="process.kill")
+        # One kill, one seq: the original call re-attaches the
+        # effect the retry finalized, it never finalizes again.
+        assert original_effect["seq"] == retry_seq  # red: seq N+1
+        assert retry_effect["seq"] == retry_seq  # red: rewritten in place to N+1
+        assert original_effect is retry_effect
+        assert svc._effect_emitter._seq == retry_seq  # red: one extra seq consumed
+    finally:
+        svc.shutdown()
+
+
+def test_kill_in_flight_after_spawn_failed_finalize_carries_no_effect(
+    fs_service: HostFsService, registry: RootsRegistry, tmp_path: Path
+) -> None:
+    """Codex round 7 (companion): _finalize(spawn_failed) clears
+    the stored kill projection while a first kill is still in
+    flight (blocked in signal_tree). When that call reaches
+    _answer(), it must NOT resurrect its local projection: the
+    process never ran, so no kill effect may be emitted. The
+    round-6 code finalized the local projection in exactly this
+    path — the stored-slot check is what makes the spawn_failed
+    discipline hold through _answer, not just through a later
+    kill call."""
+    spawner = _BlockingSignalSpawner()
+    svc = HostProcessService(
+        fs_service,
+        registry,
+        runtime_dir=tmp_path / "run-kill-spawn-failed",
+        profiles=load_profiles(registry),
+        spawner=spawner,  # type: ignore[arg-type]
+    )
+    svc._probe = ProbeResult(available=True, checks={}, reason="unit-test")
+    try:
+        run = svc.handle(
+            "host.process.run",
+            {"profile_id": "sleep", "args": ["5"]},
+            "run-kill-spawn-failed",
+            _token(),
+            principal_id=_OWNER,
+            run_id="run-A",
+        )
+        assert run["state"] == "running"
+        process_id = run["process_id"]
+        assert isinstance(process_id, str)
+        record = svc._records[process_id]
+        outcome: dict[str, object] = {}
+        errors: dict[str, Exception] = {}
+
+        def _original() -> None:
+            try:
+                outcome["original"] = svc.handle(
+                    "host.process.kill",
+                    {"process_id": process_id},
+                    "kill-1",
+                    _token(deadline_s=30),
+                    principal_id=_OWNER,
+                    run_id="run-A",
+                )
+            except Exception as exc:  # noqa: BLE001 - recorded for the assertions below
+                errors["original"] = exc
+
+        thread = threading.Thread(target=_original, daemon=True)
+        thread.start()
+        assert spawner.signal_started.wait(timeout=5)
+        # The spawn is declared failed while the kill is still in
+        # flight: the stored projection is cleared under it.
+        svc._finalize(record, "spawn_failed")
+        assert record.kill_projection is None
+        for unit in spawner.units.values():
+            unit["procs"] = []
+        spawner.release_signal.set()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        assert "original" not in errors
+        original = outcome["original"]
+        assert isinstance(original, dict)
+        assert original["state"] == "spawn_failed"
+        assert "effect" not in original  # red on the round-6 code: local projection resurrected
+        assert svc._effect_emitter._seq == 1  # only the run effect was emitted
+    finally:
+        svc.shutdown()
+
+
 class _BlockingSpawner:
     """Spawner whose spawn() blocks until released, then fails.
 

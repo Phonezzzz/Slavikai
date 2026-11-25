@@ -2841,7 +2841,6 @@ class HostProcessService:
         if record is None:
             raise ProcessError("process_not_found", f"unknown process {process_id!r}")
         projection: dict[str, object] | None = None
-        new_kill = False
 
         def _answer(state: str, exit_code: object, exit_signal: object) -> dict[str, object]:
             """Kill result with the kill effect attached when this
@@ -2872,21 +2871,21 @@ class HostProcessService:
             # finalizing the same stored projection twice (the
             # in-place finalize would consume two daemon seqs and
             # rewrite the first answer's seq).
+            # E03-T08 (Codex round 7): the stored effect is checked
+            # FIRST, and only the STORED projection is ever
+            # finalized — never this call's local one. The round-6
+            # code finalized the local projection whenever the
+            # caller's first-kill flag was set, but that flag is stale
+            # by the time _answer() runs: a retry may already have
+            # finalized the shared projection while this call was
+            # still inside signal_tree(), and the original call then
+            # finalized the same dict a second time (seq N+1,
+            # rewriting the retry answer's seq in place). Checking
+            # the stored slots also honours the spawn_failed
+            # discipline: _finalize clears the stored projection,
+            # and a local variable must not resurrect it.
             with self._lock:
-                if new_kill and projection is not None:
-                    effect = self._effect_emitter.finalize(
-                        projection,
-                        fields={
-                            "process_id": record.process_id,
-                            "state": state,
-                            "exit_code": exit_code,
-                            "signal": exit_signal,
-                        },
-                    )
-                    record.kill_effect = effect
-                    record.kill_projection = None
-                    result["effect"] = effect
-                elif record.kill_effect is not None:
+                if record.kill_effect is not None:
                     result["effect"] = record.kill_effect
                 elif record.kill_projection is not None:
                     effect = self._effect_emitter.finalize(
@@ -2966,7 +2965,6 @@ class HostProcessService:
             record.kill_reason = "killed"
             record.state = "killing"
             record.kill_deadline = time.monotonic() + KILL_GRACE_S
-            new_kill = True
             if record.handle is not None:
                 self._spawner.signal_tree(record.handle, signal.SIGTERM)
         deadline = time.monotonic() + min(token.remaining_s, 4.0)
