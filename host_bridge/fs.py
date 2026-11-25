@@ -1047,6 +1047,127 @@ class HostFsService:
         finally:
             os.close(fd)
 
+    def _remove_created_parents(self, root: Root, created: Sequence[str]) -> None:
+        """Best-effort removal of directories this call created
+        (Codex round 4, finding 3): when the finalized answer
+        cannot fit the frame, the call fails with
+        effect_build_failed -- which the journal reads as no_effect
+        -- so nothing the call created may remain. Deepest first;
+        a directory that is no longer empty (a concurrent actor
+        used it in the meantime) is left in place."""
+        for rel in reversed(created):
+            parts = rel.split("/")
+            try:
+                fd = self._open_root(root)
+            except OSError:
+                continue
+            try:
+                ok = True
+                for part in parts[:-1]:
+                    try:
+                        nfd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=fd)
+                    except OSError:
+                        ok = False
+                        break
+                    os.close(fd)
+                    fd = nfd
+                if ok:
+                    try:
+                        os.rmdir(parts[-1], dir_fd=fd)
+                    except OSError:
+                        pass
+            finally:
+                os.close(fd)
+
+    def _check_created_parents_frame(
+        self,
+        *,
+        root: Root,
+        parents_projection: dict[str, object] | None,
+        parents_created: list[str],
+        commit: bool,
+        root_id: str,
+        path: str,
+        size: int,
+        bytes_written: int,
+        write_id: str,
+        request_id: str,
+        principal_id: str | None,
+        run_id: str | None,
+    ) -> dict[str, object] | None:
+        """Frame-check the answer this first chunk will actually
+        return, with the parents _open_dirs really created (Codex
+        round 4, finding 3). Returns the projection covering the
+        actual created set for the chunk answer (the caller's one
+        when it already covers it, else a fresh one built from the
+        actual set); for a commit the chunk projection is unused
+        and the caller's value is returned unchanged. Raises
+        effect_build_failed -- after removing the created
+        directories again -- when the real answer cannot fit: the
+        journal reads that code as no_effect, so nothing the call
+        created may remain."""
+        if not parents_created:
+            return parents_projection
+        projection: dict[str, object] | None = None
+        if commit:
+            # The commit answer carries content_sha256 and no
+            # write_id; the chunk shape is not a worst case for
+            # it. The sha256 placeholder is exactly 64 chars, like
+            # any real hexdigest.
+            projection = self._effect_emitter.build_projection(
+                kind="fs.write",
+                principal_id=principal_id,
+                run_id=run_id,
+                fields={
+                    "root_id": root_id,
+                    "path": path,
+                    "size": size,
+                    "bytes_written": bytes_written,
+                    "committed": True,
+                    "content_sha256": "0" * 64,
+                    "parents_created": list(parents_created),
+                },
+            )
+            answer: dict[str, object] = {
+                "root_id": root_id,
+                "path": path,
+                "size": size,
+                "bytes_written": bytes_written,
+                "committed": True,
+                "effect": projection,
+            }
+        else:
+            projection = parents_projection
+            if projection is None:
+                projection = self._effect_emitter.build_projection(
+                    kind="fs.write",
+                    principal_id=principal_id,
+                    run_id=run_id,
+                    fields={
+                        "root_id": root_id,
+                        "path": path,
+                        "size": size,
+                        "bytes_written": bytes_written,
+                        "committed": False,
+                        "parents_created": list(parents_created),
+                    },
+                )
+            answer = {
+                "root_id": root_id,
+                "path": path,
+                "size": size,
+                "bytes_written": bytes_written,
+                "write_id": write_id,
+                "effect": {**projection, "parents_created": list(parents_created)},
+            }
+        if not self._effect_emitter.frame_fits(answer, request_id):
+            self._remove_created_parents(root, parents_created)
+            raise FsError(
+                EFFECT_BUILD_FAILED,
+                "effect does not fit the response frame budget",
+            )
+        return projection if not commit else parents_projection
+
     def _open_parent(
         self, target: _Target, *, create: bool = False, token: CancelToken | None = None
     ) -> tuple[int, str]:
@@ -1631,45 +1752,88 @@ class HostFsService:
                     # E03-T08 (Codex round 3, finding 3): only the
                     # parents that still need creating go into the
                     # projection. The old code listed every prefix
-                    # — quadratic in depth — so a write under an
+                    # -- quadratic in depth -- so a write under an
                     # existing 120-deep path was rejected as
                     # effect_build_failed although nothing would be
                     # created and the real answer fits the frame.
                     # The read-only pre-check walks the same opens
-                    # as _open_dirs; the projection stays a worst
-                    # case (a directory that appears/disappears in
-                    # between only shrinks what _open_dirs creates).
+                    # as _open_dirs. It is NOT an upper bound on
+                    # what _open_dirs creates, though (Codex round
+                    # 4, finding 3): a parent that existed at check
+                    # time may be renamed away before the mkdir, so
+                    # the actual created set is re-checked after
+                    # _open_dirs below.
                     missing_from = self._missing_parent_suffix(target.root, session.dir_parts)
                     if missing_from < len(session.dir_parts):
-                        parents_projection = self._effect_emitter.build_projection(
-                            kind="fs.write",
-                            principal_id=principal_id,
-                            run_id=run_id,
-                            fields={
+                        suffix = [
+                            "/".join(session.dir_parts[: index + 1])
+                            for index in range(missing_from, len(session.dir_parts))
+                        ]
+                        if commit:
+                            # E03-T08 (Codex round 4, finding 2):
+                            # the commit answer carries
+                            # content_sha256 and no write_id, so the
+                            # chunk shape is NOT a worst case for
+                            # it -- budget the commit shape here,
+                            # before _open_dirs creates anything.
+                            # The sha256 placeholder is exactly 64
+                            # chars, like any real hexdigest, so a
+                            # check that passes guarantees the real
+                            # commit answer fits too.
+                            commit_projection = self._effect_emitter.build_projection(
+                                kind="fs.write",
+                                principal_id=principal_id,
+                                run_id=run_id,
+                                fields={
+                                    "root_id": target.root.id,
+                                    "path": target.display,
+                                    "size": len(data),
+                                    "bytes_written": len(data),
+                                    "committed": True,
+                                    "content_sha256": "0" * 64,
+                                    "parents_created": suffix,
+                                },
+                            )
+                            projected_commit: dict[str, object] = {
                                 "root_id": target.root.id,
                                 "path": target.display,
                                 "size": len(data),
                                 "bytes_written": len(data),
-                                "committed": False,
-                                "parents_created": [
-                                    "/".join(session.dir_parts[: index + 1])
-                                    for index in range(missing_from, len(session.dir_parts))
-                                ],
-                            },
-                        )
-                        projected_chunk: dict[str, object] = {
-                            "root_id": target.root.id,
-                            "path": target.display,
-                            "size": len(data),
-                            "bytes_written": len(data),
-                            "write_id": write_id,
-                            "effect": parents_projection,
-                        }
-                        if not self._effect_emitter.frame_fits(projected_chunk, request_id):
-                            raise FsError(
-                                EFFECT_BUILD_FAILED,
-                                "effect does not fit the response frame budget",
+                                "committed": True,
+                                "effect": commit_projection,
+                            }
+                            if not self._effect_emitter.frame_fits(projected_commit, request_id):
+                                raise FsError(
+                                    EFFECT_BUILD_FAILED,
+                                    "effect does not fit the response frame budget",
+                                )
+                        else:
+                            parents_projection = self._effect_emitter.build_projection(
+                                kind="fs.write",
+                                principal_id=principal_id,
+                                run_id=run_id,
+                                fields={
+                                    "root_id": target.root.id,
+                                    "path": target.display,
+                                    "size": len(data),
+                                    "bytes_written": len(data),
+                                    "committed": False,
+                                    "parents_created": suffix,
+                                },
                             )
+                            projected_chunk: dict[str, object] = {
+                                "root_id": target.root.id,
+                                "path": target.display,
+                                "size": len(data),
+                                "bytes_written": len(data),
+                                "write_id": write_id,
+                                "effect": parents_projection,
+                            }
+                            if not self._effect_emitter.frame_fits(projected_chunk, request_id):
+                                raise FsError(
+                                    EFFECT_BUILD_FAILED,
+                                    "effect does not fit the response frame budget",
+                                )
                 fd = self._open_dirs(
                     target.root,
                     session.dir_parts,
@@ -1678,6 +1842,30 @@ class HostFsService:
                     created_out=parents_created,
                 )
                 try:
+                    if parents_created:
+                        # E03-T08 (Codex round 4, finding 3): the
+                        # pre-check is not an upper bound on created
+                        # parents -- account for the ACTUAL created
+                        # set and frame-check the real answer now,
+                        # before the staging file exists, so a
+                        # failure can still roll the mutation back
+                        # (the directories are removed again and
+                        # effect_build_failed, which the journal
+                        # reads as no_effect, stays true).
+                        parents_projection = self._check_created_parents_frame(
+                            root=target.root,
+                            parents_projection=parents_projection,
+                            parents_created=parents_created,
+                            commit=commit,
+                            root_id=target.root.id,
+                            path=target.display,
+                            size=len(data),
+                            bytes_written=len(data),
+                            write_id=write_id,
+                            request_id=request_id,
+                            principal_id=principal_id,
+                            run_id=run_id,
+                        )
                     self._sweep_orphan_temps(fd, time.time(), target.root, session.dir_parts, token)
                     # Cancel-before-commit: never create the staging
                     # file for a request whose deadline already fired.

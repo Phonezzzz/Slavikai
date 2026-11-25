@@ -696,3 +696,99 @@ def test_error_retry_lookup_and_persist_failure_keeps_bridge_error(
     assert outcome.outcome == "unknown"
     assert outcome.seq is None
     assert outcome.audit_gap is True
+
+
+# --- unknown resolution binding / long-path params (Codex round 4) -------------
+
+
+def test_cross_principal_effect_does_not_resolve_unknown(recorder: BridgeEffectRecorder) -> None:
+    """Codex round 4, finding 1, end to end: Alice times out on
+    host.fs.write/run-a; Bob's confirmed host.process.stop/run-b
+    reuses the same request_id. Bob's effect must not resolve
+    Alice's unknown — it proves nothing about her operation, and
+    her row must stay visible under outcome=unknown."""
+    unknown = recorder.record_transport_failure(
+        capability="host.fs.write",
+        request_id="shared-id",
+        principal_id="alice",
+        run_id="run-a",
+        params={"root_id": "work", "path": "a.txt"},
+        reason="timeout",
+    )
+    assert unknown.outcome == "unknown"
+    effect = recorder.record_success(
+        capability="host.process.stop",
+        request_id="shared-id",
+        principal_id="bob",
+        run_id="run-b",
+        params={"run_id": "run-b"},
+        result={
+            "run_id": "run-b",
+            "processes": [],
+            "mark_set": True,
+            "effect": _effect(
+                seq=9, kind="process.stop", principal_id="bob", run_id="run-b", processes=[]
+            ),
+        },
+    )
+    assert effect.outcome == "effect"
+    assert effect.resolved_unknown_seqs == []
+    attempt = recorder._store.get_record(int(unknown.seq or 0))
+    assert attempt is not None
+    assert attempt["outcome"] == "unknown"
+    assert attempt["resolved_by_seq"] is None
+    assert attempt["resolved_at"] is None
+
+
+def test_long_path_survives_sanitize_as_preview(recorder: BridgeEffectRecorder) -> None:
+    """Codex round 4, finding 4: a path longer than 256 bytes is
+    turned into a preview dict by sanitize_record, and the
+    projection filter then dropped the field entirely — on a
+    timeout path (no effect block) the journal lost the only
+    pointer to the file whose state must be checked before a
+    retry. The field must survive as a bounded string preview."""
+    long_path = "/".join(["nested"] * 40 + ["file.txt"])
+    assert len(long_path.encode("utf-8")) > 256
+    outcome = recorder.record_transport_failure(
+        capability="host.fs.write",
+        request_id="req-long-path",
+        principal_id=_OWNER,
+        run_id=None,
+        params={"root_id": "work", "path": long_path, "commit": True},
+        reason="timeout",
+    )
+    assert outcome.outcome == "unknown"
+    record = recorder._store.get_record(int(outcome.seq or 0))
+    assert record is not None
+    params = record["params"]
+    assert isinstance(params, dict)
+    assert "path" in params  # red before the fix: the field is dropped
+    kept = params["path"]
+    assert isinstance(kept, str)
+    assert kept.startswith("nested/nested/nested")
+    assert kept.endswith("…[truncated]")
+
+
+def test_long_dest_path_survives_sanitize_as_preview(recorder: BridgeEffectRecorder) -> None:
+    """Same shape as finding 4 for host.fs.move: a long dest_path
+    must not vanish from the journal on a timeout either."""
+    long_dest = "/".join(["nested"] * 40 + ["moved.txt"])
+    assert len(long_dest.encode("utf-8")) > 256
+    outcome = recorder.record_transport_failure(
+        capability="host.fs.move",
+        request_id="req-long-dest",
+        principal_id=_OWNER,
+        run_id=None,
+        params={"root_id": "work", "path": "a.txt", "dest_path": long_dest},
+        reason="timeout",
+    )
+    assert outcome.outcome == "unknown"
+    record = recorder._store.get_record(int(outcome.seq or 0))
+    assert record is not None
+    params = record["params"]
+    assert isinstance(params, dict)
+    assert "dest_path" in params
+    kept = params["dest_path"]
+    assert isinstance(kept, str)
+    assert kept.startswith("nested/nested/nested")
+    assert kept.endswith("…[truncated]")

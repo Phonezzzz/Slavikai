@@ -1386,3 +1386,126 @@ def test_concurrent_run_retry_finalizes_effect_once(
             assert first_effect is second_effect
     finally:
         emitter.finalize = original_finalize
+
+
+# --- commit budget / parent race (Codex round 4, findings 2 and 3) --------------
+
+
+def test_write_commit_parents_commit_budget_fails_before_mkdir(
+    fs_service: HostFsService,
+) -> None:
+    """Codex round 4, finding 2: a first write with commit=true
+    budgets only the CHUNK answer before creating parents, but
+    the commit answer (with content_sha256, no write_id) is
+    longer. With 78 missing 19-char parents the chunk projection
+    fits (65495 bytes) and the commit projection does not (65551):
+    the call must fail with effect_build_failed BEFORE any parent
+    is created. Before the fix the commit check ran after mkdir,
+    the parents stayed on disk, and the journal read no_effect."""
+    dirs = ["d" * 19] * 78
+    path = "/".join(dirs + ["file.txt"])
+    request = BridgeRequest(
+        version=1,
+        request_id="r" * 46,
+        capability="host.fs.write",
+        principal_id=_OWNER,
+        run_id=None,
+        params={
+            "root_id": "work",
+            "path": path,
+            "mode": "create",
+            "content": "x",
+            "commit": True,
+        },
+    )
+    with pytest.raises(FsError) as exc_info:
+        fs_service.handle(request, _token())
+    assert exc_info.value.code == EFFECT_BUILD_FAILED
+    work = fs_service.registry.by_id("work")
+    assert work is not None
+    assert not (work.path / dirs[0]).exists()  # red before the fix: parents created
+
+
+def test_write_chunk_parent_disappears_after_precheck_carries_effect(
+    fs_service: HostFsService, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 4, finding 3: _missing_parent_suffix sees the
+    parent exists (no projection), but the parent is renamed away
+    before _open_dirs, which recreates it. The first chunk must
+    still carry the effect for the directory it created — the
+    pre-check is not an upper bound on created parents. Before
+    the fix the chunk answer had no effect block (no_effect lie)."""
+    work = home / "Project" / "work"
+    (work / "parent").mkdir()
+    renamed = {"done": False}
+    orig_open_dirs = fs_service._open_dirs
+
+    def _renaming_open_dirs(root, parts, *, create=False, token=None, created_out=None):
+        if not renamed["done"]:
+            renamed["done"] = True
+            (work / "parent").rename(work / "moved-parent")
+        return orig_open_dirs(root, parts, create=create, token=token, created_out=created_out)
+
+    monkeypatch.setattr(fs_service, "_open_dirs", _renaming_open_dirs)
+    request = BridgeRequest(
+        version=1,
+        request_id="race-1",
+        capability="host.fs.write",
+        principal_id=_OWNER,
+        run_id=None,
+        params={
+            "root_id": "work",
+            "path": "parent/file.txt",
+            "mode": "create",
+            "content": "x",
+        },
+    )
+    chunk = fs_service.handle(request, _token())
+    assert renamed["done"] is True
+    assert "effect" in chunk  # red before the fix: no effect block
+    effect = _assert_effect_shape(chunk.get("effect"), kind="fs.write")
+    assert effect["parents_created"] == ["parent"]
+    assert (work / "parent").is_dir()
+    assert (work / "moved-parent").is_dir()
+
+
+def test_write_chunk_race_created_parents_overflow_rolls_back(
+    fs_service: HostFsService, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 4, finding 3 (overflow case): the race
+    recreates a whole 120-deep existing tree, so the finalized
+    answer cannot fit the frame. The call must fail with
+    effect_build_failed AND leave nothing behind: the recreated
+    directories are removed again, so the journal's no_effect is
+    true. The renamed-away original tree is untouched."""
+    work = home / "Project" / "work"
+    (work / _deep_path(120, leaf="")).mkdir(parents=True)
+    renamed = {"done": False}
+    orig_open_dirs = fs_service._open_dirs
+
+    def _renaming_open_dirs(root, parts, *, create=False, token=None, created_out=None):
+        if not renamed["done"]:
+            renamed["done"] = True
+            (work / "directory").rename(work / "moved-directory")
+        return orig_open_dirs(root, parts, create=create, token=token, created_out=created_out)
+
+    monkeypatch.setattr(fs_service, "_open_dirs", _renaming_open_dirs)
+    request = BridgeRequest(
+        version=1,
+        request_id="race-overflow-1",
+        capability="host.fs.write",
+        principal_id=_OWNER,
+        run_id=None,
+        params={
+            "root_id": "work",
+            "path": _deep_path(120),
+            "mode": "create",
+            "content": "x",
+        },
+    )
+    with pytest.raises(FsError) as exc_info:
+        fs_service.handle(request, _token())
+    assert exc_info.value.code == EFFECT_BUILD_FAILED
+    assert renamed["done"] is True
+    assert not (work / "directory").exists()  # recreated tree rolled back
+    assert (work / "moved-directory").is_dir()  # original tree untouched

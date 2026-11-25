@@ -483,9 +483,22 @@ class BridgeEffectRecorder:
         # Defense-in-depth only (rev. 2 §4): the structural
         # guarantee is the whitelist above, never this regex pass.
         sanitized = sanitize_record(projected, max_bytes=_SANITIZE_MAX_BYTES)
-        return {
-            key: value for key, value in sanitized.items() if isinstance(value, (str, int, bool))
-        }
+        kept: dict[str, object] = {}
+        for key, value in sanitized.items():
+            if isinstance(value, (str, int, bool)):
+                kept[key] = value
+            elif isinstance(value, dict):
+                # A whitelisted metadata string longer than 256
+                # bytes was truncated by sanitize_record into a
+                # preview dict (Codex round 4, finding 4). Dropping
+                # the field entirely loses the only pointer to the
+                # file on timeout/transport-error paths, where no
+                # effect block exists. Keep the bounded preview
+                # string instead -- it is still metadata only.
+                preview = value.get("preview")
+                if isinstance(preview, str):
+                    kept[key] = preview
+        return kept
 
     def _persist(
         self,

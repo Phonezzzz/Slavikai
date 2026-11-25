@@ -399,8 +399,10 @@ class BridgeEffectStore:
         the subject is never a dedupe key, only the emission
         identity is. Resolution (owner condition 2): when the new
         row is a confirmed effect, unresolved ``unknown`` rows with
-        the same ``request_id`` gain the resolution link in the
-        same transaction; the attempt rows stay as history. A
+        the same logical-request binding ``(request_id,
+        principal_id, capability, run_id)`` gain the resolution
+        link in the same transaction; the attempt rows stay as
+        history. A
         duplicate delivery of a confirmed effect resolves them
         too (Codex round 1, finding 2): effect -> timeout -> the
         same effect must not leave the timeout row unknown
@@ -412,13 +414,25 @@ class BridgeEffectStore:
         def _insert(conn: sqlite3.Connection) -> dict[str, object]:
             if daemon_seq is not None:
                 existing = conn.execute(
-                    "SELECT seq, outcome FROM effect_records "
+                    "SELECT seq, outcome, principal_id, capability, run_id FROM effect_records "
                     "WHERE daemon_boot_id = ? AND daemon_seq = ?",
                     (daemon_boot_id, daemon_seq),
                 ).fetchone()
                 if existing is not None:
+                    # The duplicate resolves through the EXISTING
+                    # effect row's binding (Codex round 4, finding
+                    # 1): the redelivery's request_id alone is not
+                    # proof the unknown belongs to this request.
                     resolved_dup = (
-                        self._resolve_unknowns_for_request(conn, request_id, existing["seq"], now)
+                        self._resolve_unknowns_for_request(
+                            conn,
+                            request_id,
+                            existing["seq"],
+                            now,
+                            principal_id=existing["principal_id"],
+                            capability=existing["capability"],
+                            run_id=existing["run_id"],
+                        )
                         if existing["outcome"] == "effect"
                         else []
                     )
@@ -460,7 +474,15 @@ class BridgeEffectStore:
                 # patch_mismatch on retry after a successful apply,
                 # or run_stopped after a concurrent STOP, proves
                 # nothing about the first attempt.
-                resolved = self._resolve_unknowns_for_request(conn, request_id, seq, now)
+                resolved = self._resolve_unknowns_for_request(
+                    conn,
+                    request_id,
+                    seq,
+                    now,
+                    principal_id=principal_id,
+                    capability=capability,
+                    run_id=run_id,
+                )
             over = (
                 conn.execute("SELECT count(*) FROM effect_records").fetchone()[0] - self._effect_cap
             )
@@ -533,7 +555,14 @@ class BridgeEffectStore:
 
     @staticmethod
     def _resolve_unknowns_for_request(
-        conn: sqlite3.Connection, request_id: str, effect_seq: int, now: str
+        conn: sqlite3.Connection,
+        request_id: str,
+        effect_seq: int,
+        now: str,
+        *,
+        principal_id: str | None,
+        capability: str,
+        run_id: str | None,
     ) -> list[int]:
         """Link unresolved unknown rows for this logical request to
         the confirmed effect (owner condition 2). The attempt rows
@@ -542,13 +571,22 @@ class BridgeEffectStore:
         tested on ``resolved_at`` (Codex round 2, finding 4):
         retention may later drop the ``resolved_by_seq`` pointer
         when it deletes the effect, but the timestamp — set
-        exactly once at resolution — never leaves."""
+        exactly once at resolution — never leaves.
+
+        Binding (Codex round 4, finding 1): a logical request is
+        ``(request_id, principal_id, capability, run_id)`` — the
+        request_id alone is not enough. Two principals may reuse
+        the same request_id, and one principal's confirmed effect
+        proves nothing about another's lost answer. ``IS`` is the
+        NULL-safe comparison: a NULL principal/run matches only
+        NULL, never a set value."""
         resolved = [
             row["seq"]
             for row in conn.execute(
                 "SELECT seq FROM effect_records WHERE request_id = ?"
+                " AND principal_id IS ? AND capability = ? AND run_id IS ?"
                 " AND outcome = 'unknown' AND resolved_at IS NULL AND seq != ?",
-                (request_id, effect_seq),
+                (request_id, principal_id, capability, run_id, effect_seq),
             ).fetchall()
         ]
         for unknown_seq in resolved:

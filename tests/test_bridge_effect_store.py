@@ -727,3 +727,119 @@ def test_list_filters_scoping_and_pagination(tmp_path: Path) -> None:
     # The other principal sees only their own records.
     page = store.list_effects(principal_id="someone-else")
     assert [row["seq"] for row in page["records"]] == [4]
+
+
+# --- unknown resolution binding (Codex round 4, finding 1) --------------------
+
+
+def test_resolution_requires_same_principal(tmp_path: Path) -> None:
+    """Codex round 4, finding 1: two principals sharing a
+    request_id must not resolve each other's unknowns. Alice
+    times out on host.fs.write/run-a; Bob's confirmed
+    host.process.stop/run-b with the same request_id must leave
+    Alice's row unresolved — Bob's effect proves nothing about
+    Alice's operation. Before the fix the resolver matched on
+    request_id alone."""
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    unknown = _record(
+        store,
+        request_id="shared-id",
+        capability="host.fs.write",
+        principal_id="alice",
+        run_id="run-a",
+        outcome="unknown",
+        unknown_reason="timeout",
+    )
+    effect = _record(
+        store,
+        request_id="shared-id",
+        capability="host.process.stop",
+        principal_id="bob",
+        run_id="run-b",
+        effect=_effect(seq=9, kind="process.stop"),
+    )
+    assert effect["resolved_unknown_seqs"] == []
+    attempt = store.get_record(int(unknown["seq"]))
+    assert attempt is not None
+    assert attempt["resolved_by_seq"] is None
+    assert attempt["resolved_at"] is None
+
+
+def test_resolution_requires_same_capability(tmp_path: Path) -> None:
+    """Same principal and request_id, different capability: a
+    confirmed host.fs.delete must not resolve an unknown
+    host.fs.write for the same logical id."""
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    unknown = _record(
+        store,
+        request_id="shared-id",
+        capability="host.fs.write",
+        outcome="unknown",
+        unknown_reason="timeout",
+    )
+    effect = _record(
+        store,
+        request_id="shared-id",
+        capability="host.fs.delete",
+        effect=_effect(seq=9, kind="fs.delete"),
+    )
+    assert effect["resolved_unknown_seqs"] == []
+    attempt = store.get_record(int(unknown["seq"]))
+    assert attempt is not None
+    assert attempt["resolved_at"] is None
+
+
+def test_resolution_requires_same_run(tmp_path: Path) -> None:
+    """Same principal, capability and request_id, different run:
+    the retry belongs to another run, so it resolves nothing."""
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    unknown = _record(
+        store,
+        request_id="shared-id",
+        run_id="run-a",
+        outcome="unknown",
+        unknown_reason="timeout",
+    )
+    effect = _record(store, request_id="shared-id", run_id="run-b", effect=_effect(seq=9))
+    assert effect["resolved_unknown_seqs"] == []
+    attempt = store.get_record(int(unknown["seq"]))
+    assert attempt is not None
+    assert attempt["resolved_at"] is None
+
+
+def test_duplicate_effect_resolves_unknown_only_same_binding(tmp_path: Path) -> None:
+    """The duplicate branch resolves through the EXISTING effect
+    row's binding, not the redelivery's request_id alone: Bob's
+    unknown with the same request_id as Alice's effect must stay
+    unresolved when the effect is delivered again."""
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    _record(
+        store,
+        request_id="shared-id",
+        capability="host.fs.write",
+        principal_id="alice",
+        run_id="run-a",
+        effect=_effect(seq=7),
+    )
+    unknown = _record(
+        store,
+        request_id="shared-id",
+        capability="host.process.stop",
+        principal_id="bob",
+        run_id="run-b",
+        outcome="unknown",
+        unknown_reason="timeout",
+    )
+    duplicate = _record(
+        store,
+        request_id="shared-id",
+        capability="host.fs.write",
+        principal_id="alice",
+        run_id="run-a",
+        effect=_effect(seq=7),
+    )
+    assert duplicate["duplicate"] is True
+    assert duplicate["resolved_unknown_seqs"] == []
+    attempt = store.get_record(int(unknown["seq"]))
+    assert attempt is not None
+    assert attempt["resolved_at"] is None
