@@ -2495,6 +2495,16 @@ class UIHub:
                     await asyncio.shield(task)
                 except asyncio.CancelledError:
                     continue
+            # The write finished while the caller was being cancelled:
+            # check its outcome before reporting the cancellation. If
+            # the write failed, the caller must see the write error,
+            # not a cancellation-after-success — otherwise it publishes
+            # state that SQLite never stored.
+            if task.cancelled():
+                raise asyncio.CancelledError() from None
+            exc = task.exception()
+            if exc is not None:
+                raise exc from None
             return True
         return False
 

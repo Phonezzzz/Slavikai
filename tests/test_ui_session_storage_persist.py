@@ -375,6 +375,59 @@ def test_cancelled_append_waits_for_write_before_releasing_lock(tmp_path: Path) 
     asyncio.run(run())
 
 
+def test_cancelled_policy_commit_with_failed_write_propagates_error(tmp_path: Path) -> None:
+    """If the write fails AND the caller is cancelled exactly as the
+    write finishes, the write error must surface — not a
+    cancellation-after-success: shield raises CancelledError while the
+    write task is already done, so the helper must check the finished
+    task's outcome before reporting the cancellation. Otherwise the
+    candidate is installed in memory while SQLite keeps the old
+    revision, and the next write trips the revision CAS."""
+    path = tmp_path / "sessions.db"
+    store = SQLiteUISessionStorage(path)
+    hub = UIHub(storage=store)
+
+    async def run() -> None:
+        sid = await hub.create_session("owner")
+        before = await hub.get_session_security_snapshot(sid, principal_id="owner")
+        assert before is not None
+        task_ref: dict[str, asyncio.Task] = {}
+        original_persist = hub._persist_session_state_locked
+        calls = 0
+
+        async def failing_persist(*args, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                try:
+                    raise RuntimeError("storage boom")
+                finally:
+                    # Cancel the policy task at the exact moment the
+                    # write finishes with an error: shield then raises
+                    # CancelledError while the write task is already done.
+                    outer = task_ref.get("task")
+                    if outer is not None:
+                        outer.cancel()
+            return await original_persist(*args, **kwargs)
+
+        task = asyncio.create_task(hub.set_session_policy(sid, profile="index"))
+        task_ref["task"] = task
+        hub._persist_session_state_locked = failing_persist  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="storage boom"):
+            await task
+        # The failed commit must not publish the candidate in memory.
+        assert (await hub.get_session_policy(sid))["profile"] == "sandbox"
+        snapshot = await hub.get_session_security_snapshot(sid, principal_id="owner")
+        assert snapshot is not None
+        assert snapshot.revision == before.revision
+        loaded = store.load_sessions()[0]
+        assert loaded.security_revision == before.revision
+        # A follow-up write no longer trips the revision CAS.
+        await hub.set_session_title(sid, "after failed cancel")
+
+    asyncio.run(run())
+
+
 # --- Test 8: to_thread (MEM-01) ---------------------------------------------
 
 
