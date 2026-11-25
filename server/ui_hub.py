@@ -878,12 +878,14 @@ class UIHub:
                     created_at=created_at,
                     updated_at=restored_updated_at,
                 )
-                await self._persist_session_state_locked(
+                cancelled = await self._persist_session_state_locked_uninterruptible(
                     item.session_id,
                     next_state,
                     expected_security_revision=existing.security_revision if existing else None,
                 )
                 self._sessions[item.session_id] = next_state
+                if cancelled:
+                    raise asyncio.CancelledError()
                 imported += 1
             self._prune_sessions_locked()
             return imported
@@ -1072,12 +1074,14 @@ class UIHub:
             updated_at=_utc_iso_now(),
         )
         self._prune_sessions_locked(keep_session_id=session_id)
-        await self._persist_session_state_locked(
+        cancelled = await self._persist_session_state_locked_uninterruptible(
             session_id,
             candidate,
             expected_security_revision=existing.security_revision if existing else None,
         )
         self._sessions[session_id] = candidate
+        if cancelled:
+            raise asyncio.CancelledError()
         return candidate
 
     async def get_session_policy(self, session_id: str) -> dict[str, JSONValue]:
@@ -2443,6 +2447,39 @@ class UIHub:
                 persisted,
                 expected_security_revision=expected_security_revision,
             )
+
+    async def _persist_session_state_locked_uninterruptible(
+        self,
+        session_id: str,
+        state: _SessionState,
+        *,
+        expected_security_revision: str | None = None,
+        restore_owner_principal_id: str | None = None,
+    ) -> bool:
+        """Persist a state snapshot, waiting out a cancellation of the write.
+
+        The off-loop write cannot be cancelled once started, but the
+        awaiting coroutine can: without this, the caller releases the lock
+        and skips installing the new in-memory state while the thread still
+        commits it, leaving the new revision in SQLite and the old one in
+        memory. This waits for the write to finish and returns True when
+        cancellation was requested: the caller installs the new in-memory
+        state first and only then re-raises CancelledError.
+        """
+        task = asyncio.ensure_future(
+            self._persist_session_state_locked(
+                session_id,
+                state,
+                expected_security_revision=expected_security_revision,
+                restore_owner_principal_id=restore_owner_principal_id,
+            )
+        )
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            return True
+        return False
 
     def _prune_sessions_locked(self, *, keep_session_id: str | None = None) -> None:
         to_remove: set[str] = set()

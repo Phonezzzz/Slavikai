@@ -13,6 +13,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+import pytest
+
 from server.ui_hub import UIHub
 from server.ui_session_storage import (
     PersistedSession,
@@ -40,9 +42,15 @@ def _message(
     }
 
 
-def _session(session_id: str, messages: list[dict]) -> PersistedSession:
+def _session(
+    session_id: str,
+    messages: list[dict],
+    *,
+    principal_id: str | None = None,
+) -> PersistedSession:
     return PersistedSession(
         session_id=session_id,
+        principal_id=principal_id,
         created_at="2026-11-25T00:00:00",
         updated_at="2026-11-25T00:00:00",
         status="idle",
@@ -177,6 +185,130 @@ def test_save_assigns_seq_in_input_order_not_lane_major(tmp_path: Path) -> None:
     loaded = store.load_sessions()[0]
     assert [item["message_id"] for item in loaded.messages] == ["w1", "c1", "w2"]
     assert [item["seq"] for item in loaded.messages] == [1, 2, 3]
+
+
+# --- Rework round 1: merge-import must keep the incoming order -----------
+
+
+def test_delta_save_reorders_messages_on_merge_import(tmp_path: Path) -> None:
+    """A merge-import of a fuller history places new messages before
+    already-stored ones ([m1, m2] over stored [m2]). The delta save must
+    reassign seq to the incoming order instead of keeping m2's old
+    position, or the DB order contradicts the in-memory history after a
+    restart."""
+    path = tmp_path / "sessions.db"
+    store = SQLiteUISessionStorage(path)
+    store.save_session(_session("s1", [_message("m2", "chat", "m2")]))
+    assert [item["message_id"] for item in store.load_sessions()[0].messages] == ["m2"]
+    store.save_session(_session("s1", [_message("m1", "chat", "m1"), _message("m2", "chat", "m2")]))
+    loaded = store.load_sessions()[0]
+    assert [item["message_id"] for item in loaded.messages] == ["m1", "m2"]
+    # Both messages take fresh seq values in incoming order.
+    assert [item["seq"] for item in loaded.messages] == [2, 3]
+
+
+def test_merge_import_reorders_messages_on_reload(tmp_path: Path) -> None:
+    path = tmp_path / "sessions.db"
+    store = SQLiteUISessionStorage(path)
+    store.save_session(_session("s1", [_message("m2", "chat", "m2")], principal_id="owner"))
+    hub = UIHub(storage=store)
+
+    async def run() -> None:
+        imported = await hub.import_sessions(
+            [
+                _session(
+                    "s1",
+                    [_message("m1", "chat", "m1"), _message("m2", "chat", "m2")],
+                    principal_id="owner",
+                )
+            ],
+            principal_id="owner",
+            mode="merge",
+        )
+        assert imported == 1
+        session = await hub.get_session("s1")
+        assert session is not None
+        assert [item["message_id"] for item in session["messages"]] == ["m1", "m2"]
+        reloaded = SQLiteUISessionStorage(path).load_sessions()[0]
+        assert [item["message_id"] for item in reloaded.messages] == ["m1", "m2"]
+
+    asyncio.run(run())
+
+
+def test_cancelled_policy_commit_keeps_memory_and_db_in_sync(tmp_path: Path) -> None:
+    """Cancelling set_session_policy mid-write must not leave the new
+    policy/revision in SQLite and the old one in memory: the write runs to
+    completion, the in-memory state is installed, and only then the
+    cancellation propagates."""
+    path = tmp_path / "sessions.db"
+    store = SQLiteUISessionStorage(path)
+    hub = UIHub(storage=store)
+
+    async def run() -> None:
+        sid = await hub.create_session("owner")
+        original_save = store.save_session
+
+        def slow_save(*args, **kwargs):  # type: ignore[no-untyped-def]
+            time.sleep(0.5)
+            return original_save(*args, **kwargs)
+
+        store.save_session = slow_save  # type: ignore[method-assign]
+        task = asyncio.create_task(hub.set_session_policy(sid, profile="index"))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # The off-loop write ran to completion despite the cancellation.
+        await asyncio.sleep(0.6)
+        assert (await hub.get_session_policy(sid))["profile"] == "index"
+        snapshot = await hub.get_session_security_snapshot(sid, principal_id="owner")
+        assert snapshot is not None
+        loaded = store.load_sessions()[0]
+        assert loaded.security_revision == snapshot.revision
+        # A follow-up write no longer trips the revision CAS.
+        await hub.set_session_title(sid, "after cancel")
+
+    asyncio.run(run())
+
+
+def test_cancelled_import_commit_keeps_session_in_memory(tmp_path: Path) -> None:
+    """Same hazard as the policy commit, on the import path: a cancelled
+    import must still install the committed session in memory."""
+    path = tmp_path / "sessions.db"
+    store = SQLiteUISessionStorage(path)
+    hub = UIHub(storage=store)
+
+    async def run() -> None:
+        original_save = store.save_session
+
+        def slow_save(*args, **kwargs):  # type: ignore[no-untyped-def]
+            time.sleep(0.5)
+            return original_save(*args, **kwargs)
+
+        store.save_session = slow_save  # type: ignore[method-assign]
+        task = asyncio.create_task(
+            hub.import_sessions(
+                [
+                    _session(
+                        "s1",
+                        [_message("m1", "chat", "m1")],
+                        principal_id="owner",
+                    )
+                ],
+                principal_id="owner",
+                mode="replace",
+            )
+        )
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.6)
+        session = await hub.get_session("s1")
+        assert session is not None
+        assert [item["message_id"] for item in session["messages"]] == ["m1"]
+
+    asyncio.run(run())
 
 
 # --- Test 8: to_thread (MEM-01) ---------------------------------------------

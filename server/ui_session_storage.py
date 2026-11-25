@@ -687,6 +687,10 @@ class SQLiteUISessionStorage:
             # changed messages are updated (keeping their DB seq), only new
             # messages are inserted (taking the next seq from the counter).
             # The whole history is no longer rewritten on every save.
+            # Exception: when the incoming order of stored messages
+            # disagrees with their stored seq order (a merge-import of a
+            # fuller history), the history is renumbered in incoming order
+            # — see _persist_messages_delta.
             prepared_messages = [self._message_for_write(message) for message in session.messages]
             self._persist_messages_delta(conn, session.session_id, prepared_messages)
             conn.commit()
@@ -718,6 +722,35 @@ class SQLiteUISessionStorage:
                     (session_id,),
                 ).fetchall()
             }
+        # A merge-import can place new messages before already-stored ones
+        # ([m1, m2] over stored [m2]). The delta save keeps stored seq
+        # values and gives new messages the next counter values, which
+        # would persist the old order and contradict the in-memory history
+        # after a restart. Simulate the delta assignment: if the assigned
+        # seq values are not strictly increasing in incoming order,
+        # renumber the whole history with fresh seq values in incoming
+        # order instead.
+        stored_seqs = {
+            message_id: seq
+            for rows in existing_by_table.values()
+            for message_id, (seq, _fingerprint) in rows.items()
+        }
+        probe_seq: int | None = None
+        assigned_seqs: list[int] = []
+        for prepared in prepared_messages:
+            probe_id = str(prepared["message_id"])
+            stored_seq = stored_seqs.get(probe_id)
+            if stored_seq is not None:
+                assigned_seqs.append(stored_seq)
+            else:
+                if probe_seq is None:
+                    probe_seq = self._next_message_seq(conn)
+                assigned_seqs.append(probe_seq)
+                probe_seq += 1
+        reorder = any(
+            later <= earlier
+            for earlier, later in zip(assigned_seqs, assigned_seqs[1:], strict=False)
+        )
         kept_ids: dict[str, set[str]] = {"chat_messages": set(), "workspace_messages": set()}
         next_seq: int | None = None
         for prepared in prepared_messages:
@@ -733,6 +766,26 @@ class SQLiteUISessionStorage:
             message_id = str(prepared["message_id"])
             kept_ids[table_name].add(message_id)
             stored = existing_by_table[table_name].get(message_id)
+            if reorder:
+                if next_seq is None:
+                    next_seq = self._next_message_seq(conn)
+                seq = next_seq
+                next_seq += 1
+                if stored is not None:
+                    conn.execute(
+                        f"UPDATE {table_name} SET role = ?, content = ?, created_at = ?, "
+                        "trace_id = ?, parent_user_message_id = ?, attachments_json = ?, "
+                        "seq = ? WHERE message_id = ?",
+                        (*fingerprint, seq, message_id),
+                    )
+                else:
+                    conn.execute(
+                        f"INSERT INTO {table_name} (message_id, session_id, role, content, "
+                        "created_at, trace_id, parent_user_message_id, attachments_json, seq) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (message_id, session_id, *fingerprint, seq),
+                    )
+                continue
             if stored is not None:
                 stored_seq, stored_fingerprint = stored
                 if stored_fingerprint == fingerprint:
@@ -903,16 +956,22 @@ class SQLiteUISessionStorage:
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("BEGIN IMMEDIATE")
-            for table_name in (
-                "ui_messages",
-                "chat_messages",
-                "workspace_messages",
-                "ui_sessions",
-                "ui_folders",
-                "ui_storage_migrations",
-                "ui_storage_meta",
+            # Drop every user object, not just the known tables: an
+            # unsupported schema can carry an extra table (or a view /
+            # trigger), and the reset must leave a clean supported schema
+            # instead of failing the re-validation that follows.
+            objects = conn.execute(
+                "SELECT type, name FROM sqlite_master "
+                "WHERE type IN ('table', 'view', 'trigger') "
+                "AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+            drop_order = {"trigger": 0, "view": 1, "table": 2}
+            for obj_type, name in sorted(
+                objects,
+                key=lambda row: drop_order.get(str(row["type"]), 3),
             ):
-                conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+                quoted = '"' + str(name).replace('"', '""') + '"'
+                conn.execute(f"DROP {obj_type} IF EXISTS {quoted}")
             conn.execute("PRAGMA user_version = 0")
             self._migrate_to_current(conn)
             conn.commit()

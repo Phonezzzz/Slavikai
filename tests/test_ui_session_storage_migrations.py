@@ -430,6 +430,33 @@ def test_extra_table_fails_closed(tmp_path: Path) -> None:
         SQLiteUISessionStorage(path)
 
 
+# --- Rework round 1: destructive reset must drop unknown tables ----------
+
+
+def test_destructive_reset_drops_unknown_tables(tmp_path: Path) -> None:
+    """An unsupported schema with an extra table must reset cleanly with
+    the opt-in: the old reset dropped only known tables, so the
+    re-validation rejected the leftover table and the start kept failing."""
+    path = _make_v1_db(tmp_path / "sessions.db", user_version=99, with_messages=True)
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE rogue (id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO rogue (id) VALUES ('x')")
+        conn.commit()
+    with pytest.raises(RuntimeError, match="schema version"):
+        SQLiteUISessionStorage(path)
+    store = SQLiteUISessionStorage(path, allow_destructive_reset=True)
+    assert _user_version(path) == EXPECTED_VERSION
+    assert store.load_sessions() == []
+    with sqlite3.connect(path) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+    assert "rogue" not in tables
+
+
 # --- Test 11: idempotent re-open --------------------------------------------
 
 
