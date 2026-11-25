@@ -601,9 +601,11 @@ def test_partially_pruned_hole_reports_only_real_gap(tmp_path: Path) -> None:
 
 
 def test_pruned_ranges_stay_compact_for_in_order_delivery(tmp_path: Path) -> None:
-    """In-order delivery prunes a contiguous prefix: the pruned
-    ranges collapse to one interval per boot, not one row per
-    pruned seq."""
+    """In-order delivery prunes a contiguous prefix below the
+    retention floor: every pruned seq is below min retained seq,
+    so after the floor cleanup (Codex round 3, finding 2) no
+    range row survives at all — maximally compact — and gap
+    detection still reports no gaps."""
     store = BridgeEffectStore(tmp_path / "effects.db", effect_cap=3)
     for seq in range(1, 7):
         _record(store, request_id=f"r{seq}", effect=_effect(seq=seq))
@@ -612,7 +614,57 @@ def test_pruned_ranges_stay_compact_for_in_order_delivery(tmp_path: Path) -> Non
         rows = conn.execute(
             "SELECT daemon_boot_id, seq_from, seq_to FROM pruned_daemon_ranges"
         ).fetchall()
-    assert [(row[0], row[1], row[2]) for row in rows] == [(_BOOT, 1, 3)]
+    assert rows == []
+    page = store.list_effects(principal_id=_OWNER, include_gaps=True)
+    assert page["gaps"] == []
+
+
+def test_pruned_ranges_below_retention_floor_are_dropped(tmp_path: Path) -> None:
+    """Codex round 3, finding 2: with sparse daemon seqs the
+    pruned-ranges table grows without bound — ranges separated by
+    never-delivered seqs never merge, and are dropped only when
+    the boot has no retained rows left. The finding's repro:
+    effect_cap=2, 20 effects with odd daemon seqs — before the
+    fix 18 singleton ranges survive next to 2 effect records.
+    Ranges entirely below the retention floor (min retained daemon
+    seq) are dead weight: _compute_gaps never searches below the
+    floor, so they are dropped at prune time. Gap detection is
+    unchanged: only the genuinely missing seq between the two
+    retained effects is reported."""
+    store = BridgeEffectStore(tmp_path / "effects.db", effect_cap=2)
+    for seq in range(1, 40, 2):
+        _record(store, request_id=f"r{seq}", effect=_effect(seq=seq), recorded_at=_old_time(300))
+    assert store.count() == 2
+    with sqlite3.connect(store.path) as conn:
+        rows = conn.execute("SELECT seq_from, seq_to FROM pruned_daemon_ranges").fetchall()
+    assert rows == []  # red before the fix: 18 singleton ranges
+    page = store.list_effects(principal_id=_OWNER, include_gaps=True)
+    assert page["gaps"] == [
+        {"daemon_boot_id": _BOOT, "missing_from": 38, "missing_to": 38, "suspected": True}
+    ]
+
+
+def test_pruned_range_above_floor_is_kept(tmp_path: Path) -> None:
+    """No-regression half of finding 2: a pruned range above the
+    retention floor still matters for gap detection. Out-of-order
+    delivery pruned daemon seq 30 while 10 and 20 are retained,
+    so the hole 21..39 must report every seq except the pruned
+    30 — while the range for seq 10, which fell below the new
+    floor when 40 arrived, is dropped."""
+    store = BridgeEffectStore(tmp_path / "effects.db", effect_cap=2)
+    _record(store, request_id="r30", effect=_effect(seq=30), recorded_at=_old_time(300))
+    _record(store, request_id="r10", effect=_effect(seq=10), recorded_at=_old_time(300))
+    _record(store, request_id="r20", effect=_effect(seq=20), recorded_at=_old_time(300))
+    _record(store, request_id="r40", effect=_effect(seq=40), recorded_at=_old_time(300))
+    assert store.count() == 2
+    with sqlite3.connect(store.path) as conn:
+        rows = conn.execute("SELECT seq_from, seq_to FROM pruned_daemon_ranges").fetchall()
+    assert [(row[0], row[1]) for row in rows] == [(30, 30)]
+    page = store.list_effects(principal_id=_OWNER, include_gaps=True)
+    assert page["gaps"] == [
+        {"daemon_boot_id": _BOOT, "missing_from": 21, "missing_to": 29, "suspected": True},
+        {"daemon_boot_id": _BOOT, "missing_from": 31, "missing_to": 39, "suspected": True},
+    ]
 
 
 # --- bounded persistence (owner condition 4) ----------------------------------

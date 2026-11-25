@@ -2341,15 +2341,27 @@ class HostProcessService:
         # the record has left "launching"; the projection stays on
         # the record for a later retry, and this answer carries no
         # effect (unknown outcome).
-        if record.effect is None and record.effect_projection is not None:
-            if record.state == "spawn_failed":
-                record.effect_projection = None
-            elif record.spawn_started or record.state != "launching":
-                record.effect = self._effect_emitter.finalize(
-                    record.effect_projection,
-                    fields={"state": record.state, "started_at": record.started_at},
-                )
-                record.effect_projection = None
+        # E03-T08 (Codex round 3, finding 1): the check, the
+        # finalization and the store must be atomic against a
+        # concurrent retry and _finalize — all three take this
+        # lock for the effect/projection slots. Without it, two
+        # _run_result calls both pass `effect is None` and
+        # finalize the same projection: one spawn consumes two
+        # daemon seqs (and finalize mutates the projection in
+        # place, so the first answer's seq is rewritten by the
+        # second finalize). The settled-wait above stays outside
+        # the lock: _finalize needs it to settle the record.
+        with self._lock:
+            if record.effect is None and record.effect_projection is not None:
+                if record.state == "spawn_failed":
+                    record.effect_projection = None
+                elif record.spawn_started or record.state != "launching":
+                    record.effect = self._effect_emitter.finalize(
+                        record.effect_projection,
+                        fields={"state": record.state, "started_at": record.started_at},
+                    )
+                    record.effect_projection = None
+            effect = record.effect
         result: dict[str, object] = {
             "process_id": record.process_id,
             "profile_id": record.profile_id,
@@ -2359,8 +2371,8 @@ class HostProcessService:
             # additive only, no existing field changes.
             "run_id": record.run_id,
         }
-        if record.effect is not None:
-            result["effect"] = record.effect
+        if effect is not None:
+            result["effect"] = effect
         return result
 
     def _spawn(

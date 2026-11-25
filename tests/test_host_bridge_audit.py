@@ -31,7 +31,9 @@ from host_bridge import client
 from host_bridge.client import BridgeClientError, _validate_effect
 from host_bridge.daemon import HostBridgeDaemon
 from host_bridge.effect import (
+    AT_PLACEHOLDER,
     EFFECT_BUILD_FAILED,
+    LONGEST_STATE,
     EffectEmitter,
     stop_process_placeholder,
 )
@@ -473,6 +475,87 @@ def test_write_chunk_existing_parents_has_no_effect(bridge: Path) -> None:
         },
     )
     assert "effect" not in chunk
+
+
+def _deep_path(depth: int, *, leaf: str = "file.txt") -> str:
+    """A path `depth` directories deep, every component named
+    "directory" (the Codex round 3, finding 3 shape)."""
+    return "/".join(["directory"] * depth + [leaf])
+
+
+def test_write_commit_deep_existing_parents_not_rejected(bridge: Path, home: Path) -> None:
+    """Codex round 3, finding 3: with create_parents=true (the
+    default) the parents projection used to list EVERY path
+    prefix, even when all parents already exist — the list grows
+    quadratically with depth, so a correct write of one byte on a
+    120-deep existing path was rejected as effect_build_failed
+    although the real answer fits the 64 KiB frame. The projection
+    must cover only the parents that still need creating."""
+    work = home / "Project" / "work"
+    (work / _deep_path(120, leaf="")).mkdir(parents=True)
+    result = _write_commit(bridge, content="x", path=_deep_path(120))
+    assert result["committed"] is True  # red before the fix: effect_build_failed
+    assert "effect" in result
+    effect = _assert_effect_shape(result.get("effect"), kind="fs.write")
+    assert "parents_created" not in effect  # nothing was created
+    assert (work / _deep_path(120)).is_file()
+
+
+def test_write_chunk_partial_parents_projection_fits(bridge: Path, home: Path) -> None:
+    """Codex round 3, finding 3 (partial case): the first 60
+    parents exist, the next 60 do not. Before the fix the
+    projection listed all 120 prefixes and the chunk was rejected
+    as effect_build_failed; after it the projection lists only the
+    60 missing ones, the chunk succeeds, and the effect names
+    exactly the directories this call created."""
+    work = home / "Project" / "work"
+    (work / _deep_path(60, leaf="")).mkdir(parents=True)
+    chunk = _call(
+        bridge,
+        "host.fs.write",
+        params={
+            "root_id": "work",
+            "path": _deep_path(120),
+            "mode": "create",
+            "content": "x",
+        },
+    )
+    assert "effect" in chunk  # red before the fix: effect_build_failed
+    effect = _assert_effect_shape(chunk.get("effect"), kind="fs.write")
+    assert effect["committed"] is False
+    assert effect["parents_created"] == [
+        "/".join(["directory"] * depth) for depth in range(61, 121)
+    ]
+    assert (work / _deep_path(120)).parent.is_dir()
+
+
+def test_write_commit_with_missing_parents_carries_parents_in_effect(
+    bridge: Path, home: Path
+) -> None:
+    """Finding 3, adjacent completion: the round 2 fix attached
+    parents_created to the chunk answer only. A first chunk with
+    commit=true that creates parents must record them in the
+    commit effect too — otherwise the journal understates what the
+    call changed (the file is recorded, the directories are not)."""
+    result = _write_commit(bridge, content="x", path="new-parent/sub/file.txt")
+    assert result["committed"] is True
+    effect = _assert_effect_shape(result.get("effect"), kind="fs.write")
+    assert effect["parents_created"] == ["new-parent", "new-parent/sub"]
+    work = home / "Project" / "work"
+    assert (work / "new-parent" / "sub").is_dir()
+
+
+def test_missing_parent_suffix(fs_service: HostFsService, home: Path) -> None:
+    """The read-only pre-check behind finding 3: the index of the
+    first parent component that still needs creating (len(parts)
+    when none is missing)."""
+    work = fs_service.registry.by_id("work")
+    assert work is not None
+    (work.path / "a" / "b").mkdir(parents=True)
+    assert fs_service._missing_parent_suffix(work, ["a", "b"]) == 2
+    assert fs_service._missing_parent_suffix(work, ["a", "b", "c", "d"]) == 2
+    assert fs_service._missing_parent_suffix(work, ["x", "y"]) == 0
+    assert fs_service._missing_parent_suffix(work, []) == 0
 
 
 def test_write_chunk_and_abort_have_no_effect(bridge: Path) -> None:
@@ -1215,3 +1298,91 @@ def test_client_rejects_malformed_effect() -> None:
         _validate_effect({"effect": good}, "host.fs.stat")
     with pytest.raises(BridgeClientError):
         _validate_effect({"effect": "not-a-dict"}, "host.fs.write")
+
+
+def test_concurrent_run_retry_finalizes_effect_once(
+    proc_service: HostProcessService,
+) -> None:
+    """Codex round 3, finding 1: the original run and a
+    concurrent retry both reach _run_result while the launch is
+    settling, and the check-finalize-store runs without a write
+    lock — both pass `record.effect is None` and finalize the
+    same projection, so one spawn consumes two daemon seqs (two
+    answers with seq 1 and 2 for one launch, or one answer whose
+    seq is rewritten in place by the second finalize). The
+    finalize is slowed to widen the race window; even so, exactly
+    one seq may be consumed per run, and both answers must carry
+    that same effect."""
+    emitter = proc_service._effect_emitter
+    original_finalize = emitter.finalize
+
+    def _slow_finalize(
+        projection: dict[str, object], *, fields: dict[str, object] | None = None
+    ) -> dict[str, object]:
+        time.sleep(0.005)  # widen the check-then-finalize window
+        return original_finalize(projection, fields=fields)
+
+    emitter.finalize = _slow_finalize  # type: ignore[method-assign]
+    try:
+        for _trial in range(20):
+            record = _Record(
+                process_id=uuid.uuid4().hex,
+                profile_id="true",
+                state="running",
+                run_id="run-race",
+                principal_id=_OWNER,
+                started_mono=time.monotonic(),
+                started_at=datetime.now(UTC).isoformat(),
+            )
+            record.spawn_started = True
+            record.effect_projection = emitter.build_projection(
+                kind="process.run",
+                principal_id=_OWNER,
+                run_id="run-race",
+                fields={
+                    "process_id": record.process_id,
+                    "profile_id": "true",
+                    "state": LONGEST_STATE,
+                    "started_at": AT_PLACEHOLDER,
+                },
+            )
+            before = emitter._seq
+            results: dict[str, dict[str, object]] = {}
+            errors: dict[str, Exception] = {}
+            barrier = threading.Barrier(2)
+
+            def _answer(
+                which: str,
+                _barrier: threading.Barrier = barrier,
+                _record: _Record = record,
+                _results: dict[str, dict[str, object]] = results,
+                _errors: dict[str, Exception] = errors,
+            ) -> None:
+                try:
+                    _barrier.wait(timeout=5)
+                    _results[which] = proc_service._run_result(
+                        _record, wait_settled=False, token=_token()
+                    )
+                except Exception as exc:  # noqa: BLE001 - recorded for the assertions below
+                    _errors[which] = exc
+
+            first = threading.Thread(target=_answer, args=("first",), daemon=True)
+            second = threading.Thread(target=_answer, args=("second",), daemon=True)
+            first.start()
+            second.start()
+            first.join(timeout=10)
+            second.join(timeout=10)
+            assert not first.is_alive() and not second.is_alive()
+            assert not errors, f"racer raised: {errors}"
+            # Exactly one daemon seq consumed for one launch (red
+            # before the fix: the second finalize consumed a
+            # second seq), and both answers carry that same
+            # finalized effect object.
+            assert emitter._seq - before == 1
+            first_effect = results["first"].get("effect")
+            second_effect = results["second"].get("effect")
+            assert isinstance(first_effect, dict) and isinstance(second_effect, dict)
+            assert first_effect["seq"] == second_effect["seq"]
+            assert first_effect is second_effect
+    finally:
+        emitter.finalize = original_finalize

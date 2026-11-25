@@ -40,7 +40,14 @@ resolution marker from v3 on.
   normal in-order delivery this is one interval per boot; the
   pathological alternating out-of-order case is bounded by the
   number of pruned daemon effects. Rows for boots with no
-  retained effect rows are dropped with the prune.
+  retained effect rows are dropped with the prune, as are
+  intervals entirely below a boot's retention floor (min
+  retained daemon seq — Codex round 3, finding 2): _compute_gaps
+  never searches below the floor, so they can never affect a gap
+  report. A late delivery that drops the floor again can
+  re-expose such a span as suspected — the same accepted
+  trade-off as the boot cleanup: with no record left, the span
+  is unknown, not pruned.
 - ``effect_observations``: delayed observations attached to an
   effect (poll-loop re-check, manual re-check, the E05-T02 binder
   once C-V1 lands). ``UNIQUE (effect_seq, source,
@@ -496,6 +503,24 @@ class BridgeEffectStore:
                     "DELETE FROM pruned_daemon_ranges WHERE daemon_boot_id NOT IN ("
                     " SELECT DISTINCT daemon_boot_id FROM effect_records"
                     " WHERE daemon_seq IS NOT NULL)"
+                )
+                # Codex round 3, finding 2: ranges entirely below
+                # a boot's retention floor (min retained daemon
+                # seq) are dead weight too — _compute_gaps never
+                # searches below the floor — but they accumulate
+                # forever when daemon seqs arrive sparsely (a range
+                # per pruned seq, never merged, never dropped while
+                # the boot keeps any row). Drop them at prune time,
+                # in the same transaction. A boot with no retained
+                # rows yields NULL for the floor, so the comparison
+                # is NULL and deletes nothing: that case is covered
+                # by the boot cleanup above.
+                conn.execute(
+                    "DELETE FROM pruned_daemon_ranges"
+                    " WHERE seq_to < ("
+                    " SELECT MIN(daemon_seq) FROM effect_records"
+                    " WHERE daemon_boot_id = pruned_daemon_ranges.daemon_boot_id"
+                    " AND daemon_seq IS NOT NULL)"
                 )
             return {
                 "seq": seq,

@@ -1016,6 +1016,37 @@ class HostFsService:
             raise
         return fd
 
+    def _missing_parent_suffix(self, root: Root, parts: Sequence[str]) -> int:
+        """Index of the first parent component that still needs
+        creating (E03-T08, Codex round 3, finding 3).
+
+        Read-only walk with the same open flags as ``_open_dirs``:
+        a component that opens as a directory exists; the first
+        component that does not open (ENOENT) — or cannot open as
+        a directory at all (file, symlink, nested mount) — starts
+        the suffix ``_open_dirs`` may still create. Everything
+        before it exists, so a projection built from the suffix
+        never charges the frame budget for directories that are
+        already there. TOCTOU-safe by construction: the projection
+        is a worst case, and ``_open_dirs`` only ever creates a
+        subset of the suffix (a directory that appears between
+        the check and the mkdir is a FileExistsError no-op; one
+        that disappears is created). Returns ``len(parts)`` when
+        nothing is missing.
+        """
+        fd = self._open_root(root)
+        try:
+            for index, part in enumerate(parts):
+                try:
+                    nfd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=fd)
+                except OSError:
+                    return index
+                os.close(fd)
+                fd = nfd
+            return len(parts)
+        finally:
+            os.close(fd)
+
     def _open_parent(
         self, target: _Target, *, create: bool = False, token: CancelToken | None = None
     ) -> tuple[int, str]:
@@ -1597,35 +1628,48 @@ class HostFsService:
                 # consumes no sequence number and leaves no hole
                 # in the daemon sequence.
                 if create_parents and session.dir_parts:
-                    parents_projection = self._effect_emitter.build_projection(
-                        kind="fs.write",
-                        principal_id=principal_id,
-                        run_id=run_id,
-                        fields={
+                    # E03-T08 (Codex round 3, finding 3): only the
+                    # parents that still need creating go into the
+                    # projection. The old code listed every prefix
+                    # — quadratic in depth — so a write under an
+                    # existing 120-deep path was rejected as
+                    # effect_build_failed although nothing would be
+                    # created and the real answer fits the frame.
+                    # The read-only pre-check walks the same opens
+                    # as _open_dirs; the projection stays a worst
+                    # case (a directory that appears/disappears in
+                    # between only shrinks what _open_dirs creates).
+                    missing_from = self._missing_parent_suffix(target.root, session.dir_parts)
+                    if missing_from < len(session.dir_parts):
+                        parents_projection = self._effect_emitter.build_projection(
+                            kind="fs.write",
+                            principal_id=principal_id,
+                            run_id=run_id,
+                            fields={
+                                "root_id": target.root.id,
+                                "path": target.display,
+                                "size": len(data),
+                                "bytes_written": len(data),
+                                "committed": False,
+                                "parents_created": [
+                                    "/".join(session.dir_parts[: index + 1])
+                                    for index in range(missing_from, len(session.dir_parts))
+                                ],
+                            },
+                        )
+                        projected_chunk: dict[str, object] = {
                             "root_id": target.root.id,
                             "path": target.display,
                             "size": len(data),
                             "bytes_written": len(data),
-                            "committed": False,
-                            "parents_created": [
-                                "/".join(session.dir_parts[: index + 1])
-                                for index in range(len(session.dir_parts))
-                            ],
-                        },
-                    )
-                    projected_chunk: dict[str, object] = {
-                        "root_id": target.root.id,
-                        "path": target.display,
-                        "size": len(data),
-                        "bytes_written": len(data),
-                        "write_id": write_id,
-                        "effect": parents_projection,
-                    }
-                    if not self._effect_emitter.frame_fits(projected_chunk, request_id):
-                        raise FsError(
-                            EFFECT_BUILD_FAILED,
-                            "effect does not fit the response frame budget",
-                        )
+                            "write_id": write_id,
+                            "effect": parents_projection,
+                        }
+                        if not self._effect_emitter.frame_fits(projected_chunk, request_id):
+                            raise FsError(
+                                EFFECT_BUILD_FAILED,
+                                "effect does not fit the response frame budget",
+                            )
                 fd = self._open_dirs(
                     target.root,
                     session.dir_parts,
@@ -1786,18 +1830,30 @@ class HostFsService:
                 # a new post-commit failure. The projection consumes
                 # no sequence number: a failed commit leaves no hole
                 # in the daemon sequence.
+                commit_fields: dict[str, object] = {
+                    "root_id": target.root.id,
+                    "path": target.display,
+                    "size": session.size,
+                    "bytes_written": len(data),
+                    "committed": True,
+                    "content_sha256": content_sha256,
+                }
+                if parents_created:
+                    # The first chunk of this session created parent
+                    # directories (Codex round 3, finding 3): the
+                    # commit effect must record them, or the journal
+                    # understates what the call changed (the file is
+                    # recorded, the directories are not). The list
+                    # is the actual created set, already bounded by
+                    # the pre-checked chunk projection above, so the
+                    # frame check below re-budgets it, not a new
+                    # worst case.
+                    commit_fields["parents_created"] = list(parents_created)
                 projection = self._effect_emitter.build_projection(
                     kind="fs.write",
                     principal_id=principal_id,
                     run_id=run_id,
-                    fields={
-                        "root_id": target.root.id,
-                        "path": target.display,
-                        "size": session.size,
-                        "bytes_written": len(data),
-                        "committed": True,
-                        "content_sha256": content_sha256,
-                    },
+                    fields=commit_fields,
                 )
                 committed_result: dict[str, object] = {
                     "root_id": target.root.id,
