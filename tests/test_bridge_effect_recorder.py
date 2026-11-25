@@ -145,6 +145,33 @@ def test_missing_effect_block_on_commit_is_unknown(recorder: BridgeEffectRecorde
     assert record["unknown_reason"] == "missing_effect_block"
 
 
+def test_chunk_with_parents_effect_is_effect(recorder: BridgeEffectRecorder) -> None:
+    """Codex round 2, finding 2 (recorder pin): a chunk answer
+    that carries an fs.write effect for parent directories it
+    created is a confirmed mutation — the effect branch accepts
+    it, whatever the committed flag says. A chunk without an
+    effect stays no_effect (test_chunk_abort_and_dry_run_are_no_effect)."""
+    outcome = recorder.record_success(
+        capability="host.fs.write",
+        request_id="req-1",
+        principal_id=_OWNER,
+        run_id=None,
+        params={"root_id": "work", "path": "new-parent/file.txt", "create_parents": True},
+        result={
+            "root_id": "work",
+            "path": "new-parent/file.txt",
+            "size": 1,
+            "bytes_written": 1,
+            "committed": False,
+            "write_id": "w1",
+            "effect": _effect(
+                seq=1, committed=False, parents_created=["new-parent"], size=1, bytes_written=1
+            ),
+        },
+    )
+    assert outcome.outcome == "effect"
+
+
 def test_chunk_abort_and_dry_run_are_no_effect(recorder: BridgeEffectRecorder) -> None:
     chunk = recorder.record_success(
         capability="host.fs.write",

@@ -5,11 +5,14 @@ only), plus the daemon effect block when the call returned one.
 The journal answers "did this mutation happen, and what did it
 change" — the audit trail T11's ToolGateway wiring will feed.
 
-Schema (v2, own ``user_version`` from 1 — a separate file from
+Schema (v3, own ``user_version`` from 1 — a separate file from
 ``TaskRunStore``/``ui_storage``, so migration-number collisions
 are impossible by construction, C-F1). v1 -> v2 adds only the
 ``pruned_daemon_ranges`` table (Codex round 1, finding 4); no
-existing row changes.
+existing row changes. v2 -> v3 replaces the immutability trigger
+so retention may drop a resolution pointer (Codex round 2,
+finding 4); ``resolved_at`` — not the pointer — is the durable
+resolution marker from v3 on.
 
 - ``effect_records``: one row per recorded call. ``seq`` is the
   server sequence (monotonic, never re-used — assigned from a
@@ -25,7 +28,11 @@ existing row changes.
   the resolution link: an ``unknown`` row may once gain
   ``resolved_by_seq``/``resolved_at`` pointing at the confirmed
   effect that resolved it (owner condition 2) — the attempt row
-  stays as history, it is never rewritten.
+  stays as history, it is never rewritten. From v3, retention
+  may null ``resolved_by_seq`` when it deletes the effect the
+  pointer names; the resolution itself survives in
+  ``resolved_at`` — the pointer is a convenience, the timestamp
+  is the marker (Codex round 2, finding 4).
 - ``pruned_daemon_ranges``: the daemon seqs retention deleted,
   as merged ``[seq_from, seq_to]`` intervals per boot. Gap
   detection subtracts them: a hole fully covered by pruned
@@ -72,7 +79,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeVar
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 # Retention bounds (owner conditions 3 and 7).
 DEFAULT_EFFECT_CAP = 10_000
@@ -83,6 +90,47 @@ DEFAULT_OBSERVATION_CAP = 100_000
 # delivery gets a grace window first.
 GAP_GRACE_S = 60.0
 MAX_GAP_ENTRIES = 100
+
+# Effect rows are immutable except the resolution link on an
+# unknown row (owner condition 2) and retention dropping a
+# resolution pointer (Codex round 2, finding 4). The two allowed
+# transitions, everything else unchanged:
+# - resolution: resolved_by_seq/resolved_at go NULL -> set
+#   together, exactly once;
+# - prune nulling: resolved_by_seq goes set -> NULL when
+#   retention deletes the effect it points at; resolved_at is
+#   untouched, so the attempt still reads as resolved.
+# ``resolved_at`` — not the pointer — is the durable resolution
+# marker: it is set exactly once at resolution and never cleared.
+_TRIGGER_IMMUTABILITY_V3 = """CREATE TRIGGER immutable_effect_record_update
+BEFORE UPDATE ON effect_records
+BEGIN SELECT RAISE(ABORT, 'effect record is immutable except resolution')
+WHERE NOT (
+    OLD.outcome = 'unknown'
+    AND NEW.outcome = OLD.outcome
+    AND NEW.recorded_at = OLD.recorded_at
+    AND NEW.daemon_boot_id IS OLD.daemon_boot_id
+    AND NEW.daemon_seq IS OLD.daemon_seq
+    AND NEW.request_id = OLD.request_id
+    AND NEW.capability = OLD.capability
+    AND NEW.principal_id IS OLD.principal_id
+    AND NEW.run_id IS OLD.run_id
+    AND NEW.params_json = OLD.params_json
+    AND NEW.effect_json IS OLD.effect_json
+    AND NEW.error_code IS OLD.error_code
+    AND NEW.unknown_reason IS OLD.unknown_reason
+    AND (
+        (OLD.resolved_by_seq IS NULL
+         AND NEW.resolved_by_seq IS NOT NULL
+         AND OLD.resolved_at IS NULL
+         AND NEW.resolved_at IS NOT NULL)
+        OR
+        (OLD.resolved_by_seq IS NOT NULL
+         AND NEW.resolved_by_seq IS NULL
+         AND OLD.resolved_at IS NOT NULL
+         AND NEW.resolved_at IS OLD.resolved_at)
+    )
+); END;"""
 
 _PRUNED_RANGES_TABLE = """CREATE TABLE IF NOT EXISTS pruned_daemon_ranges (
         daemon_boot_id TEXT NOT NULL,
@@ -129,31 +177,10 @@ _SCHEMA = (
         UNIQUE (effect_seq, source, observation_sha256)
     );""",
     _PRUNED_RANGES_TABLE,
-    # Effect rows are immutable except the resolution link on an
-    # unknown row (owner condition 2): resolved_by_seq/resolved_at
-    # go NULL -> set exactly once, everything else must be unchanged.
-    """CREATE TRIGGER IF NOT EXISTS immutable_effect_record_update
-    BEFORE UPDATE ON effect_records
-    BEGIN SELECT RAISE(ABORT, 'effect record is immutable except resolution')
-    WHERE NOT (
-        OLD.outcome = 'unknown'
-        AND NEW.outcome = OLD.outcome
-        AND NEW.recorded_at = OLD.recorded_at
-        AND NEW.daemon_boot_id IS OLD.daemon_boot_id
-        AND NEW.daemon_seq IS OLD.daemon_seq
-        AND NEW.request_id = OLD.request_id
-        AND NEW.capability = OLD.capability
-        AND NEW.principal_id IS OLD.principal_id
-        AND NEW.run_id IS OLD.run_id
-        AND NEW.params_json = OLD.params_json
-        AND NEW.effect_json IS OLD.effect_json
-        AND NEW.error_code IS OLD.error_code
-        AND NEW.unknown_reason IS OLD.unknown_reason
-        AND OLD.resolved_by_seq IS NULL
-        AND NEW.resolved_by_seq IS NOT NULL
-        AND OLD.resolved_at IS NULL
-        AND NEW.resolved_at IS NOT NULL
-    ); END;""",
+    # The immutability trigger (v3 definition lives in
+    # _TRIGGER_IMMUTABILITY_V3 above, so the v2 -> v3 migration
+    # reuses the same text; fresh databases get it directly).
+    _TRIGGER_IMMUTABILITY_V3,
     """CREATE TRIGGER IF NOT EXISTS immutable_effect_observation_update
     BEFORE UPDATE ON effect_observations
     BEGIN SELECT RAISE(ABORT, 'effect observation is immutable'); END;""",
@@ -162,6 +189,14 @@ _SCHEMA = (
 # v1 -> v2 (Codex round 1, finding 4): only the pruned-ranges
 # table; no existing row changes.
 _MIGRATION_1_TO_2 = (_PRUNED_RANGES_TABLE,)
+
+# v2 -> v3 (Codex round 2, finding 4): replace the immutability
+# trigger with the v3 definition (retention may drop a
+# resolution pointer); no existing row changes, no table rebuild.
+_MIGRATION_2_TO_3 = (
+    "DROP TRIGGER IF EXISTS immutable_effect_record_update",
+    _TRIGGER_IMMUTABILITY_V3,
+)
 
 _EXPECTED_COLUMNS = {
     "effect_meta": ["key", "value"],
@@ -265,6 +300,16 @@ class BridgeEffectStore:
                 # pruned-ranges table; no existing row changes.
                 for statement in _MIGRATION_1_TO_2:
                     conn.execute(statement)
+                version = 2
+            if version == 2:
+                # v2 -> v3 (Codex round 2, finding 4): replace the
+                # immutability trigger so retention may drop a
+                # resolution pointer; no existing row changes, no
+                # table rebuild.
+                for statement in _MIGRATION_2_TO_3:
+                    conn.execute(statement)
+                version = 3
+            if version == _SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
                 self._validate_schema(conn)
                 return
@@ -423,6 +468,22 @@ class BridgeEffectStore:
                     " AND daemon_seq IS NOT NULL",
                     (over,),
                 ).fetchall()
+                # Codex round 2, finding 4: the rows about to be
+                # deleted may be named by resolution links
+                # (resolved_by_seq REFERENCES effect_records(seq),
+                # NO ACTION). Drop those pointers in the same
+                # transaction first — the FK is a backstop, not a
+                # wedge: without this the DELETE fails and every
+                # later insert rolls back the same way. The
+                # resolution itself survives in resolved_at, so the
+                # attempts still read as resolved; the trigger
+                # permits exactly this set -> NULL transition.
+                conn.execute(
+                    "UPDATE effect_records SET resolved_by_seq = NULL"
+                    " WHERE resolved_by_seq IN ("
+                    " SELECT seq FROM effect_records ORDER BY seq ASC LIMIT ?)",
+                    (over,),
+                )
                 conn.execute(
                     "DELETE FROM effect_records WHERE seq IN ("
                     " SELECT seq FROM effect_records ORDER BY seq ASC LIMIT ?)",
@@ -452,12 +513,16 @@ class BridgeEffectStore:
         """Link unresolved unknown rows for this logical request to
         the confirmed effect (owner condition 2). The attempt rows
         stay as history; only the resolution link is set (the
-        trigger permits exactly this mutation)."""
+        trigger permits exactly this mutation). Resolved-ness is
+        tested on ``resolved_at`` (Codex round 2, finding 4):
+        retention may later drop the ``resolved_by_seq`` pointer
+        when it deletes the effect, but the timestamp — set
+        exactly once at resolution — never leaves."""
         resolved = [
             row["seq"]
             for row in conn.execute(
                 "SELECT seq FROM effect_records WHERE request_id = ?"
-                " AND outcome = 'unknown' AND resolved_by_seq IS NULL AND seq != ?",
+                " AND outcome = 'unknown' AND resolved_at IS NULL AND seq != ?",
                 (request_id, effect_seq),
             ).fetchall()
         ]
@@ -662,8 +727,11 @@ class BridgeEffectStore:
             if outcome == "unknown":
                 # A resolved unknown is history, not an unknown:
                 # the outcome=unknown listing must not show it
-                # (owner condition 2).
-                conditions.append("resolved_by_seq IS NULL")
+                # (owner condition 2). Resolved-ness is tested on
+                # resolved_at (Codex round 2, finding 4): the
+                # pointer may leave with its target under
+                # retention, the timestamp never does.
+                conditions.append("resolved_at IS NULL")
         if cursor is not None:
             conditions.append("seq > ?")
             params.append(cursor)

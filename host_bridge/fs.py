@@ -950,6 +950,7 @@ class HostFsService:
         *,
         create: bool = False,
         token: CancelToken | None = None,
+        created_out: list[str] | None = None,
     ) -> int:
         """Walk directory components below ``root``; return the final dir fd.
 
@@ -958,13 +959,21 @@ class HostFsService:
         ``ELOOP`` and nested mounts are rejected (``st_dev`` change or
         a mount-point component). Containment therefore holds at
         operation time, not only at validation time.
+
+        When ``created_out`` is given, every component this call
+        actually created (a ``mkdir`` that succeeded, not one that
+        hit an existing entry) is appended as its display path
+        relative to the root (``"a"``, ``"a/b"``) — the caller
+        needs it to journal the creation (E03-T08, Codex round 2,
+        finding 2): a first write chunk inside missing parents
+        mutates the tree before the file is published.
         """
         fd = self._open_root(root)
         try:
             root_dev = os.fstat(fd).st_dev
             mount_points = self._mount_points()
             lexical = root.path
-            for part in parts:
+            for index, part in enumerate(parts):
                 lexical = lexical / part
                 if create:
                     if token is not None:
@@ -976,6 +985,9 @@ class HostFsService:
                         os.mkdir(part, 0o755, dir_fd=fd)
                     except FileExistsError:
                         pass
+                    else:
+                        if created_out is not None:
+                            created_out.append("/".join(parts[: index + 1]))
                 try:
                     nfd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=fd)
                 except OSError as exc:
@@ -1551,6 +1563,11 @@ class HostFsService:
                 "aborted": True,
             }
 
+        # The first chunk of a new session may create parent
+        # directories (see below); later chunks never do.
+        parents_projection: dict[str, object] | None = None
+        parents_created: list[str] = []
+
         if write_id is None:
             if offset != 0:
                 raise _invalid_params("params.write_id is required when offset > 0")
@@ -1567,8 +1584,54 @@ class HostFsService:
             with self._sessions_lock:
                 self._sessions[write_id] = session
             try:
+                # E03-T08 (Codex round 2, finding 2): a first chunk
+                # inside missing parents CREATES those directories
+                # before the file is published — the chunk answer
+                # must not claim no_effect. Frame-budget the
+                # parents effect BEFORE _open_dirs creates anything
+                # (condition 5): the projection lists every
+                # creatable dir at worst case, so a check that
+                # passes guarantees the finalized effect fits too.
+                # The projection is finalized only with the
+                # successful chunk answer below: a failed chunk
+                # consumes no sequence number and leaves no hole
+                # in the daemon sequence.
+                if create_parents and session.dir_parts:
+                    parents_projection = self._effect_emitter.build_projection(
+                        kind="fs.write",
+                        principal_id=principal_id,
+                        run_id=run_id,
+                        fields={
+                            "root_id": target.root.id,
+                            "path": target.display,
+                            "size": len(data),
+                            "bytes_written": len(data),
+                            "committed": False,
+                            "parents_created": [
+                                "/".join(session.dir_parts[: index + 1])
+                                for index in range(len(session.dir_parts))
+                            ],
+                        },
+                    )
+                    projected_chunk: dict[str, object] = {
+                        "root_id": target.root.id,
+                        "path": target.display,
+                        "size": len(data),
+                        "bytes_written": len(data),
+                        "write_id": write_id,
+                        "effect": parents_projection,
+                    }
+                    if not self._effect_emitter.frame_fits(projected_chunk, request_id):
+                        raise FsError(
+                            EFFECT_BUILD_FAILED,
+                            "effect does not fit the response frame budget",
+                        )
                 fd = self._open_dirs(
-                    target.root, session.dir_parts, create=create_parents, token=token
+                    target.root,
+                    session.dir_parts,
+                    create=create_parents,
+                    token=token,
+                    created_out=parents_created,
                 )
                 try:
                     self._sweep_orphan_temps(fd, time.time(), target.root, session.dir_parts, token)
@@ -1664,13 +1727,26 @@ class HostFsService:
                 elif offset > session.size:
                     raise _invalid_params("offset leaves a gap in the write session")
                 if not commit:
-                    return {
+                    chunk_result: dict[str, object] = {
                         "root_id": target.root.id,
                         "path": target.display,
                         "size": session.size,
                         "bytes_written": len(data),
                         "write_id": write_id,
                     }
+                    if parents_projection is not None and parents_created:
+                        # This first chunk created parent directories:
+                        # attach the pre-checked effect, finalized with
+                        # the dirs this call actually created, so the
+                        # journal records the mutation instead of a
+                        # false no_effect (Codex round 2, finding 2).
+                        # A later chunk in this session creates nothing
+                        # and carries no effect.
+                        chunk_result["effect"] = self._effect_emitter.finalize(
+                            parents_projection,
+                            fields={"parents_created": list(parents_created)},
+                        )
+                    return chunk_result
                 if session.dirty_start is not None:
                     # A previous chunk failed partway and was never
                     # fully rewritten: the staging file holds bytes

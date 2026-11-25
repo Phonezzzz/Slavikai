@@ -2332,10 +2332,19 @@ class HostProcessService:
         # spawn_failed never ran (or its spawn was destroyed before
         # promotion): no effect — the recorder classifies the
         # effect-less spawn_failed answer as unknown, fail-closed.
+        # (Codex round 2, finding 1): a launch still in flight
+        # must NOT finalize the projection — the spawn may still
+        # fail, and a confirmed effect for a process that never
+        # existed would poison the journal (and resolve an unknown
+        # for a mutation that never happened). Finalize only once
+        # the spawn is known to have started (a tree exists) or
+        # the record has left "launching"; the projection stays on
+        # the record for a later retry, and this answer carries no
+        # effect (unknown outcome).
         if record.effect is None and record.effect_projection is not None:
             if record.state == "spawn_failed":
                 record.effect_projection = None
-            else:
+            elif record.spawn_started or record.state != "launching":
                 record.effect = self._effect_emitter.finalize(
                     record.effect_projection,
                     fields={"state": record.state, "started_at": record.started_at},
@@ -3212,6 +3221,17 @@ class HostProcessService:
             record.exit_signal = exit_signal if isinstance(exit_signal, int) else None
             record.final = True
             record.settled.set()
+            # E03-T08 (Codex round 2, finding 1): a spawn_failed
+            # answer must never carry a run effect — the process
+            # never ran (or was destroyed before promotion, which
+            # the round-1 decision reads as unknown, not a
+            # confirmed mutation). Drop any effect an earlier retry
+            # finalized while the launch was still in flight, and
+            # the projection with it. Other final states keep the
+            # effect: the process did run.
+            if state == "spawn_failed":
+                record.effect = None
+                record.effect_projection = None
 
     def _reap_loop(self) -> None:
         while not self._stop.wait(0.2):

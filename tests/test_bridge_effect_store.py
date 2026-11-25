@@ -92,10 +92,10 @@ def _attach(
 # --- schema ------------------------------------------------------------------
 
 
-def test_schema_created_v2(tmp_path: Path) -> None:
+def test_schema_created_v3(tmp_path: Path) -> None:
     store = BridgeEffectStore(tmp_path / "effects.db")
     with sqlite3.connect(store.path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         tables = {
             row[0]
             for row in conn.execute(
@@ -110,9 +110,10 @@ def test_schema_created_v2(tmp_path: Path) -> None:
     }
 
 
-def test_v1_database_migrates_to_v2(tmp_path: Path) -> None:
+def test_v1_database_migrates_to_v3(tmp_path: Path) -> None:
     """A journal written by the v1 schema (PR #209 head) opens
-    under v2: the pruned-ranges table appears, existing rows are
+    under v3: the chain v1 -> v2 (pruned-ranges table) -> v3
+    (prune-safe resolution trigger) runs, existing rows are
     untouched, and recording keeps working."""
     path = tmp_path / "effects.db"
     with sqlite3.connect(path) as conn:
@@ -164,13 +165,121 @@ def test_v1_database_migrates_to_v2(tmp_path: Path) -> None:
         )
     store = BridgeEffectStore(path)
     with sqlite3.connect(store.path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
     record = store.get_record(1)
     assert record is not None
     assert record["daemon_seq"] == 1
     stored = _record(store, request_id="req-2", effect=_effect(seq=2))
     assert stored["seq"] == 2
     assert store.count() == 2
+
+
+def test_v2_database_migrates_to_v3(tmp_path: Path) -> None:
+    """A journal written by the v2 schema (PR #209 rework 1) opens
+    under v3: only the immutability trigger is replaced (the
+    prune may drop a resolution pointer once its target is
+    pruned); existing rows — including a resolved unknown — are
+    untouched, and a prune past a resolution link works on the
+    migrated journal."""
+    path = tmp_path / "effects.db"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE effect_meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+            CREATE TABLE effect_records (
+                seq INTEGER PRIMARY KEY,
+                recorded_at TEXT NOT NULL,
+                daemon_boot_id TEXT,
+                daemon_seq INTEGER,
+                request_id TEXT NOT NULL,
+                capability TEXT NOT NULL,
+                principal_id TEXT,
+                run_id TEXT,
+                params_json TEXT NOT NULL,
+                effect_json TEXT,
+                outcome TEXT NOT NULL CHECK (outcome IN ('effect', 'no_effect', 'unknown')),
+                error_code TEXT,
+                unknown_reason TEXT,
+                resolved_by_seq INTEGER REFERENCES effect_records(seq),
+                resolved_at TEXT,
+                CHECK ((daemon_boot_id IS NULL) = (daemon_seq IS NULL)),
+                CHECK ((outcome = 'effect') = (effect_json IS NOT NULL)),
+                CHECK ((outcome = 'unknown') = (unknown_reason IS NOT NULL))
+            );
+            CREATE UNIQUE INDEX effect_emission_identity
+                ON effect_records (daemon_boot_id, daemon_seq) WHERE daemon_seq IS NOT NULL;
+            CREATE TABLE effect_observations (
+                id INTEGER PRIMARY KEY,
+                effect_seq INTEGER NOT NULL REFERENCES effect_records(seq) ON DELETE CASCADE,
+                attached_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_ref TEXT,
+                observation_json TEXT NOT NULL,
+                observation_sha256 TEXT NOT NULL,
+                UNIQUE (effect_seq, source, observation_sha256)
+            );
+            CREATE TABLE pruned_daemon_ranges (
+                daemon_boot_id TEXT NOT NULL,
+                seq_from INTEGER NOT NULL,
+                seq_to INTEGER NOT NULL,
+                PRIMARY KEY (daemon_boot_id, seq_from)
+            );
+            CREATE TRIGGER immutable_effect_record_update
+            BEFORE UPDATE ON effect_records
+            BEGIN SELECT RAISE(ABORT, 'effect record is immutable except resolution')
+            WHERE NOT (
+                OLD.outcome = 'unknown'
+                AND NEW.outcome = OLD.outcome
+                AND NEW.recorded_at = OLD.recorded_at
+                AND NEW.daemon_boot_id IS OLD.daemon_boot_id
+                AND NEW.daemon_seq IS OLD.daemon_seq
+                AND NEW.request_id = OLD.request_id
+                AND NEW.capability = OLD.capability
+                AND NEW.principal_id IS OLD.principal_id
+                AND NEW.run_id IS OLD.run_id
+                AND NEW.params_json = OLD.params_json
+                AND NEW.effect_json IS OLD.effect_json
+                AND NEW.error_code IS OLD.error_code
+                AND NEW.unknown_reason IS OLD.unknown_reason
+                AND OLD.resolved_by_seq IS NULL
+                AND NEW.resolved_by_seq IS NOT NULL
+                AND OLD.resolved_at IS NULL
+                AND NEW.resolved_at IS NOT NULL
+            ); END;
+            INSERT INTO effect_meta (key, value) VALUES ('next_seq', 3);
+            INSERT INTO effect_records
+                (seq, recorded_at, daemon_boot_id, daemon_seq, request_id, capability,
+                 principal_id, run_id, params_json, effect_json, outcome, error_code,
+                 unknown_reason)
+                VALUES (1, '2026-11-25T00:00:00+00:00', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        1, 'req-1', 'host.fs.write', 'owner', NULL,
+                        '{"path": "a.txt"}', '{"kind": "fs.write"}', 'effect', NULL, NULL);
+            INSERT INTO effect_records
+                (seq, recorded_at, daemon_boot_id, daemon_seq, request_id, capability,
+                 principal_id, run_id, params_json, effect_json, outcome, error_code,
+                 unknown_reason, resolved_by_seq, resolved_at)
+                VALUES (2, '2026-11-25T00:01:00+00:00', NULL, NULL,
+                        'req-1', 'host.fs.write', 'owner', NULL,
+                        '{"path": "a.txt"}', NULL, 'unknown', NULL, 'timeout',
+                        1, '2026-11-25T00:02:00+00:00');
+            PRAGMA user_version = 2;
+            """
+        )
+    store = BridgeEffectStore(path, effect_cap=2)
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    attempt = store.get_record(2)
+    assert attempt is not None
+    assert attempt["resolved_by_seq"] == 1
+    assert attempt["resolved_at"] == "2026-11-25T00:02:00+00:00"
+    # The migrated journal prunes past the resolution link.
+    _record(store, request_id="req-2", effect=_effect(seq=2))
+    assert store.count() == 2
+    assert store.get_record(1) is None
+    attempt = store.get_record(2)
+    assert attempt is not None
+    assert attempt["resolved_at"] == "2026-11-25T00:02:00+00:00"
+    assert attempt["resolved_by_seq"] is None
 
 
 def test_unknown_schema_fails_closed(tmp_path: Path) -> None:
@@ -262,6 +371,42 @@ def test_duplicate_effect_resolves_unknown(tmp_path: Path) -> None:
     assert attempt["resolved_by_seq"] == effect["seq"]
     assert attempt["resolved_at"] is not None
     assert store.count() == 2  # no second effect row
+
+
+def test_prune_with_resolution_reference_keeps_journal_writable(tmp_path: Path) -> None:
+    """Codex round 2, finding 4: a resolution link pointing at
+    the effect retention is about to prune must not wedge the
+    journal. Before the fix the prune DELETE hit the FK on
+    resolved_by_seq, the whole insert rolled back, and every later
+    insert failed the same way (the recorder then returned
+    audit_gap forever). The prune drops the pointer in the same
+    transaction; the resolution itself survives in resolved_at,
+    so the attempt still reads as resolved."""
+    store = BridgeEffectStore(tmp_path / "effects.db", effect_cap=2)
+    effect = _record(store, request_id="req-1", effect=_effect(seq=1))
+    unknown = _record(store, request_id="req-1", outcome="unknown", unknown_reason="timeout")
+    duplicate = _record(store, request_id="req-1", effect=_effect(seq=1))
+    assert duplicate["duplicate"] is True
+    assert duplicate["resolved_unknown_seqs"] == [unknown["seq"]]
+    # The new effect forces a prune of the referenced effect row.
+    second = _record(store, request_id="req-2", effect=_effect(seq=2))
+    assert store.count() == 2
+    assert store.get_record(int(effect["seq"])) is None
+    attempt = store.get_record(int(unknown["seq"]))
+    assert attempt is not None
+    assert attempt["outcome"] == "unknown"  # history is not rewritten
+    assert attempt["resolved_at"] is not None  # still resolved...
+    assert attempt["resolved_by_seq"] is None  # ...but the pointer left with its target
+    # The resolved unknown no longer classifies as unknown, and
+    # the pruned daemon seq is not reported as a gap.
+    page = store.list_effects(principal_id=_OWNER, outcome="unknown")
+    assert [row["seq"] for row in page["records"]] == []
+    page = store.list_effects(principal_id=_OWNER, include_gaps=True)
+    assert page["gaps"] == []
+    # ...and the journal keeps accepting inserts afterwards.
+    third = _record(store, request_id="req-3", effect=_effect(seq=3))
+    assert store.count() == 2
+    assert third["seq"] != second["seq"]
 
 
 def test_confirmed_effect_resolves_unknown(tmp_path: Path) -> None:

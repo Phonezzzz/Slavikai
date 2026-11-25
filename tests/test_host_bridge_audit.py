@@ -45,6 +45,8 @@ from host_bridge.fs import (
 from host_bridge.process import (
     HostProcessService,
     ProbeResult,
+    ProcessError,
+    SpawnError,
     SpawnHandle,
     _Record,
     load_profiles,
@@ -395,6 +397,82 @@ def test_two_call_commit_effect_mirrors_result(bridge: Path) -> None:
     assert effect["bytes_written"] == 0
     assert effect["size"] == 9
     assert effect["content_sha256"] == hashlib.sha256(b"audit me\n").hexdigest()
+
+
+def test_write_chunk_creates_parents_carries_effect(bridge: Path, home: Path) -> None:
+    """Codex round 2, finding 2: a first chunk inside missing
+    parents CREATES those directories before the file is published,
+    so the chunk answer must not claim no_effect. The effect names
+    the created parents; a later chunk in the same session creates
+    nothing and carries no effect; abort does not remove the dirs
+    (which is exactly why the creation must be journaled)."""
+    chunk = _call(
+        bridge,
+        "host.fs.write",
+        params={
+            "root_id": "work",
+            "path": "new-parent/sub/file.txt",
+            "mode": "create",
+            "content": "x",
+        },
+    )
+    assert "effect" in chunk  # red before the fix: no_effect lie
+    effect = _assert_effect_shape(chunk.get("effect"), kind="fs.write")
+    assert effect["root_id"] == "work"
+    assert effect["path"] == "new-parent/sub/file.txt"
+    assert effect["size"] == 1
+    assert effect["bytes_written"] == 1
+    assert effect["committed"] is False
+    assert effect["parents_created"] == ["new-parent", "new-parent/sub"]
+    assert "content_sha256" not in effect  # nothing published yet
+    _assert_no_forbidden_effect_keys(effect, kind="fs.write")
+    work = home / "Project" / "work"
+    assert (work / "new-parent" / "sub").is_dir()
+    write_id = chunk["write_id"]
+    assert isinstance(write_id, str)
+    second = _call(
+        bridge,
+        "host.fs.write",
+        params={
+            "root_id": "work",
+            "path": "new-parent/sub/file.txt",
+            "mode": "create",
+            "write_id": write_id,
+            "content": "y",
+        },
+    )
+    assert "effect" not in second  # parents already exist
+    aborted = _call(
+        bridge,
+        "host.fs.write",
+        params={
+            "root_id": "work",
+            "path": "new-parent/sub/file.txt",
+            "mode": "create",
+            "write_id": write_id,
+            "abort": True,
+        },
+    )
+    assert aborted["aborted"] is True
+    assert "effect" not in aborted
+    assert (work / "new-parent" / "sub").is_dir()  # abort keeps them
+
+
+def test_write_chunk_existing_parents_has_no_effect(bridge: Path) -> None:
+    """The same chunk flow one level down, where the parents
+    already exist: nothing is created, so no effect is correct."""
+    _write_commit(bridge, content="seed", path="sub/seed.txt")
+    chunk = _call(
+        bridge,
+        "host.fs.write",
+        params={
+            "root_id": "work",
+            "path": "sub/other.txt",
+            "mode": "create",
+            "content": "x",
+        },
+    )
+    assert "effect" not in chunk
 
 
 def test_write_chunk_and_abort_have_no_effect(bridge: Path) -> None:
@@ -858,6 +936,35 @@ def test_effect_build_failed_on_patch_hash_fault(
     assert (work.path / "pfault.txt").read_text(encoding="utf-8") == "hello\nworld\n"
 
 
+def test_write_chunk_parents_frame_budget_fails_before_mkdir(
+    fs_service: HostFsService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 2, finding 2 (condition 5): the parents
+    effect is frame-budgeted BEFORE _open_dirs creates anything.
+    With the frame check forced to fail, the call is
+    effect_build_failed and no parent directory appears."""
+    monkeypatch.setattr(EffectEmitter, "frame_fits", staticmethod(lambda *args, **kwargs: False))
+    request = BridgeRequest(
+        version=1,
+        request_id="parents-budget-1",
+        capability="host.fs.write",
+        principal_id=_OWNER,
+        run_id=None,
+        params={
+            "root_id": "work",
+            "path": "new-parent/file.txt",
+            "mode": "create",
+            "content": "x",
+        },
+    )
+    with pytest.raises(FsError) as exc_info:
+        fs_service.handle(request, _token())
+    assert exc_info.value.code == EFFECT_BUILD_FAILED
+    work = fs_service.registry.by_id("work")
+    assert work is not None
+    assert not (work.path / "new-parent").exists()
+
+
 def test_kill_final_record_has_no_effect(proc_service: HostProcessService) -> None:
     """A kill of an already-final record requests nothing: the
     final state is returned with no effect block (the recorder
@@ -924,6 +1031,170 @@ def test_kill_final_record_with_run_effect_returns_no_effect(
     assert result["state"] == "exited"
     assert result["exit_code"] == 0
     assert "effect" not in result
+
+
+class _BlockingSpawner:
+    """Spawner whose spawn() blocks until released, then fails.
+
+    Reproduces Codex round 2, finding 1: a retry arriving while
+    the launch is still committing, its wait expiring before the
+    spawn completes.
+    """
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.signal_calls: list[tuple[str, int]] = []
+        self.kill_calls: list[str] = []
+
+    def spawn(self, spec_path: Path, *, unit_name: str, run_dir: Path) -> SpawnHandle:
+        self.started.set()
+        self.release.wait(timeout=30)
+        raise SpawnError("injected spawn failure")
+
+    def signal_tree(self, handle: SpawnHandle, sig: int, *, timeout_s: float = 5.0) -> None:
+        self.signal_calls.append((handle.unit_name, sig))
+
+    def kill_all(self, handle: SpawnHandle, *, timeout_s: float = 5.0) -> None:
+        self.kill_calls.append(handle.unit_name)
+
+    def list_bridge_scopes(self) -> list[str]:
+        return []
+
+    def destroy_scope_checked(self, unit_name: str, timeout_s: float = 5.0) -> bool:
+        return True
+
+    def cgroup_empty(self, handle: SpawnHandle) -> bool:
+        return True
+
+
+def test_run_retry_during_launch_carries_no_effect(
+    fs_service: HostFsService, registry: RootsRegistry, tmp_path: Path
+) -> None:
+    """Codex round 2, finding 1: a retry whose wait on the
+    launching record expires must NOT finalize the run effect —
+    the spawn may still fail, and a confirmed effect for a process
+    that never existed would poison the journal (and resolve an
+    unknown for a mutation that never happened). The projection
+    stays on the record; after the spawn fails, a further retry
+    answers spawn_failed with no effect at all."""
+    spawner = _BlockingSpawner()
+    svc = HostProcessService(
+        fs_service,
+        registry,
+        runtime_dir=tmp_path / "run-race",
+        profiles=load_profiles(registry),
+        spawner=spawner,  # type: ignore[arg-type]
+    )
+    svc._probe = ProbeResult(available=True, checks={}, reason="unit-test")
+    try:
+        outcome: dict[str, object] = {}
+        errors: dict[str, Exception] = {}
+
+        def _first() -> None:
+            try:
+                outcome["first"] = svc.handle(
+                    "host.process.run",
+                    {"profile_id": "true"},
+                    "run-launch-race",
+                    _token(deadline_s=30),
+                    principal_id=_OWNER,
+                    run_id="run-race",
+                )
+            except Exception as exc:  # noqa: BLE001 - recorded for the assertions below
+                errors["first"] = exc
+
+        thread = threading.Thread(target=_first, daemon=True)
+        thread.start()
+        assert spawner.started.wait(timeout=5)
+        # The retry arrives while the launch is still committing;
+        # its short wait expires before the spawn completes.
+        retry = svc.handle(
+            "host.process.run",
+            {"profile_id": "true"},
+            "run-launch-race",
+            _token(deadline_s=0.5),
+            principal_id=_OWNER,
+            run_id="run-race",
+        )
+        assert retry["state"] == "launching"
+        assert "effect" not in retry  # red before the fix
+        spawner.release.set()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        assert "first" not in outcome
+        first_error = errors.get("first")
+        assert isinstance(first_error, ProcessError)
+        assert first_error.code == "spawn_failed"
+        # The spawn failed after the retry's wait expired: the
+        # answer must be spawn_failed with NO run effect — the
+        # stale projection must not survive the finalization.
+        final = svc.handle(
+            "host.process.run",
+            {"profile_id": "true"},
+            "run-launch-race",
+            _token(),
+            principal_id=_OWNER,
+            run_id="run-race",
+        )
+        assert final["state"] == "spawn_failed"
+        assert "effect" not in final  # red before the fix
+    finally:
+        svc.shutdown()
+
+
+def test_finalize_spawn_failed_clears_effect(proc_service: HostProcessService) -> None:
+    """Codex round 2, finding 1 (second half): finalizing a
+    record as spawn_failed must drop any effect finalized by an
+    earlier retry while the launch was still in flight — a
+    spawn_failed answer must never carry a run effect. Other
+    final states keep the effect: the process did run."""
+    record = _Record(
+        process_id=uuid.uuid4().hex,
+        profile_id="true",
+        state="launching",
+        run_id="run-1",
+        principal_id=_OWNER,
+        started_mono=time.monotonic(),
+    )
+    record.effect = {
+        "seq": 1,
+        "boot_id": "b" * 32,
+        "kind": "process.run",
+        "at": datetime.now(UTC).isoformat(),
+        "principal_id": _OWNER,
+        "run_id": "run-1",
+        "process_id": record.process_id,
+        "state": "launching",
+    }
+    record.effect_projection = dict(record.effect)
+    proc_service._finalize(record, "spawn_failed")
+    assert record.state == "spawn_failed"
+    assert record.final
+    assert record.effect is None
+    assert record.effect_projection is None
+    # Control: a record that actually ran keeps its effect.
+    ran = _Record(
+        process_id=uuid.uuid4().hex,
+        profile_id="true",
+        state="running",
+        run_id="run-2",
+        principal_id=_OWNER,
+        started_mono=time.monotonic(),
+    )
+    ran.effect = {
+        "seq": 2,
+        "boot_id": "b" * 32,
+        "kind": "process.run",
+        "at": datetime.now(UTC).isoformat(),
+        "principal_id": _OWNER,
+        "run_id": "run-2",
+        "process_id": ran.process_id,
+        "state": "running",
+    }
+    proc_service._finalize(ran, "exited")
+    assert ran.effect is not None
+    assert ran.effect["kind"] == "process.run"
 
 
 def test_client_rejects_malformed_effect() -> None:
