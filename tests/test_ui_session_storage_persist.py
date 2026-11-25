@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -235,6 +236,24 @@ def test_merge_import_reorders_messages_on_reload(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_delta_save_reorders_messages_on_lane_change_import(tmp_path: Path) -> None:
+    """A merge-import can also move a stored message to the other lane
+    ([m2 workspace, m3 chat] over stored [m2 chat, m3 chat]). The moved
+    message is a fresh insert in its new lane, so the reorder probe must
+    not credit it with its old seq: without that, the probe sees a
+    monotonic assignment while the real one inverts, and the reload
+    returns [m3, m2] instead of the imported [m2, m3]."""
+    path = tmp_path / "sessions.db"
+    store = SQLiteUISessionStorage(path)
+    store.save_session(_session("s1", [_message("m2", "chat", "m2"), _message("m3", "chat", "m3")]))
+    store.save_session(
+        _session("s1", [_message("m2", "workspace", "m2"), _message("m3", "chat", "m3")])
+    )
+    loaded = store.load_sessions()[0]
+    assert [item["message_id"] for item in loaded.messages] == ["m2", "m3"]
+    assert [item["seq"] for item in loaded.messages] == [3, 4]
+
+
 def test_cancelled_policy_commit_keeps_memory_and_db_in_sync(tmp_path: Path) -> None:
     """Cancelling set_session_policy mid-write must not leave the new
     policy/revision in SQLite and the old one in memory: the write runs to
@@ -307,6 +326,51 @@ def test_cancelled_import_commit_keeps_session_in_memory(tmp_path: Path) -> None
         session = await hub.get_session("s1")
         assert session is not None
         assert [item["message_id"] for item in session["messages"]] == ["m1"]
+
+    asyncio.run(run())
+
+
+def test_cancelled_append_waits_for_write_before_releasing_lock(tmp_path: Path) -> None:
+    """Cancelling append_message mid-write must not let a stale delta save
+    delete a message appended afterwards: the funnel waits for the gated
+    write to finish before the lock is released and the cancellation
+    propagates, so the second append can only persist after the first."""
+    path = tmp_path / "sessions.db"
+    store = SQLiteUISessionStorage(path)
+    hub = UIHub(storage=store)
+
+    async def run() -> None:
+        sid = await hub.create_session("owner")
+        original_save = store.save_session
+        calls = 0
+        started = threading.Event()
+        release = threading.Event()
+
+        def gated_save(*args, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                started.set()
+                release.wait(timeout=10)
+            return original_save(*args, **kwargs)
+
+        store.save_session = gated_save  # type: ignore[method-assign]
+        task = asyncio.create_task(
+            hub.append_message(sid, hub.create_message(role="user", content="first"))
+        )
+        await asyncio.sleep(0.2)
+        assert started.is_set()
+        task.cancel()
+        # The cancellation may only propagate after the gated write lands:
+        # while the write is gated, the task must stay pending.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.3)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await hub.append_message(sid, hub.create_message(role="user", content="second"))
+        reloaded = SQLiteUISessionStorage(path).load_sessions()[0]
+        assert [item["content"] for item in reloaded.messages] == ["first", "second"]
 
     asyncio.run(run())
 

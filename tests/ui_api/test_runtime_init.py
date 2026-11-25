@@ -317,3 +317,54 @@ def test_plan_shutdown_retains_active_agent_until_worker_finishes(
             monkeypatch.setattr(asyncio, "wait_for", original_wait_for)
 
     asyncio.run(run())
+
+
+def test_ui_runtime_init_response_uses_reset_result_despite_concurrent_act_write() -> None:
+    """The runtime/init response must report the reset's own result.
+
+    A concurrent plan runner keeps rewriting the mode back to "act"
+    while the reset runs. The handler used to re-read the workflow after
+    the reset, so the response could report "act" — a state the reset
+    never established — when the runner's write landed between the reset
+    and the read (exposed deterministically by full-suite load once the
+    persist funnel gained an extra scheduling tick). The response is
+    now built from the workflow the reset itself established.
+    """
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            await _enter_act_mode(client, session_id, goal="runtime init race")
+            hub = client.app["ui_hub"]
+            stop = asyncio.Event()
+
+            async def hammer() -> None:
+                while not stop.is_set():
+                    await hub.set_session_workflow(session_id, mode="act")
+                    await asyncio.sleep(0)
+
+            hammer_task = asyncio.create_task(hammer())
+            try:
+                init_resp = await client.post(
+                    "/ui/api/runtime/init",
+                    headers={"X-Slavik-Session": session_id},
+                    json={"confirm": True, "force": True, "reset_reason": "test_race"},
+                )
+                assert init_resp.status == 200
+                init_payload = await init_resp.json()
+                assert init_payload.get("mode") == "ask"
+                assert init_payload.get("active_plan") is None
+                assert init_payload.get("active_task") is None
+                assert init_payload.get("auto_state") is None
+            finally:
+                stop.set()
+                await hammer_task
+        finally:
+            await client.close()
+
+    asyncio.run(run())

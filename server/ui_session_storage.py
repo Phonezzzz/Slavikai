@@ -729,19 +729,21 @@ class SQLiteUISessionStorage:
         # after a restart. Simulate the delta assignment: if the assigned
         # seq values are not strictly increasing in incoming order,
         # renumber the whole history with fresh seq values in incoming
-        # order instead.
-        stored_seqs = {
-            message_id: seq
-            for rows in existing_by_table.values()
-            for message_id, (seq, _fingerprint) in rows.items()
-        }
+        # order instead. A message counts as stored only in its own lane:
+        # a lane change is a fresh insert in the new lane.
         probe_seq: int | None = None
         assigned_seqs: list[int] = []
         for prepared in prepared_messages:
             probe_id = str(prepared["message_id"])
-            stored_seq = stored_seqs.get(probe_id)
-            if stored_seq is not None:
-                assigned_seqs.append(stored_seq)
+            # Only a row in the message's own lane counts as stored. A
+            # message that moved lanes is a fresh insert in its new lane
+            # (the old row is deleted), so it takes a fresh counter value
+            # — the merged cross-lane map hid that and missed the reorder
+            # when the moved message preceded a stored one.
+            probe_table = self._message_table_for_lane(prepared["lane"])
+            stored = existing_by_table[probe_table].get(probe_id)
+            if stored is not None:
+                assigned_seqs.append(stored[0])
             else:
                 if probe_seq is None:
                     probe_seq = self._next_message_seq(conn)

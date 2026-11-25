@@ -2385,7 +2385,17 @@ class UIHub:
         state = self._sessions.get(session_id)
         if state is None:
             return
-        await self._persist_session_state_locked(session_id, state)
+        # Every ordinary write goes through the same cancellation-safe
+        # path as the security commit and the import: the off-loop write
+        # cannot be cancelled once started, and releasing the lock while
+        # it is still in flight lets a newer write commit first and then
+        # be deleted by the stale delta save. Wait for the write, then
+        # propagate the cancellation. The caller already installed the
+        # in-memory state before persisting, so there is nothing to
+        # install here — only the lock must be held until the write lands.
+        cancelled = await self._persist_session_state_locked_uninterruptible(session_id, state)
+        if cancelled:
+            raise asyncio.CancelledError()
 
     def _build_persisted_session(
         self,
@@ -2464,7 +2474,8 @@ class UIHub:
         commits it, leaving the new revision in SQLite and the old one in
         memory. This waits for the write to finish and returns True when
         cancellation was requested: the caller installs the new in-memory
-        state first and only then re-raises CancelledError.
+        state first and only then re-raises CancelledError. Repeated
+        cancellations while waiting are swallowed until the write finishes.
         """
         task = asyncio.ensure_future(
             self._persist_session_state_locked(
@@ -2477,7 +2488,13 @@ class UIHub:
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
-            await task
+            # A repeated cancellation while waiting must not release the
+            # lock before the write lands: keep waiting until it finishes.
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
             return True
         return False
 

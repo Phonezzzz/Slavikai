@@ -322,7 +322,12 @@ async def handle_ui_runtime_init(request: web.Request) -> web.Response:
     agent = await _resolve_agent(request, session_id)
 
     workspace_root = await _workspace_root_for_session(hub, session_id)
-    await hub.set_session_workflow(
+    # The response reports the reset's own result: set_session_workflow
+    # returns the workflow it just established. Re-reading it afterwards
+    # is a TOCTOU — a concurrent plan runner can rewrite the mode back
+    # to "act" between the reset and the read, so the response would
+    # report a state the reset never established.
+    workflow = await hub.set_session_workflow(
         session_id,
         mode="ask",
         active_plan=None,
@@ -357,7 +362,6 @@ async def handle_ui_runtime_init(request: web.Request) -> web.Response:
             reset_report["runtime_reapplied"] = False
             reset_report["runtime_error"] = str(exc)
 
-    workflow = await hub.get_session_workflow(session_id)
     tools_state, policy = await _load_effective_session_security(hub=hub, session_id=session_id)
     response = json_response(
         {
