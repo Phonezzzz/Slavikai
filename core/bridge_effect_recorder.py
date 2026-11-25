@@ -113,7 +113,10 @@ _NO_EFFECT_CODES: Final[frozenset[str]] = frozenset(
         "unknown_root",
         "root_read_only",
         # Pre-commit refusals: the check runs before the publish
-        # syscall / spawn / signal.
+        # syscall / spawn / signal. (already_exists: the write
+        # path rolls back parents this call created before raising
+        # it -- host_bridge/fs.py, Codex round 9 finding 2 -- so
+        # the code still proves no_effect.)
         "run_stopped",
         "patch_mismatch",
         "already_exists",

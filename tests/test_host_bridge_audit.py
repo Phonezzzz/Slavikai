@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import threading
 import time
@@ -38,11 +39,13 @@ from host_bridge.effect import (
     stop_process_placeholder,
 )
 from host_bridge.fs import (
+    _MAX_TRASH_NAME_CHARS,
     CancelToken,
     FsError,
     HostFsService,
     Root,
     RootsRegistry,
+    _trash_candidate,
 )
 from host_bridge.process import (
     HostProcessService,
@@ -702,6 +705,104 @@ def test_delete_carries_effect(bridge: Path, tmp_path: Path) -> None:
     _assert_no_forbidden_effect_keys(effect, kind="fs.delete")
 
 
+def _create_deep_file(root_path: Path, dir_parts: list[str], name: str) -> None:
+    """Create ``name`` under a >PATH_MAX deep tree via dir_fd opens:
+    path-based syscalls refuse such paths with ENAMETOOLONG."""
+    fd = os.open(root_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in dir_parts:
+            try:
+                nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+            except FileNotFoundError:
+                os.mkdir(part, dir_fd=fd)
+                nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+        tfd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644, dir_fd=fd)
+        try:
+            os.write(tfd, b"x")
+        finally:
+            os.close(tfd)
+    finally:
+        os.close(fd)
+
+
+def _stat_deep_file(service: HostFsService, root: Root, parts: list[str]) -> os.stat_result:
+    """Stat a file under a >PATH_MAX deep tree through the daemon's
+    own fd-walk (a path-based stat refuses it with ENAMETOOLONG)."""
+    fd = service._open_dirs(root, tuple(parts[:-1]))
+    try:
+        return os.stat(parts[-1], dir_fd=fd)
+    finally:
+        os.close(fd)
+
+
+def test_delete_escaped_trash_name_budget_fails_before_rename(
+    fs_service: HostFsService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 9, finding 1: the delete projection budgets the
+    trash name as "x" * 245 characters, but json.dumps renders a
+    control character as \\u0001 (6 bytes), so a real trash name of
+    245 control characters serializes to 1470 bytes. For the
+    finding's path (52 dirs of "a" + 99 \\x01, file "f" + 200
+    \\x01) the projection fits (~65269 bytes) while the finalized
+    answer does not (~67163): the daemon backstop replaces it with
+    internal_error and the client loses the effect of the performed
+    delete. The call must fail with effect_build_failed BEFORE any
+    rename, with the file untouched. Before the fix the delete
+    succeeds and the answer overflows the frame.
+
+    The daemon's fd-walk supports over-long paths, but _resolve's
+    checkout check stats full Path objects and dies with
+    ENAMETOOLONG past PATH_MAX (fs.py _is_slavikai_checkout) --
+    the finding's path can only reach _delete with that check
+    bypassed. The bypass isolates the frame-budget discipline
+    under test; the ENAMETOOLONG gate itself is a separate known
+    limitation (fail-closed: the request fails with io_error and
+    the journal reads unknown, so nothing is lied about).
+    """
+    work = fs_service.registry.by_id("work")
+    assert work is not None
+    dirs = ["a" + "\x01" * 99] * 52
+    name = "f" + "\x01" * 200
+    _create_deep_file(work.path, dirs, name)
+    monkeypatch.setattr(fs_service, "_check_write_excluded", lambda target: None)
+    request = BridgeRequest(
+        version=1,
+        request_id="del-esc-1",
+        capability="host.fs.delete",
+        principal_id=_OWNER,
+        run_id=None,
+        params={"root_id": "work", "path": "/".join([*dirs, name])},
+    )
+    with pytest.raises(FsError) as exc_info:
+        fs_service.handle(request, _token())
+    assert exc_info.value.code == EFFECT_BUILD_FAILED
+    # Nothing was moved to trash and the file is still there.
+    trash_files = tmp_path / "Trash" / "files"
+    assert not trash_files.exists() or not any(trash_files.iterdir())
+    assert _stat_deep_file(fs_service, work, [*dirs, name]).st_size == 1
+
+
+def test_trash_name_placeholder_bounds_serialized_length() -> None:
+    """Codex round 9, finding 1 (bound guard): a trash candidate is
+    at most 245 UTF-8 bytes, and json.dumps (ensure_ascii) renders
+    every character as at most 6 bytes per UTF-8 byte (a control
+    character is 1 byte -> \\uXXXX; a non-BMP character is 4 bytes
+    -> a 12-byte surrogate pair). The worst-case serialized name is
+    therefore 245 control characters = 1470 bytes -- the placeholder
+    the delete projection budgets must serialize to at least that.
+    This pins the arithmetic; the end-to-end test above proves the
+    delete actually applies it."""
+    worst = "\x01" * _MAX_TRASH_NAME_CHARS
+    bound = len(json.dumps(worst, ensure_ascii=True))
+    assert bound == 6 * _MAX_TRASH_NAME_CHARS + 2  # 6 bytes/char + quotes
+    for attempt in range(10):
+        candidate = _trash_candidate(worst, attempt)
+        assert len(os.fsencode(candidate)) <= _MAX_TRASH_NAME_CHARS
+        assert len(json.dumps(candidate, ensure_ascii=True)) <= bound
+
+
 # --- process.stop (owner condition 1) ---------------------------------------
 
 
@@ -1124,6 +1225,102 @@ def test_write_hash_fault_with_unremovable_parents_is_unknown(
     work = fs_service.registry.by_id("work")
     assert work is not None
     assert (work.path / "new-parent").exists()
+
+
+def test_write_create_conflict_after_creating_parents_is_unknown(
+    fs_service: HostFsService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 9, finding 2: two concurrent first host.fs.write
+    with commit=true, mode=create. The first creates missing
+    parents, the second publishes first, and the first gets
+    already_exists from os.link. The created parents remain on
+    disk, so the journal must NOT read no_effect: the call rolls
+    its whole footprint back, and when the competitor's file keeps
+    the created parents non-empty the outcome is unknown
+    (io_error). Before the fix the call raised already_exists
+    although its parents stayed behind."""
+    target = "race-parent/file.txt"
+    published = {"done": False}
+
+    def _publish_second() -> None:
+        # Runs inside the first request's commit hook, between its
+        # frame check and its publish: same target, same missing
+        # parents (already created by the first request).
+        if published["done"]:
+            return
+        published["done"] = True
+        second = BridgeRequest(
+            version=1,
+            request_id="race-2",
+            capability="host.fs.write",
+            principal_id=_OWNER,
+            run_id=None,
+            params={
+                "root_id": "work",
+                "path": target,
+                "mode": "create",
+                "content": "second",
+                "commit": True,
+            },
+        )
+        result = fs_service.handle(second, _token())
+        assert result["committed"] is True
+
+    monkeypatch.setattr(fs_service, "_commit_hook", _publish_second)
+    request = BridgeRequest(
+        version=1,
+        request_id="race-1",
+        capability="host.fs.write",
+        principal_id=_OWNER,
+        run_id=None,
+        params={
+            "root_id": "work",
+            "path": target,
+            "mode": "create",
+            "content": "first",
+            "commit": True,
+        },
+    )
+    with pytest.raises(FsError) as exc_info:
+        fs_service.handle(request, _token())
+    assert published["done"] is True
+    assert exc_info.value.code == "io_error"  # red before the fix: already_exists
+    work = fs_service.registry.by_id("work")
+    assert work is not None
+    # The competitor's file survived, and the parents stay because
+    # they hold it -- the rollback was attempted and unconfirmed.
+    assert (work.path / target).read_text(encoding="utf-8") == "second"
+    assert (work.path / "race-parent").is_dir()
+
+
+def test_write_create_existing_target_without_parents_is_no_effect(
+    fs_service: HostFsService,
+) -> None:
+    """Codex round 9, finding 2 (guard): the rollback above must
+    only run when this call created parents. A create against a
+    pre-existing target whose parents pre-existed creates nothing,
+    so already_exists still honestly means no_effect."""
+    work = fs_service.registry.by_id("work")
+    assert work is not None
+    (work.path / "existing.txt").write_text("there", encoding="utf-8")
+    request = BridgeRequest(
+        version=1,
+        request_id="race-3",
+        capability="host.fs.write",
+        principal_id=_OWNER,
+        run_id=None,
+        params={
+            "root_id": "work",
+            "path": "existing.txt",
+            "mode": "create",
+            "content": "other",
+            "commit": True,
+        },
+    )
+    with pytest.raises(FsError) as exc_info:
+        fs_service.handle(request, _token())
+    assert exc_info.value.code == "already_exists"
+    assert (work.path / "existing.txt").read_text(encoding="utf-8") == "there"
 
 
 def test_write_chunk_parents_frame_budget_fails_before_mkdir(

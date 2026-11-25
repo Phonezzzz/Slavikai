@@ -159,6 +159,15 @@ _TRASHINFO_SUFFIX: Final[str] = ".trashinfo"
 # pre-publish frame check holds for whichever candidate name the
 # trash loop finally picks (E03-T08, condition 5).
 _MAX_TRASH_NAME_CHARS: Final[int] = _NAME_MAX_BYTES - len(_TRASHINFO_SUFFIX)
+# A trash name is at most _MAX_TRASH_NAME_CHARS UTF-8 bytes, and
+# json.dumps (ensure_ascii) renders every character as at most 6
+# bytes per UTF-8 byte: a control character is 1 UTF-8 byte ->
+# \uXXXX (6 bytes), the worst ratio (a non-BMP character is 4 bytes
+# -> a 12-byte surrogate pair). The delete projection must budget
+# the SERIALIZED name, not the character count: "x" * 245
+# serializes to 245 bytes while a real name of 245 control
+# characters serializes to 1470 (Codex round 9, finding 1).
+_WORST_CASE_TRASH_NAME: Final[str] = "\x01" * _MAX_TRASH_NAME_CHARS
 # Chunk size for hashing a staging file (bounded: at most
 # MAX_WRITE_BYTES, read in bounded blocks, never loaded whole).
 _SHA256_CHUNK_BYTES: Final[int] = 256 * 1024
@@ -2155,6 +2164,26 @@ class HostFsService:
                             dst_dir_fd=fd,
                         )
                     except FileExistsError as exc:
+                        # E03-T08 (Codex round 9, finding 2): the
+                        # target appeared after this call created
+                        # its parents, so already_exists alone does
+                        # not prove no_effect -- the created
+                        # directories are still on disk. Roll the
+                        # call's whole footprint back (staging temp
+                        # + parents, round 5 discipline); a confirmed
+                        # rollback keeps already_exists, anything
+                        # left behind is io_error/unknown. A lost
+                        # race to the same target normally ends
+                        # unknown: the competitor's file inside the
+                        # parents makes the deepest rmdir fail.
+                        if parents_created and not self._undo_created_write(
+                            fd, session, target.root, parents_created
+                        ):
+                            raise FsError(
+                                "io_error",
+                                "target already exists and the created "
+                                "parents could not be removed",
+                            ) from exc
                         raise FsError(
                             "already_exists", f"target already exists: {target.display}"
                         ) from exc
@@ -2644,10 +2673,11 @@ class HostFsService:
             token.check()
             # E03-T08 (owner condition 5): the trash name the loop
             # finally picks is unknown here, so the projection uses
-            # the longest possible trash name (_MAX_TRASH_NAME_CHARS)
-            # — the frame check then holds for any candidate, and it
-            # runs before any .trashinfo is written, so an overflow
-            # fails with effect_build_failed before the mutation.
+            # the longest possible SERIALIZED trash name
+            # (_WORST_CASE_TRASH_NAME) -- the frame check then holds
+            # for any candidate, and it runs before any .trashinfo
+            # is written, so an overflow fails with
+            # effect_build_failed before the mutation.
             projection = self._effect_emitter.build_projection(
                 kind="fs.delete",
                 principal_id=principal_id,
@@ -2655,14 +2685,14 @@ class HostFsService:
                 fields={
                     "root_id": target.root.id,
                     "path": target.display,
-                    "trash_name": "x" * _MAX_TRASH_NAME_CHARS,
+                    "trash_name": _WORST_CASE_TRASH_NAME,
                     "recoverable": True,
                 },
             )
             deleted_result: dict[str, object] = {
                 "root_id": target.root.id,
                 "path": target.display,
-                "trash_name": "x" * _MAX_TRASH_NAME_CHARS,
+                "trash_name": _WORST_CASE_TRASH_NAME,
                 "recoverable": True,
                 "effect": projection,
             }
