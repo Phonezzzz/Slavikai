@@ -5,9 +5,11 @@ only), plus the daemon effect block when the call returned one.
 The journal answers "did this mutation happen, and what did it
 change" — the audit trail T11's ToolGateway wiring will feed.
 
-Schema (v1, own ``user_version`` from 1 — a separate file from
+Schema (v2, own ``user_version`` from 1 — a separate file from
 ``TaskRunStore``/``ui_storage``, so migration-number collisions
-are impossible by construction, C-F1):
+are impossible by construction, C-F1). v1 -> v2 adds only the
+``pruned_daemon_ranges`` table (Codex round 1, finding 4); no
+existing row changes.
 
 - ``effect_records``: one row per recorded call. ``seq`` is the
   server sequence (monotonic, never re-used — assigned from a
@@ -24,6 +26,14 @@ are impossible by construction, C-F1):
   ``resolved_by_seq``/``resolved_at`` pointing at the confirmed
   effect that resolved it (owner condition 2) — the attempt row
   stays as history, it is never rewritten.
+- ``pruned_daemon_ranges``: the daemon seqs retention deleted,
+  as merged ``[seq_from, seq_to]`` intervals per boot. Gap
+  detection subtracts them: a hole fully covered by pruned
+  intervals is an intentional prune, not a lost effect. In
+  normal in-order delivery this is one interval per boot; the
+  pathological alternating out-of-order case is bounded by the
+  number of pruned daemon effects. Rows for boots with no
+  retained effect rows are dropped with the prune.
 - ``effect_observations``: delayed observations attached to an
   effect (poll-loop re-check, manual re-check, the E05-T02 binder
   once C-V1 lands). ``UNIQUE (effect_seq, source,
@@ -62,7 +72,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeVar
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 # Retention bounds (owner conditions 3 and 7).
 DEFAULT_EFFECT_CAP = 10_000
@@ -73,6 +83,13 @@ DEFAULT_OBSERVATION_CAP = 100_000
 # delivery gets a grace window first.
 GAP_GRACE_S = 60.0
 MAX_GAP_ENTRIES = 100
+
+_PRUNED_RANGES_TABLE = """CREATE TABLE IF NOT EXISTS pruned_daemon_ranges (
+        daemon_boot_id TEXT NOT NULL,
+        seq_from INTEGER NOT NULL,
+        seq_to INTEGER NOT NULL,
+        PRIMARY KEY (daemon_boot_id, seq_from)
+    );"""
 
 _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS effect_meta (
@@ -111,6 +128,7 @@ _SCHEMA = (
         observation_sha256 TEXT NOT NULL,
         UNIQUE (effect_seq, source, observation_sha256)
     );""",
+    _PRUNED_RANGES_TABLE,
     # Effect rows are immutable except the resolution link on an
     # unknown row (owner condition 2): resolved_by_seq/resolved_at
     # go NULL -> set exactly once, everything else must be unchanged.
@@ -141,6 +159,10 @@ _SCHEMA = (
     BEGIN SELECT RAISE(ABORT, 'effect observation is immutable'); END;""",
 )
 
+# v1 -> v2 (Codex round 1, finding 4): only the pruned-ranges
+# table; no existing row changes.
+_MIGRATION_1_TO_2 = (_PRUNED_RANGES_TABLE,)
+
 _EXPECTED_COLUMNS = {
     "effect_meta": ["key", "value"],
     "effect_records": [
@@ -169,9 +191,42 @@ _EXPECTED_COLUMNS = {
         "observation_json",
         "observation_sha256",
     ],
+    "pruned_daemon_ranges": ["daemon_boot_id", "seq_from", "seq_to"],
 }
 
 _T = TypeVar("_T")
+
+
+def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Merge overlapping or adjacent [from, to] intervals, sorted."""
+    merged: list[tuple[int, int]] = []
+    for low, high in sorted(intervals):
+        if merged and low <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], high))
+        else:
+            merged.append((low, high))
+    return merged
+
+
+def _subtract_intervals(
+    low: int, high: int, covered: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    """Parts of [low, high] not covered by any interval, in order."""
+    remaining: list[tuple[int, int]] = [(low, high)]
+    for cover_low, cover_high in sorted(covered):
+        nxt: list[tuple[int, int]] = []
+        for seg_low, seg_high in remaining:
+            if cover_high < seg_low or cover_low > seg_high:
+                nxt.append((seg_low, seg_high))
+                continue
+            if seg_low < cover_low:
+                nxt.append((seg_low, cover_low - 1))
+            if seg_high > cover_high:
+                nxt.append((cover_high + 1, seg_high))
+        remaining = nxt
+        if not remaining:
+            break
+    return remaining
 
 
 class BridgeEffectStore:
@@ -203,6 +258,14 @@ class BridgeEffectStore:
             conn.execute("BEGIN IMMEDIATE")
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             if version == _SCHEMA_VERSION:
+                self._validate_schema(conn)
+                return
+            if version == 1:
+                # v1 -> v2 (Codex round 1, finding 4): add the
+                # pruned-ranges table; no existing row changes.
+                for statement in _MIGRATION_1_TO_2:
+                    conn.execute(statement)
+                conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
                 self._validate_schema(conn)
                 return
             occupied = conn.execute(
@@ -285,8 +348,11 @@ class BridgeEffectStore:
         identity is. Resolution (owner condition 2): when the new
         row is a confirmed effect, unresolved ``unknown`` rows with
         the same ``request_id`` gain the resolution link in the
-        same transaction; the attempt rows stay as history.
-        Retention: the oldest rows are pruned (with their
+        same transaction; the attempt rows stay as history. A
+        duplicate delivery of a confirmed effect resolves them
+        too (Codex round 1, finding 2): effect -> timeout -> the
+        same effect must not leave the timeout row unknown
+        forever. Retention: the oldest rows are pruned (with their
         observations, same transaction) past ``effect_cap``.
         """
         now = recorded_at or datetime.now(UTC).isoformat()
@@ -299,11 +365,16 @@ class BridgeEffectStore:
                     (daemon_boot_id, daemon_seq),
                 ).fetchone()
                 if existing is not None:
+                    resolved_dup = (
+                        self._resolve_unknowns_for_request(conn, request_id, existing["seq"], now)
+                        if existing["outcome"] == "effect"
+                        else []
+                    )
                     return {
                         "seq": existing["seq"],
                         "outcome": existing["outcome"],
                         "duplicate": True,
-                        "resolved_unknown_seqs": [],
+                        "resolved_unknown_seqs": resolved_dup,
                     }
             seq = conn.execute("SELECT value FROM effect_meta WHERE key = 'next_seq'").fetchone()[
                 "value"
@@ -337,28 +408,33 @@ class BridgeEffectStore:
                 # patch_mismatch on retry after a successful apply,
                 # or run_stopped after a concurrent STOP, proves
                 # nothing about the first attempt.
-                resolved = [
-                    row["seq"]
-                    for row in conn.execute(
-                        "SELECT seq FROM effect_records WHERE request_id = ?"
-                        " AND outcome = 'unknown' AND resolved_by_seq IS NULL AND seq != ?",
-                        (request_id, seq),
-                    ).fetchall()
-                ]
-                for unknown_seq in resolved:
-                    conn.execute(
-                        "UPDATE effect_records SET resolved_by_seq = ?, resolved_at = ?"
-                        " WHERE seq = ?",
-                        (seq, now, unknown_seq),
-                    )
+                resolved = self._resolve_unknowns_for_request(conn, request_id, seq, now)
             over = (
                 conn.execute("SELECT count(*) FROM effect_records").fetchone()[0] - self._effect_cap
             )
             if over > 0:
+                # The rows about to be deleted, by server seq — the
+                # same set the DELETE below removes (Codex round 1,
+                # finding 4): their daemon seqs are pruned, not
+                # lost, so gap detection must know about them.
+                doomed = conn.execute(
+                    "SELECT daemon_boot_id, daemon_seq FROM effect_records"
+                    " WHERE seq IN (SELECT seq FROM effect_records ORDER BY seq ASC LIMIT ?)"
+                    " AND daemon_seq IS NOT NULL",
+                    (over,),
+                ).fetchall()
                 conn.execute(
                     "DELETE FROM effect_records WHERE seq IN ("
                     " SELECT seq FROM effect_records ORDER BY seq ASC LIMIT ?)",
                     (over,),
+                )
+                self._record_pruned_ranges(conn, doomed)
+                # Prune data for boots with no retained rows is dead
+                # weight: their gaps can never be computed.
+                conn.execute(
+                    "DELETE FROM pruned_daemon_ranges WHERE daemon_boot_id NOT IN ("
+                    " SELECT DISTINCT daemon_boot_id FROM effect_records"
+                    " WHERE daemon_seq IS NOT NULL)"
                 )
             return {
                 "seq": seq,
@@ -368,6 +444,65 @@ class BridgeEffectStore:
             }
 
         return self._write(_insert)
+
+    @staticmethod
+    def _resolve_unknowns_for_request(
+        conn: sqlite3.Connection, request_id: str, effect_seq: int, now: str
+    ) -> list[int]:
+        """Link unresolved unknown rows for this logical request to
+        the confirmed effect (owner condition 2). The attempt rows
+        stay as history; only the resolution link is set (the
+        trigger permits exactly this mutation)."""
+        resolved = [
+            row["seq"]
+            for row in conn.execute(
+                "SELECT seq FROM effect_records WHERE request_id = ?"
+                " AND outcome = 'unknown' AND resolved_by_seq IS NULL AND seq != ?",
+                (request_id, effect_seq),
+            ).fetchall()
+        ]
+        for unknown_seq in resolved:
+            conn.execute(
+                "UPDATE effect_records SET resolved_by_seq = ?, resolved_at = ? WHERE seq = ?",
+                (effect_seq, now, unknown_seq),
+            )
+        return resolved
+
+    @staticmethod
+    def _record_pruned_ranges(conn: sqlite3.Connection, doomed: list[sqlite3.Row]) -> None:
+        """Remember the daemon seqs retention just deleted, as
+        merged intervals per boot (Codex round 1, finding 4). A
+        hole in the retained daemon sequence is a real gap only
+        where it is NOT covered by these intervals."""
+        by_boot: dict[str, list[int]] = {}
+        for row in doomed:
+            by_boot.setdefault(row["daemon_boot_id"], []).append(row["daemon_seq"])
+        for boot_id, seqs in by_boot.items():
+            seqs.sort()
+            fresh: list[tuple[int, int]] = []
+            start = prev = seqs[0]
+            for seq in seqs[1:]:
+                if seq <= prev + 1:
+                    prev = seq
+                else:
+                    fresh.append((start, prev))
+                    start = prev = seq
+            fresh.append((start, prev))
+            existing = [
+                (row["seq_from"], row["seq_to"])
+                for row in conn.execute(
+                    "SELECT seq_from, seq_to FROM pruned_daemon_ranges"
+                    " WHERE daemon_boot_id = ? ORDER BY seq_from",
+                    (boot_id,),
+                ).fetchall()
+            ]
+            merged = _merge_intervals(existing + fresh)
+            conn.execute("DELETE FROM pruned_daemon_ranges WHERE daemon_boot_id = ?", (boot_id,))
+            conn.executemany(
+                "INSERT INTO pruned_daemon_ranges (daemon_boot_id, seq_from, seq_to)"
+                " VALUES (?, ?, ?)",
+                [(boot_id, low, high) for low, high in merged],
+            )
 
     def has_request_id(self, request_id: str) -> bool:
         """True when any row already exists for this logical request
@@ -583,11 +718,21 @@ class BridgeEffectStore:
         hole is ``suspected`` only once the record above it is
         older than the grace window — a late (out-of-order)
         delivery above the floor closes the hole at read time.
+        Retention prunes by server seq (arrival order), so it can
+        also delete the MIDDLE of the retained daemon sequence
+        (Codex round 1, finding 4): the pruned intervals recorded
+        at prune time are subtracted first, and only the part of
+        a hole that was never delivered is reported.
         """
         rows = conn.execute(
             "SELECT daemon_boot_id, daemon_seq, recorded_at FROM effect_records"
             " WHERE daemon_seq IS NOT NULL ORDER BY daemon_boot_id, daemon_seq"
         ).fetchall()
+        pruned: dict[str, list[tuple[int, int]]] = {}
+        for row in conn.execute(
+            "SELECT daemon_boot_id, seq_from, seq_to FROM pruned_daemon_ranges"
+        ).fetchall():
+            pruned.setdefault(row["daemon_boot_id"], []).append((row["seq_from"], row["seq_to"]))
         by_boot: dict[str, list[tuple[int, str]]] = {}
         for row in rows:
             by_boot.setdefault(row["daemon_boot_id"], []).append(
@@ -604,21 +749,24 @@ class BridgeEffectStore:
                     upper_recorded = datetime.fromisoformat(upper_at)
                 except ValueError:
                     upper_recorded = now
-                gaps.append(
-                    {
-                        "daemon_boot_id": boot_id,
-                        "missing_from": lower + 1,
-                        "missing_to": upper - 1,
-                        # The floor is lower (the min retained seq) -
-                        # 1 by construction: every hole found here
-                        # lies above it, so it is never a prune
-                        # artifact. A late delivery closes it at
-                        # read time (the hole disappears).
-                        "suspected": upper_recorded < grace_before,
-                    }
-                )
-                if len(gaps) >= MAX_GAP_ENTRIES:
-                    return gaps
+                # The floor is lower (the min retained seq) -
+                # 1 by construction: every hole found here
+                # lies above it, so it is never a prune
+                # artifact. A late delivery closes it at
+                # read time (the hole disappears).
+                for missing_from, missing_to in _subtract_intervals(
+                    lower + 1, upper - 1, pruned.get(boot_id, [])
+                ):
+                    gaps.append(
+                        {
+                            "daemon_boot_id": boot_id,
+                            "missing_from": missing_from,
+                            "missing_to": missing_to,
+                            "suspected": upper_recorded < grace_before,
+                        }
+                    )
+                    if len(gaps) >= MAX_GAP_ENTRIES:
+                        return gaps
         return gaps
 
     @staticmethod

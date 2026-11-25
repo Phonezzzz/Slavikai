@@ -302,7 +302,17 @@ class BridgeEffectRecorder:
         code: str,
         message: str,
     ) -> RecordOutcome:
-        is_retry = self._store.has_request_id(request_id)
+        try:
+            is_retry = self._store.has_request_id(request_id)
+        except Exception:
+            # The journal cannot be read (locked, schema
+            # unavailable): the history is unverifiable, so fail
+            # closed — classify as a retry. A potential retry must
+            # never be classified as a proven no_effect. _persist
+            # below still converts a persist failure to audit_gap,
+            # so the typed bridge error is never replaced by a
+            # journal error (Codex round 1, finding 3).
+            is_retry = True
         outcome, unknown_reason = self._classify_error(code, message, is_retry=is_retry)
         return self._persist(
             capability=capability,

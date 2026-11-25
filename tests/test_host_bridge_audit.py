@@ -605,6 +605,45 @@ def test_run_retry_reattaches_the_original_effect(bridge: Path) -> None:
     assert second_effect["boot_id"] == first_effect["boot_id"]
 
 
+def test_run_retry_after_kill_reattaches_run_effect(bridge: Path) -> None:
+    """Codex round 1, finding 1 (reverse half): a successful kill
+    must not overwrite the stored launch effect. A retry of the
+    original run with the same request_id re-attaches the RUN
+    effect, not the kill effect. Before the fix the repeat run
+    answered with the kill effect and the client rejected it as
+    malformed_response (kind mismatch)."""
+    first = _call(
+        bridge,
+        "host.process.run",
+        params={"profile_id": "sleep", "args": ["2"]},
+        request_id="run-kill-retry",
+        run_id="run-C",
+    )
+    assert first["state"] == "running"
+    first_effect = _assert_effect_shape(first.get("effect"), kind="process.run")
+    process_id = first["process_id"]
+    assert isinstance(process_id, str)
+    kill = _call(
+        bridge, "host.process.kill", params={"process_id": process_id}, request_id="kill-3"
+    )
+    assert kill["state"] in ("killed", "killing")
+    kill_effect = _assert_effect_shape(kill.get("effect"), kind="process.kill")
+    assert kill_effect["seq"] != first_effect["seq"]
+    # The original run, retried with the same request_id, answers
+    # with its own launch effect — never the kill effect.
+    retry = _call(
+        bridge,
+        "host.process.run",
+        params={"profile_id": "sleep", "args": ["2"]},
+        request_id="run-kill-retry",
+        run_id="run-C",
+    )
+    assert retry["process_id"] == process_id
+    retry_effect = _assert_effect_shape(retry.get("effect"), kind="process.run")
+    assert retry_effect["seq"] == first_effect["seq"]
+    assert retry_effect["boot_id"] == first_effect["boot_id"]
+
+
 def test_boot_id_rotates_on_restart(
     fs_service: HostFsService, proc_service: HostProcessService, tmp_path: Path
 ) -> None:
@@ -839,6 +878,48 @@ def test_kill_final_record_has_no_effect(proc_service: HostProcessService) -> No
     proc_service._records[record.process_id] = record
     result = proc_service.handle(
         "host.process.kill", {"process_id": record.process_id}, "kill-final", _token()
+    )
+    assert result["state"] == "exited"
+    assert result["exit_code"] == 0
+    assert "effect" not in result
+
+
+def test_kill_final_record_with_run_effect_returns_no_effect(
+    proc_service: HostProcessService,
+) -> None:
+    """Codex round 1, finding 1: the launch effect stored on the
+    record must NOT leak into a kill answer. A kill of a process
+    that already exited on its own requests nothing — the answer
+    carries no effect block (the recorder reads that as no_effect),
+    even though the record still holds its run effect. Before the
+    fix the kill answered with the run effect and the client
+    rejected it as malformed_response (kind mismatch)."""
+    record = _Record(
+        process_id=uuid.uuid4().hex,
+        profile_id="true",
+        state="exited",
+        run_id="run-1",
+        principal_id=_OWNER,
+        started_at=datetime.now(UTC).isoformat(),
+        finished_at=datetime.now(UTC).isoformat(),
+        exit_code=0,
+        exit_signal=None,
+        started_mono=time.monotonic(),
+        final=True,
+    )
+    record.effect = {
+        "seq": 1,
+        "boot_id": "b" * 32,
+        "kind": "process.run",
+        "at": datetime.now(UTC).isoformat(),
+        "principal_id": _OWNER,
+        "run_id": "run-1",
+        "process_id": record.process_id,
+        "state": "exited",
+    }
+    proc_service._records[record.process_id] = record
+    result = proc_service.handle(
+        "host.process.kill", {"process_id": record.process_id}, "kill-final-run", _token()
     )
     assert result["state"] == "exited"
     assert result["exit_code"] == 0

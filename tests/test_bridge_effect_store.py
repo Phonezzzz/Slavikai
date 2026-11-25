@@ -92,17 +92,85 @@ def _attach(
 # --- schema ------------------------------------------------------------------
 
 
-def test_schema_created_v1(tmp_path: Path) -> None:
+def test_schema_created_v2(tmp_path: Path) -> None:
     store = BridgeEffectStore(tmp_path / "effects.db")
     with sqlite3.connect(store.path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
         tables = {
             row[0]
             for row in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
             ).fetchall()
         }
-    assert tables == {"effect_meta", "effect_records", "effect_observations"}
+    assert tables == {
+        "effect_meta",
+        "effect_records",
+        "effect_observations",
+        "pruned_daemon_ranges",
+    }
+
+
+def test_v1_database_migrates_to_v2(tmp_path: Path) -> None:
+    """A journal written by the v1 schema (PR #209 head) opens
+    under v2: the pruned-ranges table appears, existing rows are
+    untouched, and recording keeps working."""
+    path = tmp_path / "effects.db"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE effect_meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+            CREATE TABLE effect_records (
+                seq INTEGER PRIMARY KEY,
+                recorded_at TEXT NOT NULL,
+                daemon_boot_id TEXT,
+                daemon_seq INTEGER,
+                request_id TEXT NOT NULL,
+                capability TEXT NOT NULL,
+                principal_id TEXT,
+                run_id TEXT,
+                params_json TEXT NOT NULL,
+                effect_json TEXT,
+                outcome TEXT NOT NULL CHECK (outcome IN ('effect', 'no_effect', 'unknown')),
+                error_code TEXT,
+                unknown_reason TEXT,
+                resolved_by_seq INTEGER REFERENCES effect_records(seq),
+                resolved_at TEXT,
+                CHECK ((daemon_boot_id IS NULL) = (daemon_seq IS NULL)),
+                CHECK ((outcome = 'effect') = (effect_json IS NOT NULL)),
+                CHECK ((outcome = 'unknown') = (unknown_reason IS NOT NULL))
+            );
+            CREATE UNIQUE INDEX effect_emission_identity
+                ON effect_records (daemon_boot_id, daemon_seq) WHERE daemon_seq IS NOT NULL;
+            CREATE TABLE effect_observations (
+                id INTEGER PRIMARY KEY,
+                effect_seq INTEGER NOT NULL REFERENCES effect_records(seq) ON DELETE CASCADE,
+                attached_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_ref TEXT,
+                observation_json TEXT NOT NULL,
+                observation_sha256 TEXT NOT NULL,
+                UNIQUE (effect_seq, source, observation_sha256)
+            );
+            INSERT INTO effect_meta (key, value) VALUES ('next_seq', 2);
+            INSERT INTO effect_records
+                (seq, recorded_at, daemon_boot_id, daemon_seq, request_id, capability,
+                 principal_id, run_id, params_json, effect_json, outcome, error_code,
+                 unknown_reason)
+                VALUES (1, '2026-11-25T00:00:00+00:00', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        1, 'req-1', 'host.fs.write', 'owner', NULL,
+                        '{"path": "a.txt"}', '{"kind": "fs.write"}', 'effect', NULL, NULL);
+            PRAGMA user_version = 1;
+            """
+        )
+    store = BridgeEffectStore(path)
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    record = store.get_record(1)
+    assert record is not None
+    assert record["daemon_seq"] == 1
+    stored = _record(store, request_id="req-2", effect=_effect(seq=2))
+    assert stored["seq"] == 2
+    assert store.count() == 2
 
 
 def test_unknown_schema_fails_closed(tmp_path: Path) -> None:
@@ -172,6 +240,28 @@ def test_different_boots_may_reuse_seq(tmp_path: Path) -> None:
 
 
 # --- unknown resolution (owner condition 2) -----------------------------------
+
+
+def test_duplicate_effect_resolves_unknown(tmp_path: Path) -> None:
+    """Codex round 1, finding 2: effect -> timeout (unknown) ->
+    the SAME effect again. The duplicate delivery must still
+    resolve the unknown row left by the lost answer — the
+    confirmed effect is already in the journal, so the unknown
+    cannot stay unresolved forever. Before the fix the duplicate
+    branch returned early and never linked the resolution."""
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    effect = _record(store, request_id="req-1", effect=_effect(seq=7))
+    unknown = _record(store, request_id="req-1", outcome="unknown", unknown_reason="timeout")
+    duplicate = _record(store, request_id="req-1", effect=_effect(seq=7))
+    assert duplicate["duplicate"] is True
+    assert duplicate["seq"] == effect["seq"]
+    assert duplicate["resolved_unknown_seqs"] == [unknown["seq"]]
+    attempt = store.get_record(int(unknown["seq"]))
+    assert attempt is not None
+    assert attempt["outcome"] == "unknown"  # history is not rewritten
+    assert attempt["resolved_by_seq"] == effect["seq"]
+    assert attempt["resolved_at"] is not None
+    assert store.count() == 2  # no second effect row
 
 
 def test_confirmed_effect_resolves_unknown(tmp_path: Path) -> None:
@@ -332,6 +422,52 @@ def test_retention_floor_is_not_a_gap(tmp_path: Path) -> None:
     # seq 1 was pruned; the floor is 1. No hole is reported for it.
     page = store.list_effects(principal_id=_OWNER, include_gaps=True)
     assert page["gaps"] == []
+
+
+def test_pruned_middle_seq_is_not_a_gap(tmp_path: Path) -> None:
+    """Codex round 1, finding 4: retention prunes by server seq
+    (arrival order), but gaps are computed over daemon_seq. When
+    effects arrive out of order, pruning can delete the MIDDLE of
+    the retained daemon sequence — that is an intentional prune,
+    not a lost effect, and must not be reported as a gap."""
+    store = BridgeEffectStore(tmp_path / "effects.db", effect_cap=2)
+    _record(store, request_id="r2", effect=_effect(seq=2), recorded_at=_old_time(300))
+    _record(store, request_id="r1", effect=_effect(seq=1), recorded_at=_old_time(300))
+    _record(store, request_id="r3", effect=_effect(seq=3), recorded_at=_old_time(300))
+    # Daemon seq 2 arrived first, so it is the oldest server row
+    # and retention pruned it; 1 and 3 remain.
+    assert store.count() == 2
+    page = store.list_effects(principal_id=_OWNER, include_gaps=True)
+    assert page["gaps"] == []
+
+
+def test_partially_pruned_hole_reports_only_real_gap(tmp_path: Path) -> None:
+    """A hole that is part pruned, part never-delivered reports
+    only the never-delivered part: seq 2 was recorded and pruned,
+    seq 3 was never delivered at all."""
+    store = BridgeEffectStore(tmp_path / "effects.db", effect_cap=2)
+    _record(store, request_id="r2", effect=_effect(seq=2), recorded_at=_old_time(300))
+    _record(store, request_id="r1", effect=_effect(seq=1), recorded_at=_old_time(300))
+    _record(store, request_id="r4", effect=_effect(seq=4), recorded_at=_old_time(300))
+    page = store.list_effects(principal_id=_OWNER, include_gaps=True)
+    assert page["gaps"] == [
+        {"daemon_boot_id": _BOOT, "missing_from": 3, "missing_to": 3, "suspected": True}
+    ]
+
+
+def test_pruned_ranges_stay_compact_for_in_order_delivery(tmp_path: Path) -> None:
+    """In-order delivery prunes a contiguous prefix: the pruned
+    ranges collapse to one interval per boot, not one row per
+    pruned seq."""
+    store = BridgeEffectStore(tmp_path / "effects.db", effect_cap=3)
+    for seq in range(1, 7):
+        _record(store, request_id=f"r{seq}", effect=_effect(seq=seq))
+    assert store.count() == 3
+    with sqlite3.connect(store.path) as conn:
+        rows = conn.execute(
+            "SELECT daemon_boot_id, seq_from, seq_to FROM pruned_daemon_ranges"
+        ).fetchall()
+    assert [(row[0], row[1], row[2]) for row in rows] == [(_BOOT, 1, 3)]
 
 
 # --- bounded persistence (owner condition 4) ----------------------------------

@@ -1846,7 +1846,15 @@ class _Record:
     # here so a retry with the same request_id re-attaches the
     # ORIGINAL effect (same (boot_id, seq)) instead of emitting a
     # second one — the recorder dedupes by emission identity.
+    # The kill effect lives in ``kill_effect`` below, never here.
     effect: dict[str, object] | None = None
+    # Confirmed effect of this process's kill (E03-T08, Codex
+    # round 1, finding 1): stored SEPARATELY from the launch
+    # effect. One shared slot made a kill answer re-attach the
+    # run effect (and a run retry re-attach the kill effect), and
+    # the client rejected both as malformed_response (kind
+    # mismatch against the capability).
+    kill_effect: dict[str, object] | None = None
     # Pre-spawn effect projection (E03-T08, owner condition 5):
     # frame-budgeted before the spawn; finalized into ``effect`` by
     # ``_run_result`` once the record's state is known. Survives on
@@ -2804,11 +2812,14 @@ class HostProcessService:
         new_kill = False
 
         def _answer(state: str, exit_code: object, exit_signal: object) -> dict[str, object]:
-            """Kill result with the effect attached when this call
-            (or an earlier one, via the stored effect) requested
-            the kill. A final record with no stored effect died on
-            its own: no effect — the recorder reads that as
-            no_effect for this call."""
+            """Kill result with the kill effect attached when this
+            call (or an earlier one, via the stored kill effect)
+            requested the kill. A final record with no stored kill
+            effect died on its own (or was never kill-requested):
+            no effect — the recorder reads that as no_effect for
+            this call. The launch effect is never returned here:
+            it lives in ``record.effect`` and only ``_run_result``
+            answers with it (Codex round 1, finding 1)."""
             result: dict[str, object] = {
                 "process_id": record.process_id,
                 "state": state,
@@ -2825,10 +2836,10 @@ class HostProcessService:
                         "signal": exit_signal,
                     },
                 )
-                record.effect = effect
+                record.kill_effect = effect
                 result["effect"] = effect
-            elif record.effect is not None:
-                result["effect"] = record.effect
+            elif record.kill_effect is not None:
+                result["effect"] = record.kill_effect
             return result
 
         if record.final:

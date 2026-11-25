@@ -9,6 +9,7 @@ answers are covered by test_host_bridge_audit.py.
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -603,5 +604,68 @@ def test_persist_failure_becomes_audit_gap_not_an_exception(
         result=_write_result(effect=_effect(seq=1)),
     )
     assert outcome.outcome == "effect"
+    assert outcome.seq is None
+    assert outcome.audit_gap is True
+
+
+def test_error_retry_lookup_failure_is_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 1, finding 3: when the journal cannot be read
+    (locked, schema unavailable), the retry lookup must not raise
+    out of record_error and replace the typed bridge error. The
+    history is unverifiable, so the call is classified as a retry
+    (fail-closed: process_not_found is unknown, not no_effect),
+    and the row is still persisted through _persist."""
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    recorder = BridgeEffectRecorder(store)
+
+    def _boom(request_id: str) -> bool:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store, "has_request_id", _boom)
+    outcome = recorder.record_error(
+        capability="host.process.kill",
+        request_id="req-1",
+        principal_id=_OWNER,
+        run_id=None,
+        params={"process_id": "p1"},
+        code="process_not_found",
+        message="process_not_found happened",
+    )
+    assert outcome.outcome == "unknown"
+    assert outcome.seq is not None
+    assert outcome.audit_gap is False
+    record = store.get_record(int(outcome.seq or 0))
+    assert record is not None
+    assert record["unknown_reason"] == "process_not_found_on_retry"
+
+
+def test_error_retry_lookup_and_persist_failure_keeps_bridge_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 1, finding 3, journal fully down: both the
+    retry lookup and the persist fail. record_error still returns
+    a fail-closed outcome with audit_gap=True instead of raising
+    — the caller (BridgeClient) then raises RecordedBridgeError
+    with the ORIGINAL bridge code, never the SQLite error."""
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    recorder = BridgeEffectRecorder(store)
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("injected store failure")
+
+    monkeypatch.setattr(store, "has_request_id", _boom)
+    monkeypatch.setattr(store, "record_call", _boom)
+    outcome = recorder.record_error(
+        capability="host.process.kill",
+        request_id="req-1",
+        principal_id=_OWNER,
+        run_id=None,
+        params={"process_id": "p1"},
+        code="process_not_found",
+        message="process_not_found happened",
+    )
+    assert outcome.outcome == "unknown"
     assert outcome.seq is None
     assert outcome.audit_gap is True
