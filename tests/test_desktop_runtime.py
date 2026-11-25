@@ -10,14 +10,21 @@ from core.desktop_runtime import (
     DesktopRuntime,
 )
 from core.desktop_security import DesktopPathSecurity
-from core.mwv.models import VerificationStatus
+from core.mwv.models import VerificationResult, VerificationStatus
 from core.mwv.verifier_runtime import VerifierRuntime
+from core.postconditions import (
+    FileInfo,
+    Postcondition,
+    PostconditionKind,
+    ServiceStateParams,
+)
 from core.response_preferences import ResponsePreferences
 from core.run_contract import RunPolicy
+from core.run_outcome import VerificationOutcome
 from core.tool_gateway import ToolGateway
 from llm.brain_base import Brain
 from llm.types import LLMResult, ToolCall
-from shared.models import LLMMessage, ToolRequest, ToolResult
+from shared.models import JSONValue, LLMMessage, ToolRequest, ToolResult
 from tools.desktop_tools import (
     DesktopFileReadTool,
     DesktopFileSearchTool,
@@ -415,6 +422,63 @@ def test_mode_switch_cancellation_stops_before_host_tool_call(tmp_path: Path) ->
 
     assert outcome.loop_result.cancelled
     assert not path.exists()
+
+
+class _CountingPostconditionReader:
+    """Reader that records service_status calls (never touches the host).
+
+    Any unexpected read fails loudly: on the cancelled path no reader
+    may run at all.
+    """
+
+    def __init__(self) -> None:
+        self.service_calls: list[tuple[str, str]] = []
+
+    def describe_file(self, path: str) -> FileInfo:
+        raise AssertionError(f"describe_file must not run after cancellation: {path}")
+
+    def read_file(self, path: str) -> bytes | None:
+        raise AssertionError(f"read_file must not run after cancellation: {path}")
+
+    def process_status(self, process_id: str) -> dict[str, JSONValue] | None:
+        raise AssertionError(f"process_status must not run after cancellation: {process_id}")
+
+    def os_process_running(self, pid: int) -> tuple[bool, float | None]:
+        raise AssertionError(f"os_process_running must not run after cancellation: {pid}")
+
+    def service_status(self, unit: str, scope: str) -> dict[str, JSONValue] | None:
+        self.service_calls.append((unit, scope))
+        return {"active_state": "active"}
+
+    def canonical_check(self) -> VerificationResult:
+        raise AssertionError("canonical_check must not run after cancellation")
+
+
+def test_cancelled_desktop_run_skips_typed_postcondition_reads(tmp_path: Path) -> None:
+    # Round-1 finding: a cancelled loop must not run typed checks —
+    # readers would spawn fresh work (systemctl, canonical check)
+    # after the cancellation and delay lease release. The cancelled
+    # outcome keeps verification unknown.
+    token = asyncio.Event()
+    token.set()
+    brain = ScriptedBrain([LLMResult(text="must not run")])
+    reader = _CountingPostconditionReader()
+    pc = Postcondition(
+        kind=PostconditionKind.SERVICE_STATE,
+        params=ServiceStateParams(unit="foo.service", scope="user", expected_active_state="active"),
+        source="test",
+    ).with_revision()
+    outcome = DesktopRuntime(DesktopParent(brain, _desktop_registry(tmp_path))).run(
+        "cancel",
+        cancellation_token=token,
+        postconditions=[pc],
+        postcondition_reader=reader,
+    )
+    assert outcome.loop_result.cancelled
+    assert brain.messages_seen == []
+    assert reader.service_calls == []
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.verification.outcome is VerificationOutcome.UNKNOWN
 
 
 def test_unverified_launched_process_is_cleaned_up_through_gateway(tmp_path: Path) -> None:

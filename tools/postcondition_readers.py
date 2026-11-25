@@ -17,6 +17,7 @@ a fresh read of real state.
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Callable
 
 import psutil
@@ -116,7 +117,12 @@ class DesktopPostconditionReader:
         # Same invocation shape as DesktopSystemdTool._status (same
         # runner, same parser); the reader owns the not-found vs
         # error distinction _status collapses into one failure.
-        completed = self._systemd_runner(argv, timeout=20)
+        try:
+            completed = self._systemd_runner(argv, timeout=20)
+        except subprocess.TimeoutExpired as exc:
+            # A hung systemctl is "could not tell", not a crash of the
+            # verification: the evaluator maps OSError to INCONCLUSIVE.
+            raise OSError(f"systemctl show timed out for {unit}") from exc
         if completed.returncode != 0:
             raise OSError(f"systemctl show failed for {unit}: exit_code={completed.returncode}")
         values = _parse_key_values(completed.stdout)

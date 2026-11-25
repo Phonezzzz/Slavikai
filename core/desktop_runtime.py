@@ -197,7 +197,9 @@ class DesktopRuntime:
         the state reads; without it, reader-dependent checks evaluate
         to BLOCKED (never a pass). Resume re-derives without typed
         checks in T01 — T02 carries bound postconditions through the
-        continuation.
+        continuation. A cancelled loop skips typed checks entirely:
+        no reader runs after the cancellation, and the cancelled
+        outcome keeps verification unknown.
         """
         conversation = tuple(
             LLMMessage(role=message.role, content=message.content)
@@ -580,9 +582,13 @@ class DesktopRuntime:
         # E05-T01: the typed channel joins the same derivation. It
         # reads real state (never a tool's ok flag); a failed typed
         # check gives UNVERIFIED, an unproven one UNKNOWN — never a
-        # silent DONE.
+        # silent DONE. A cancelled loop runs no typed checks: readers
+        # would spawn fresh work (systemctl, canonical check) after
+        # the cancellation and delay lease release; the cancelled
+        # outcome keeps verification unknown (see
+        # outcome_from_loop_result).
         typed_verification = None
-        if postconditions:
+        if postconditions and not loop_result.cancelled:
             typed_verification = self.verifier.verify_postconditions(
                 postconditions,
                 postcondition_reader,

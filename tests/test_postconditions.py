@@ -45,6 +45,7 @@ from core.postconditions import (
     ProcessExitParams,
     ProcessRunningParams,
     ServiceStateParams,
+    browser_expectation_digest,
     check_name,
     evaluate_postcondition,
 )
@@ -189,6 +190,22 @@ def test_postcondition_json_round_trip_all_kinds() -> None:
         source="test",
     ).with_revision()
     assert Postcondition.from_json(registry.to_json()) == registry
+
+
+def test_browser_state_empty_text_round_trips() -> None:
+    # Round-1 finding: an empty text is a valid expectation
+    # (appearance of text from nothing, or clearing to ""); from_json
+    # must not reject it.
+    for params in (
+        BrowserStateParams(
+            entity_id="label", kind="text", after="Saved", before="", has_before=True
+        ),
+        BrowserStateParams(entity_id="label", kind="text", after=""),
+    ):
+        pc = Postcondition(
+            kind=PostconditionKind.BROWSER_STATE, params=params, source="test"
+        ).with_revision()
+        assert Postcondition.from_json(pc.to_json()) == pc
 
 
 def test_revision_is_stable_across_key_order() -> None:
@@ -370,6 +387,37 @@ def test_file_content_exact_match_is_byte_exact(tmp_path: Path) -> None:
         FileContentMatchesParams(path=str(target), expected="exact", match="exact"),
     )
     assert evaluate_postcondition(trailing, reader, now=1.0).outcome is CheckOutcome.FAILED
+
+
+def test_file_content_substring_normalizes_crlf(tmp_path: Path) -> None:
+    # Round-1 finding: the legacy file_contains read with
+    # Path.read_text() (universal newlines), so CRLF text matched an
+    # LF expectation. Substring keeps that normalization.
+    target = tmp_path / "win.txt"
+    target.write_bytes(b"first\r\nsecond\r\n")
+    reader = DesktopPostconditionReader(_security(tmp_path))
+    passing = _bound(
+        PostconditionKind.FILE_CONTENT_MATCHES,
+        FileContentMatchesParams(path=str(target), expected="first\nsecond"),
+    )
+    assert evaluate_postcondition(passing, reader, now=1.0).outcome is CheckOutcome.PASSED
+
+
+def test_file_content_exact_keeps_crlf(tmp_path: Path) -> None:
+    # Exact match keeps byte-exact semantics: no normalization.
+    target = tmp_path / "win.txt"
+    target.write_bytes(b"first\r\nsecond\r\n")
+    reader = DesktopPostconditionReader(_security(tmp_path))
+    lf_exact = _bound(
+        PostconditionKind.FILE_CONTENT_MATCHES,
+        FileContentMatchesParams(path=str(target), expected="first\nsecond", match="exact"),
+    )
+    assert evaluate_postcondition(lf_exact, reader, now=1.0).outcome is CheckOutcome.FAILED
+    crlf_exact = _bound(
+        PostconditionKind.FILE_CONTENT_MATCHES,
+        FileContentMatchesParams(path=str(target), expected="first\r\nsecond\r\n", match="exact"),
+    )
+    assert evaluate_postcondition(crlf_exact, reader, now=1.0).outcome is CheckOutcome.PASSED
 
 
 def test_file_content_missing_is_unknown_not_fail(tmp_path: Path) -> None:
@@ -627,6 +675,24 @@ def test_service_state_reader_error_is_unknown(tmp_path: Path) -> None:
     assert evaluation.evidence["reason"] == "reader_error"
 
 
+def test_service_state_systemd_timeout_is_unknown(tmp_path: Path) -> None:
+    # Round-1 finding: a hung systemctl raises TimeoutExpired from
+    # the runner; the reader converts it to OSError, so the check is
+    # INCONCLUSIVE instead of crashing verify_postconditions.
+    def runner(argv, *, timeout, env=None, input_text=None):
+        del argv, timeout, env, input_text
+        raise subprocess.TimeoutExpired(["systemctl", "show"], 20)
+
+    reader = DesktopPostconditionReader(_security(tmp_path), systemd_runner=runner)
+    pc = _bound(
+        PostconditionKind.SERVICE_STATE,
+        ServiceStateParams(unit="foo.service", scope="user", expected_active_state="active"),
+    )
+    evaluation = evaluate_postcondition(pc, reader, now=1.0)
+    assert evaluation.outcome is CheckOutcome.INCONCLUSIVE
+    assert evaluation.evidence["reason"] == "reader_error"
+
+
 def test_service_state_missing_scope_is_construction_error() -> None:
     with pytest.raises(ValueError):
         ServiceStateParams(unit="foo.service", scope="host", expected_active_state="active")
@@ -639,7 +705,19 @@ def test_service_state_missing_scope_is_construction_error() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _text_facts(*, after_ok: bool = True, before_changed: bool = True, before_ok: bool = True):
+def _text_facts(
+    *,
+    after_ok: bool = True,
+    before_changed: bool = True,
+    before_ok: bool = True,
+    after: str = "Published",
+    before: str | None = None,
+    has_before: bool = False,
+):
+    # Facts carry the digest of the expectation they were computed
+    # against, exactly as the tool stamps them (see
+    # browser_expectation_digest): the checker requires it to equal
+    # the postcondition's revision.
     return [
         {
             "entity_id": "publish-btn",
@@ -647,6 +725,15 @@ def _text_facts(*, after_ok: bool = True, before_changed: bool = True, before_ok
             "after_matches_after": after_ok,
             "before_matches_after": not before_changed,
             "before_matches_expected_before": before_ok,
+            "expectation_sha256": browser_expectation_digest(
+                BrowserStateParams(
+                    entity_id="publish-btn",
+                    kind="text",
+                    after=after,
+                    before=before,
+                    has_before=has_before,
+                ).to_json()
+            ),
         }
     ]
 
@@ -681,6 +768,47 @@ def test_browser_state_changed_after_capture_is_stale() -> None:
     )
     evaluation = evaluate_postcondition(tampered, None, browser_facts=_text_facts(), now=1.0)
     assert evaluation.outcome is CheckOutcome.STALE
+
+
+def test_browser_state_facts_for_other_expectation_do_not_confirm() -> None:
+    # Round-1 finding: facts captured for after="Saved" must not
+    # confirm a postcondition declaring after="Deleted", even though
+    # every comparison boolean is favourable.
+    saved = _text_facts(after="Saved")
+    params = BrowserStateParams(entity_id="publish-btn", kind="text", after="Deleted")
+    evaluation = evaluate_postcondition(
+        _bound(PostconditionKind.BROWSER_STATE, params), None, browser_facts=saved, now=1.0
+    )
+    assert evaluation.outcome is CheckOutcome.FAILED
+    assert evaluation.evidence["reason"] == "browser_postcondition_unconfirmed"
+
+
+def test_browser_state_facts_without_binding_do_not_confirm() -> None:
+    # Facts without the expectation digest fail closed: unbound facts
+    # prove nothing.
+    facts = _text_facts()
+    del facts[0]["expectation_sha256"]
+    params = BrowserStateParams(entity_id="publish-btn", kind="text", after="Published")
+    evaluation = evaluate_postcondition(
+        _bound(PostconditionKind.BROWSER_STATE, params), None, browser_facts=facts, now=1.0
+    )
+    assert evaluation.outcome is CheckOutcome.FAILED
+    assert evaluation.evidence["reason"] == "browser_postcondition_unconfirmed"
+
+
+def test_browser_state_facts_for_other_before_do_not_confirm() -> None:
+    # The digest covers before too: facts bound to before="Pending"
+    # must not confirm a postcondition declaring before="Draft", even
+    # when the before boolean claims a match.
+    facts = _text_facts(after="Published", before="Pending", has_before=True)
+    params = BrowserStateParams(
+        entity_id="publish-btn", kind="text", after="Published", before="Draft", has_before=True
+    )
+    evaluation = evaluate_postcondition(
+        _bound(PostconditionKind.BROWSER_STATE, params), None, browser_facts=facts, now=1.0
+    )
+    assert evaluation.outcome is CheckOutcome.FAILED
+    assert evaluation.evidence["reason"] == "browser_postcondition_unconfirmed"
 
 
 def test_browser_state_count_requires_exactly_one() -> None:
@@ -946,7 +1074,7 @@ def test_forged_before_fails() -> None:
     params = BrowserStateParams(
         entity_id="publish-btn", kind="text", after="Published", before="Draft", has_before=True
     )
-    forged = _text_facts(before_ok=False)
+    forged = _text_facts(before_ok=False, before="Draft", has_before=True)
     evaluation = evaluate_postcondition(
         _bound(PostconditionKind.BROWSER_STATE, params), None, browser_facts=forged, now=1.0
     )

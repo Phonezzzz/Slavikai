@@ -32,6 +32,7 @@ from core.browser_service import (
     validate_browser_profile_dir,
 )
 from core.desktop_security import DesktopPathSecurity
+from core.postconditions import browser_expectation_digest
 from core.user_auth import UserAuthRequest, UserAuthRequired
 from shared.models import JSONValue, ToolRequest, ToolResult
 
@@ -1257,7 +1258,12 @@ class PlaywrightBrowserBackend:
         непрерывность наблюдения: фактов нет, результат
         неподтверждён. Для text в результат идут только факты точного
         сравнения с объявленным ожиданием — сырые строки не покидают
-        tool (result.data целиком уходит модели).
+        tool (result.data целиком уходит модели). Вместе с фактами
+        идёт ``expectation_sha256`` — дайджест объявленного ожидания,
+        против которого посчитаны сравнения: typed-проверка требует
+        его равенства revision посткондишена, иначе факты за одно
+        ожидание подтверждали бы другое. Наблюдённый текст
+        по-прежнему не покидает tool.
         """
         expect = declaration.get("expect")
         if not isinstance(expect, dict):
@@ -1317,6 +1323,21 @@ class PlaywrightBrowserBackend:
                 "entity_id": declaration["entity_id"],
                 "before_matches_after": before == after_expected,
                 "after_matches_after": matched,
+                # Digest of the declared expectation the booleans were
+                # computed against (same payload as
+                # Postcondition.revision for these params): the typed
+                # checker requires it to match, so facts taken for one
+                # expectation cannot confirm another. No observed text
+                # leaves the tool — only this hash of the criterion.
+                "expectation_sha256": browser_expectation_digest(
+                    {
+                        "entity_id": declaration["entity_id"],
+                        "kind": "text",
+                        "after": after_expected,
+                        "before": expect.get("before"),
+                        "has_before": "before" in expect,
+                    }
+                ),
             }
             if "before" in expect:
                 facts["before_matches_expected_before"] = before == expect["before"]

@@ -31,6 +31,7 @@ from core.browser_service import BrowserProfile
 from core.desktop_security import DesktopPathSecurity
 from core.mwv.models import VerificationStatus
 from core.mwv.verifier_runtime import VerifierRuntime
+from core.postconditions import browser_expectation_digest
 from shared.models import JSONValue, ToolRequest, ToolResult
 from tools.desktop_browser_tool import DesktopBrowserTool
 
@@ -194,6 +195,15 @@ def test_browser_state_capture_on_real_browser(tmp_path: Path) -> None:
             "before_matches_after": False,
             "after_matches_after": True,
             "before_matches_expected_before": True,
+            "expectation_sha256": browser_expectation_digest(
+                {
+                    "entity_id": "order-X",
+                    "kind": "text",
+                    "after": "Оплачено",
+                    "before": "Черновик",
+                    "has_before": True,
+                }
+            ),
         }
         assert _verify(click_args, result) == VerificationStatus.PASSED
 

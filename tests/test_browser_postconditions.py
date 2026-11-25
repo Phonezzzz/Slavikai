@@ -44,6 +44,7 @@ from core.desktop_security import DesktopPathSecurity
 from core.managed_workspace import ManagedWorkspace, WorkspaceAccess
 from core.mwv.models import MWV_REPORT_PREFIX, VerificationResult, VerificationStatus
 from core.mwv.verifier_runtime import VerifierRuntime, desktop_last_state_change_succeeded
+from core.postconditions import browser_expectation_digest
 from core.response_preferences import ResponsePreferences
 from core.run_contract import RunPolicy
 from core.run_outcome import TerminalReason, VerificationOutcome, outcome_from_loop_result
@@ -1600,7 +1601,32 @@ def _text_declaration(**overrides: object) -> dict[str, JSONValue]:
     return declaration
 
 
-def _text_facts(**overrides: object) -> dict[str, JSONValue]:
+def _text_expectation_digest() -> str:
+    # Digest of the expectation the default _text_facts() were computed
+    # against (same payload as Postcondition.revision for these params).
+    return browser_expectation_digest(
+        {
+            "entity_id": "order-X",
+            "kind": "text",
+            "after": "Оплачено",
+            "before": "Черновик",
+            "has_before": True,
+        }
+    )
+
+
+def _text_facts(
+    *,
+    after: str = "Оплачено",
+    before: str | None = "Черновик",
+    has_before: bool = True,
+    **overrides: object,
+) -> dict[str, JSONValue]:
+    # Facts carry the digest of the expectation they were computed
+    # against, exactly as the tool stamps them: the digest is computed
+    # from the expectation params (defaults match _text_declaration),
+    # after overrides are applied, so a fact overridden to another
+    # entity still carries a digest for that entity.
     facts: dict[str, JSONValue] = {
         "kind": "text",
         "entity_id": "order-X",
@@ -1609,6 +1635,15 @@ def _text_facts(**overrides: object) -> dict[str, JSONValue]:
         "before_matches_expected_before": True,
     }
     facts.update(overrides)  # type: ignore[arg-type]
+    facts["expectation_sha256"] = browser_expectation_digest(
+        {
+            "entity_id": facts["entity_id"],
+            "kind": "text",
+            "after": after,
+            "before": before,
+            "has_before": has_before,
+        }
+    )
     return facts
 
 
@@ -1698,7 +1733,7 @@ def test_browser_state_declared_before_mismatch_is_unconfirmed() -> None:
 def test_browser_state_without_declared_before_confirms() -> None:
     declaration = _text_declaration()
     declaration["expect"] = {"kind": "text", "after": "Оплачено"}
-    facts = _text_facts()
+    facts = _text_facts(before=None, has_before=False)
     del facts["before_matches_expected_before"]
     call = _declared_call("click", declaration, facts)
 
@@ -2104,6 +2139,7 @@ def test_backend_click_captures_confirmed_text_change(tmp_path: Path) -> None:
         "before_matches_after": False,
         "after_matches_after": True,
         "before_matches_expected_before": True,
+        "expectation_sha256": _text_expectation_digest(),
     }
     # Сырые наблюдённые строки в result.data не попадают: только факты.
     assert "Оплачено" not in json.dumps(result.data, ensure_ascii=False)

@@ -127,6 +127,26 @@ def _canonical_json(value: dict[str, JSONValue]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def browser_expectation_digest(params_json: dict[str, JSONValue]) -> str:
+    """sha256 binding browser facts to the expectation they prove.
+
+    The tool stamps this digest into the ``browser_state`` facts it
+    captures; the typed checker requires it to equal the
+    postcondition's own revision. The payload is exactly what
+    :meth:`Postcondition.revision` hashes for a ``browser_state``
+    postcondition with these params, so facts taken for one
+    expectation (``after="Saved"``) can never confirm a postcondition
+    declaring another (``after="Deleted"``). The digest carries no
+    page text: observed strings never leave the tool, only this hash
+    of the declared criterion does.
+    """
+    payload: dict[str, JSONValue] = {
+        "kind": PostconditionKind.BROWSER_STATE.value,
+        "params": params_json,
+    }
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # Parameters (one frozen dataclass per kind; construction validates).
 # ---------------------------------------------------------------------------
@@ -384,7 +404,11 @@ class BrowserStateParams:
             raise ValueError("kind must be 'text' or 'count'")
         after = data["after"]
         if kind == "text":
-            after = _require_str(after, field_name="after")
+            # Text values may be empty (appearance of text from
+            # nothing, or clearing to ""); only the type is enforced
+            # here, exactly as BrowserStateParams.__post_init__ does.
+            if not isinstance(after, str):
+                raise ValueError("after must be a string for kind 'text'")
         else:
             after = _require_int(after, field_name="after")
         has_before = data.get("has_before", False)
@@ -393,7 +417,8 @@ class BrowserStateParams:
         before = data.get("before")
         if before is not None:
             if kind == "text":
-                before = _require_str(before, field_name="before")
+                if not isinstance(before, str):
+                    raise ValueError("before must be a string for kind 'text'")
             else:
                 before = _require_int(before, field_name="before")
         return cls(
@@ -934,6 +959,10 @@ def evaluate_file_content_matches(
         )
     text = content.decode("utf-8", errors="replace")
     if params.match == "substring":
+        # Legacy file_contains read with Path.read_text(): universal
+        # newlines translate CRLF/CR to LF. Keep that normalization
+        # for substring; exact keeps byte-exact semantics.
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
         matched = params.expected in text
     else:
         matched = text == params.expected
@@ -1302,6 +1331,10 @@ def evaluate_browser_state(
     change: ``before`` did not already match ``expect.after``).
     Absence of facts is a fail
     (``browser_postcondition_unconfirmed``), exactly as before.
+    Text facts carry ``expectation_sha256`` — the digest of the
+    expectation the tool compared against; the checker requires it to
+    equal the postcondition's own revision, so facts taken for one
+    expectation cannot confirm a postcondition declaring another.
     The ``count`` kind only supports expecting exactly one element
     (``after == 1``), as in the legacy contract.
     """
@@ -1335,6 +1368,16 @@ def evaluate_browser_state(
         return failed(f"no browser_state facts for entity {params.entity_id}")
     fact = matching[0]
     if params.kind == "text":
+        # The booleans below were computed by the tool against the
+        # expectation in its own declaration. The facts carry the
+        # digest of that expectation; require it to equal this
+        # postcondition's revision, or facts taken for one expectation
+        # would confirm a postcondition declaring another. A missing
+        # digest fails closed: unbound facts prove nothing.
+        if fact.get("expectation_sha256") != postcondition.revision():
+            return failed(
+                f"browser facts were captured for a different expectation: {params.entity_id}"
+            )
         if fact.get("after_matches_after") is not True:
             return failed(f"browser text does not match the expected state: {params.entity_id}")
         if fact.get("before_matches_after") is not False:
