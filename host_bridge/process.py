@@ -1359,17 +1359,17 @@ class SystemdRunSpawner:
                     return Path("/sys/fs/cgroup") / value.lstrip("/")
         return None
 
-    def signal_tree(self, handle: SpawnHandle, sig: int) -> None:
+    def signal_tree(self, handle: SpawnHandle, sig: int, *, timeout_s: float = 5.0) -> None:
         if handle.popen is None:
             return
         name = signal.Signals(sig).name
         subprocess.run(
             ["systemctl", "--user", "kill", f"--signal={name}", handle.unit_name],
             capture_output=True,
-            timeout=5,
+            timeout=timeout_s,
         )
 
-    def kill_all(self, handle: SpawnHandle) -> None:
+    def kill_all(self, handle: SpawnHandle, *, timeout_s: float = 5.0) -> None:
         """SIGKILL the whole cgroup subtree (recursive, in-kernel)."""
         if handle.cgroup_path is not None:
             try:
@@ -1377,7 +1377,7 @@ class SystemdRunSpawner:
                 return
             except OSError:
                 pass
-        self.signal_tree(handle, signal.SIGKILL)
+        self.signal_tree(handle, signal.SIGKILL, timeout_s=timeout_s)
 
     def cgroup_empty(self, handle: SpawnHandle) -> bool:
         """True when no process remains in the scope's cgroup."""
@@ -1795,9 +1795,19 @@ class _Record:
     # Set at the spawn adoption point when the run was stopped while
     # the spawn was in flight: the tree was destroyed before
     # promotion, so the record finalizes as spawn_failed (never
-    # "killed") once the cgroup is confirmed empty — the process
-    # never ran.
+    # "killed") once the cgroup is confirmed empty — unless the
+    # command had already executed (see spawn_result): handle
+    # receipt is not an exec barrier (the spawner resolves the
+    # cgroup after the helper already exec'd), so "the process
+    # never ran" does not follow from a late handle alone.
     spawn_destroyed: bool = False
+    # Snapshot of a confirmed execution result, taken at the spawn
+    # adoption point BEFORE the destroy: (state, exit_code,
+    # signal, finished_at) from the helper's status file when it
+    # already showed a terminal executed state (exited / killed /
+    # timeout). None when the helper had published no such result
+    # yet — then the record finalizes as spawn_failed.
+    spawn_result: tuple[str, object, object, object] | None = None
     started_at: str = ""
     finished_at: str | None = None
     exit_code: int | None = None
@@ -2280,11 +2290,13 @@ class HostProcessService:
                 # promotion, or the run would gain a "running"
                 # process after STOP (I7). Give the record its
                 # handle so _try_finalize can confirm the cgroup is
-                # empty before finalizing it as spawn_failed — the
-                # process never ran, so its final state is
-                # spawn_failed, not "killed". Never finalize here:
-                # all_final:true must mean the tree is confirmed
-                # dead, and kill_all alone does not prove that.
+                # empty before finalizing it — usually spawn_failed
+                # (the process never ran), not "killed". The
+                # exception is a command that already executed
+                # before the handle arrived: see the spawn_result
+                # snapshot below. Never finalize here: all_final
+                # :true must mean the tree is confirmed dead, and
+                # kill_all alone does not prove that.
                 record.handle = handle
                 record.spawn_destroyed = True
                 stopped_destroy = True
@@ -2301,6 +2313,23 @@ class HostProcessService:
                 self._finalize(record, "spawn_failed")
             raise ProcessError("spawn_failed", "spawn did not confirm in time")
         if stopped_destroy:
+            # Snapshot a confirmed execution result BEFORE the
+            # destroy: the helper may already have run the command
+            # and published its final state while spawn() was still
+            # resolving the cgroup — handle receipt is not an exec
+            # barrier. Without the snapshot the destroy erases the
+            # evidence and _try_finalize would rewrite the real
+            # outcome to spawn_failed.
+            status = _read_status_file(run_dir)
+            if status is not None:
+                snapshot_state = str(status.get("state"))
+                if snapshot_state in ("exited", "killed", "timeout"):
+                    record.spawn_result = (
+                        snapshot_state,
+                        status.get("exit_code"),
+                        status.get("signal"),
+                        status.get("finished_at"),
+                    )
             self._spawner.kill_all(handle)
             raise ProcessError("spawn_failed", "run was stopped during spawn")
         # Wait for the helper to confirm enforcement + exec, bounded by
@@ -2717,11 +2746,14 @@ class HostProcessService:
         The ownership key is the pair (envelope principal_id,
         params run_id); the principal never comes from params.
         An unknown run is a successful empty answer, never an
-        error. The wait is a SINGLE shared deadline for the whole
-        STOP (``min(token.remaining_s, 4.0)`` s): per-process
-        deadlines would make STOP latency O(N). ``all_final`` is
-        true only when every listed process reached a final state
-        within the window — a tree that is still dying (or a spawn
+        error. The whole STOP runs against ONE shared deadline
+        (``min(token.remaining_s, 4.0)`` s), fixed BEFORE any
+        signalling: signalling and the wait share it, so a slow
+        systemctl cannot stretch STOP past the deadline — a
+        signal (or kill) whose budget is gone is skipped and the
+        reaper completes that tree. ``all_final`` is true only
+        when every listed process reached a final state within
+        the window — a tree that is still dying (or a spawn
         still in flight) reports ``all_final: false`` and the
         reaper completes it.
         """
@@ -2772,12 +2804,25 @@ class HostProcessService:
                     record.kill_deadline = now + KILL_GRACE_S
                     if record.handle is not None:
                         to_signal.append(record.handle)
+        # The shared STOP deadline is fixed BEFORE signalling:
+        # each signal_tree() may wait up to 5 s on a slow
+        # systemd, so computing it after the signals would let
+        # the signalling alone exhaust the daemon's request
+        # deadline and turn STOP into a request_timeout instead
+        # of the specified all_final:false answer.
+        deadline = time.monotonic() + min(token.remaining_s, STOP_WAIT_MAX_S)
         for handle in to_signal:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # No budget left for this signal: the reaper
+                # still destroys the tree (grace deadline +
+                # kill_all), and the answer reports all_final
+                # false for it.
+                continue
             try:
-                self._spawner.signal_tree(handle, signal.SIGTERM)
+                self._spawner.signal_tree(handle, signal.SIGTERM, timeout_s=remaining)
             except (OSError, subprocess.TimeoutExpired):
                 continue
-        deadline = time.monotonic() + min(token.remaining_s, STOP_WAIT_MAX_S)
         while time.monotonic() < deadline:
             if all(record.final for record in targets):
                 break
@@ -2791,8 +2836,13 @@ class HostProcessService:
                     and record.handle is not None
                     and time.monotonic() >= record.kill_deadline
                 ):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        # Out of STOP budget: stop waiting and
+                        # let the reaper finish the destroy.
+                        break
                     try:
-                        self._spawner.kill_all(record.handle)
+                        self._spawner.kill_all(record.handle, timeout_s=remaining)
                     except (OSError, subprocess.TimeoutExpired):
                         # The reaper retries the destroy; a failing
                         # kill must not abort the STOP answer.
@@ -2834,12 +2884,38 @@ class HostProcessService:
         if record.spawn_destroyed:
             # The tree was destroyed at the spawn adoption point
             # because the run was stopped mid-spawn (E03-T06): the
-            # process never ran, so its final state is spawn_failed
-            # — but only once the cgroup is confirmed empty, which
-            # the gates above just proved. This branch precedes
-            # the kill_requested branch on purpose: the record was
-            # marked "killing" by the stop scan, and without it
-            # the never-started process would finalize "killed".
+            # process usually never ran, so its final state is
+            # spawn_failed — but only once the cgroup is confirmed
+            # empty, which the gates above just proved. This branch
+            # precedes the kill_requested branch on purpose: the
+            # record was marked "killing" by the stop scan, and
+            # without it the never-started process would finalize
+            # "killed". The exception is a command that had already
+            # executed before the handle arrived (the snapshot, or
+            # a final "exited" the helper published between the
+            # snapshot and the destroy): its published result is
+            # preserved instead of being rewritten to spawn_failed.
+            # The destroy itself cannot fabricate an "exited" —
+            # the helper publishes it only on genuine completion.
+            if record.spawn_result is not None:
+                result_state, result_code, result_signal, result_finished_at = record.spawn_result
+                self._finalize(
+                    record,
+                    result_state,
+                    exit_code=result_code,
+                    exit_signal=result_signal,
+                    finished_at=result_finished_at,
+                )
+                return True
+            if status_state == "exited":
+                self._finalize(
+                    record,
+                    "exited",
+                    exit_code=status_exit_code,
+                    exit_signal=status_signal,
+                    finished_at=status_finished_at,
+                )
+                return True
             self._finalize(record, "spawn_failed")
             return True
         if status_state == "spawn_failed":

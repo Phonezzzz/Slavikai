@@ -280,12 +280,12 @@ class FakeSpawner:
             _write_running()
         return handle
 
-    def signal_tree(self, handle: SpawnHandle, sig: int) -> None:
+    def signal_tree(self, handle: SpawnHandle, sig: int, *, timeout_s: float = 5.0) -> None:
         self.signal_calls.append((handle.unit_name, sig))
         if handle.popen is not None and handle.popen.poll() is None:
             handle.popen.send_signal(sig)
 
-    def kill_all(self, handle: SpawnHandle) -> None:
+    def kill_all(self, handle: SpawnHandle, *, timeout_s: float = 5.0) -> None:
         self.kill_calls.append(handle.unit_name)
         unit = self.units.get(handle.unit_name)
         if unit is not None:
@@ -1833,7 +1833,7 @@ class _StubbornSpawner(FakeSpawner):
     call but leaves the unit's procs alone, so the record stays in
     ``killing`` and a repeat kill must not move its deadline."""
 
-    def kill_all(self, handle: SpawnHandle) -> None:
+    def kill_all(self, handle: SpawnHandle, *, timeout_s: float = 5.0) -> None:
         self.kill_calls.append(handle.unit_name)
 
 
@@ -1963,7 +1963,7 @@ class _CrashedHelperSpawner(FakeSpawner):
         leader.wait()
         return handle
 
-    def kill_all(self, handle: SpawnHandle) -> None:
+    def kill_all(self, handle: SpawnHandle, *, timeout_s: float = 5.0) -> None:
         self.kill_calls.append(handle.unit_name)
         unit = self.units.get(handle.unit_name)
         if unit is not None:
@@ -2022,7 +2022,7 @@ class _SignalTimeoutSpawner(FakeSpawner):
         # No status file is ever written: the launch never confirms.
         return handle
 
-    def signal_tree(self, handle: SpawnHandle, sig: int) -> None:
+    def signal_tree(self, handle: SpawnHandle, sig: int, *, timeout_s: float = 5.0) -> None:
         self.signal_calls.append((handle.unit_name, sig))
         raise subprocess.TimeoutExpired("systemctl", 5)
 
@@ -2142,10 +2142,10 @@ class _ExitingLeaderSpawner:
         self.units[unit_name] = {"handle": handle, "procs": [str(leader.pid)]}
         return handle
 
-    def signal_tree(self, handle: SpawnHandle, sig: int) -> None:
+    def signal_tree(self, handle: SpawnHandle, sig: int, *, timeout_s: float = 5.0) -> None:
         self.signal_calls.append((handle.unit_name, sig))
 
-    def kill_all(self, handle: SpawnHandle) -> None:
+    def kill_all(self, handle: SpawnHandle, *, timeout_s: float = 5.0) -> None:
         self.kill_calls.append(handle.unit_name)
         if handle.popen is not None and handle.popen.poll() is None:
             handle.popen.kill()
@@ -2635,7 +2635,7 @@ class _SlowKillSpawner(FakeSpawner):
         super().__init__()
         self.kill_delay = kill_delay
 
-    def kill_all(self, handle: SpawnHandle) -> None:
+    def kill_all(self, handle: SpawnHandle, *, timeout_s: float = 5.0) -> None:
         self.kill_calls.append(handle.unit_name)
 
         def _empty_later() -> None:
@@ -2697,7 +2697,7 @@ class _FailingSignalSpawner(FakeSpawner):
         super().__init__()
         self._failed_once = False
 
-    def signal_tree(self, handle: SpawnHandle, sig: int) -> None:
+    def signal_tree(self, handle: SpawnHandle, sig: int, *, timeout_s: float = 5.0) -> None:
         if not self._failed_once:
             self._failed_once = True
             raise subprocess.TimeoutExpired(["systemctl", "kill"], 5.0)
@@ -2727,6 +2727,119 @@ def test_stop_signals_remaining_processes_when_first_signal_fails(
         assert _unit_name(svc, b["process_id"]) in signalled
     finally:
         svc.shutdown()
+
+
+class _SlowSignalSpawner(FakeSpawner):
+    """signal_tree takes signal_delay per call (a slow systemctl):
+    a STOP must bound the total signalling by the shared STOP
+    deadline instead of letting each call run its own 5 s."""
+
+    def __init__(self, signal_delay: float = 0.3) -> None:
+        super().__init__()
+        self.signal_delay = signal_delay
+
+    def signal_tree(self, handle: SpawnHandle, sig: int, *, timeout_s: float = 5.0) -> None:
+        # A real signal_tree honours its timeout (subprocess.run
+        # timeout=...): sleep no longer than the budget it was
+        # given, then signal as usual.
+        time.sleep(min(self.signal_delay, timeout_s))
+        super().signal_tree(handle, sig)
+
+
+def test_stop_bounds_signalling_by_shared_deadline(
+    fs_service: HostFsService, registry: RootsRegistry, tmp_path: Path
+) -> None:
+    """Rework 2, finding 1 (P2): with two 0.3 s signal calls and a
+    0.1 s token, STOP must return within the shared deadline
+    (~0.1 s) with all_final false — not spend 0.6 s on signalling
+    before the wait even starts and then hit the daemon deadline
+    with request_timeout. The reaper still completes both trees
+    afterwards."""
+    spawner = _SlowSignalSpawner(signal_delay=0.3)
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    try:
+        a = _run_bound(
+            svc, "sleep", "req-slow-sig-a", principal_id="p1", run_id="run-A", args=["5"]
+        )
+        b = _run_bound(
+            svc, "sleep", "req-slow-sig-b", principal_id="p1", run_id="run-A", args=["5"]
+        )
+        started = time.monotonic()
+        stopped = _stop(svc, "run-A", principal_id="p1", deadline_s=0.1)
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.35, f"stop took {elapsed:.2f}s: signalling escaped the shared deadline"
+        assert stopped["all_final"] is False
+        assert {p["state"] for p in stopped["processes"]} == {"killing"}
+        for result in (a, b):
+            final = _wait_state(svc, result["process_id"], "killed", timeout_s=10.0)
+            assert final["state"] == "killed"
+    finally:
+        svc.shutdown()
+
+
+class _ExecutedBeforeHandleSpawner(FakeSpawner):
+    """spawn() returns late, but the helper already ran the command
+    and published its final state before the handle arrived: the
+    real spawner returns the handle only after resolving the
+    cgroup, which is not an exec barrier."""
+
+    def __init__(self, delay: float = 0.6) -> None:
+        super().__init__()
+        self.spawn_delay = delay
+
+    def spawn(self, spec_path: Path, *, unit_name: str, run_dir: Path) -> SpawnHandle:
+        time.sleep(self.spawn_delay)
+        handle = super().spawn(spec_path, unit_name=unit_name, run_dir=run_dir)
+        # The command already executed while the handle was in
+        # flight: publish its real result before returning it.
+        self.finish(handle, state="exited", exit_code=0, stdout=b"-- ACTUALLY_EXECUTED\n")
+        return handle
+
+
+def test_stop_after_exec_before_handle_keeps_executed_result(
+    fs_service: HostFsService, registry: RootsRegistry, tmp_path: Path
+) -> None:
+    """Rework 2, finding 2 (P2): a STOP that lands after the command
+    actually executed but before spawn() returned the handle must not
+    rewrite the published result to spawn_failed — handle receipt is
+    not an exec barrier. The run call itself still reports
+    spawn_failed (it never confirmed), but poll shows the real
+    outcome: exited, exit code 0, and the stdout the command
+    produced."""
+    spawner = _ExecutedBeforeHandleSpawner(delay=0.6)
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    try:
+        errors: list[BaseException] = []
+
+        def run() -> None:
+            try:
+                _run_bound(svc, "true", "req-exec-early", principal_id="p1", run_id="run-A")
+            except BaseException as exc:  # noqa: BLE001 - captured for the test
+                errors.append(exc)
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        time.sleep(0.2)  # the record committed; the spawn is still in flight
+        stopped = _stop(svc, "run-A", principal_id="p1")
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "the launch did not return after the stop"
+        assert errors and isinstance(errors[0], ProcessError)
+        assert errors[0].code == "spawn_failed"
+        process_id = svc._by_request_id["req-exec-early"]
+        assert stopped["all_final"] is True
+        by_id = {p["process_id"]: p for p in stopped["processes"]}
+        assert by_id[process_id]["state"] == "exited"
+        assert by_id[process_id]["exit_code"] == 0
+        polled = _poll(svc, process_id)
+        assert polled["state"] == "exited"
+        assert polled["exit_code"] == 0
+        assert "-- ACTUALLY_EXECUTED" in polled["stdout"]
+    finally:
+        svc.shutdown()
+        for unit in spawner.units.values():
+            handle = unit["handle"]
+            if handle.popen is not None and handle.popen.poll() is None:
+                handle.popen.kill()
 
 
 def test_repeat_stop_preserves_kill_reason_and_deadline(
@@ -3009,10 +3122,10 @@ class _RaisingSpawner:
     def spawn(self, spec_path: Path, *, unit_name: str, run_dir: Path) -> SpawnHandle:
         raise SpawnError("scope creation failed")
 
-    def signal_tree(self, handle: SpawnHandle, sig: int) -> None:
+    def signal_tree(self, handle: SpawnHandle, sig: int, *, timeout_s: float = 5.0) -> None:
         raise AssertionError("signal_tree must not be called without a handle")
 
-    def kill_all(self, handle: SpawnHandle) -> None:
+    def kill_all(self, handle: SpawnHandle, *, timeout_s: float = 5.0) -> None:
         raise AssertionError("kill_all must not be called without a handle")
 
     def cgroup_empty(self, handle: SpawnHandle) -> bool:
