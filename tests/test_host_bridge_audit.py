@@ -1019,6 +1019,82 @@ def test_effect_build_failed_on_patch_hash_fault(
     assert (work.path / "pfault.txt").read_text(encoding="utf-8") == "hello\nworld\n"
 
 
+def test_write_hash_fault_on_first_commit_rolls_back_created_parents(
+    fs_service: HostFsService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 5, finding 1: the first write with commit=true
+    inside missing parents creates those parents before the hash
+    runs. A hashing failure must not leave them on disk while the
+    journal reads effect_build_failed as no_effect -- the call's
+    whole footprint (staging temp + created parents) is rolled
+    back, and only then is effect_build_failed raised."""
+
+    def _boom(fd: int, size: int) -> str:
+        raise OSError("injected hash failure")
+
+    monkeypatch.setattr("host_bridge.fs._sha256_file_fd", _boom)
+    request = BridgeRequest(
+        version=1,
+        request_id="fault-parents-1",
+        capability="host.fs.write",
+        principal_id=_OWNER,
+        run_id=None,
+        params={
+            "root_id": "work",
+            "path": "new-parent/file.txt",
+            "mode": "create",
+            "content": "x",
+            "commit": True,
+        },
+    )
+    with pytest.raises(FsError) as exc_info:
+        fs_service.handle(request, _token())
+    assert exc_info.value.code == EFFECT_BUILD_FAILED
+    work = fs_service.registry.by_id("work")
+    assert work is not None
+    assert not (work.path / "new-parent").exists()
+    assert not (work.path / "new-parent" / "file.txt").exists()
+
+
+def test_write_hash_fault_with_unremovable_parents_is_unknown(
+    fs_service: HostFsService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 5, finding 1 (fail-closed): when the created
+    parents cannot be removed again, the call must not claim
+    no_effect -- the outcome is unknown (io_error), and the
+    directories stay on disk for the operator to inspect."""
+
+    def _boom(fd: int, size: int) -> str:
+        raise OSError("injected hash failure")
+
+    monkeypatch.setattr("host_bridge.fs._sha256_file_fd", _boom)
+    monkeypatch.setattr(
+        HostFsService,
+        "_remove_created_parents",
+        lambda self, root, created: None,
+    )
+    request = BridgeRequest(
+        version=1,
+        request_id="fault-parents-2",
+        capability="host.fs.write",
+        principal_id=_OWNER,
+        run_id=None,
+        params={
+            "root_id": "work",
+            "path": "new-parent/file.txt",
+            "mode": "create",
+            "content": "x",
+            "commit": True,
+        },
+    )
+    with pytest.raises(FsError) as exc_info:
+        fs_service.handle(request, _token())
+    assert exc_info.value.code == "io_error"
+    work = fs_service.registry.by_id("work")
+    assert work is not None
+    assert (work.path / "new-parent").exists()
+
+
 def test_write_chunk_parents_frame_budget_fails_before_mkdir(
     fs_service: HostFsService, monkeypatch: pytest.MonkeyPatch
 ) -> None:

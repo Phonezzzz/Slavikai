@@ -1079,6 +1079,49 @@ class HostFsService:
             finally:
                 os.close(fd)
 
+    def _rollback_created_parents(self, root: Root, created: Sequence[str]) -> bool:
+        """Remove directories this call created and confirm none
+        remain (Codex round 5, finding 1): an effect_build_failed
+        is read by the journal as no_effect, so it may only be
+        raised when the rollback is confirmed. A directory that
+        survives (a concurrent actor used it in the meantime) is
+        left in place, and the caller must keep the outcome
+        unknown instead. Returns True only when no created
+        directory still exists."""
+        self._remove_created_parents(root, created)
+        try:
+            fd = self._open_root(root)
+        except OSError:
+            return False
+        try:
+            for rel in created:
+                try:
+                    nfd = os.open(rel, _DIR_OPEN_FLAGS, dir_fd=fd)
+                except OSError:
+                    continue
+                os.close(nfd)
+                return False
+            return True
+        finally:
+            os.close(fd)
+
+    def _undo_created_write(
+        self,
+        dir_fd: int,
+        session: _WriteSession,
+        root: Root,
+        parents_created: Sequence[str],
+    ) -> bool:
+        """Undo a first write's whole footprint (Codex round 5,
+        finding 1): unlink the staging temp (identity-checked --
+        a foreign substitute is never touched) and remove the
+        parent directories this call created. Returns True only
+        when the staging name is gone and no created directory
+        remains; the caller may then claim no_effect, and anything
+        left behind keeps the outcome unknown instead."""
+        self._discard_temp(dir_fd, session.temp_name, (session.temp_dev, session.temp_ino))
+        return self._rollback_created_parents(root, parents_created)
+
     def _check_created_parents_frame(
         self,
         *,
@@ -2005,6 +2048,23 @@ class HostFsService:
                     try:
                         content_sha256 = _sha256_file_fd(tfd, session.size)
                     except OSError as exc:
+                        # The parents this call created are already
+                        # on disk, and the staging temp sits inside
+                        # them: effect_build_failed is read by the
+                        # journal as no_effect, so it may only be
+                        # raised when the call's whole footprint is
+                        # confirmed gone. Anything left behind keeps
+                        # the outcome unknown instead (Codex round
+                        # 5, finding 1).
+                        if parents_created and not self._undo_created_write(
+                            fd, session, target.root, parents_created
+                        ):
+                            raise FsError(
+                                "io_error",
+                                "cannot hash the staged content and "
+                                "the created parents could not be "
+                                f"removed: {exc}",
+                            ) from exc
                         raise FsError(
                             EFFECT_BUILD_FAILED,
                             f"cannot hash the staged content: {exc}",

@@ -105,6 +105,13 @@ _NO_EFFECT_CODES: Final[frozenset[str]] = frozenset(
         "invalid_utf8",
         "content_too_large",
         "subtree_too_large",
+        # Root/path validation in host_bridge/fs.py (_resolve /
+        # _parse_rel_path / _open_parent): every raise site runs
+        # before any mutation, so the refusal proves no effect
+        # (Codex round 5, finding 2).
+        "invalid_path",
+        "unknown_root",
+        "root_read_only",
         # Pre-commit refusals: the check runs before the publish
         # syscall / spawn / signal.
         "run_stopped",
