@@ -428,13 +428,13 @@ semantic dependencies и временные конфликты файлов ра
 | E02 — persistent browser | 10 | T01 DONE (PR #166); T02 DONE (PR #167); T03 DONE (PR #180, main f2e94ba); T04 DONE (PR #181, main 30bd0da); T05 DONE (PR #182, main b2a4257); T06 DONE (PR #183, main dd207de; acceptance закрыт PR #188); T07 DONE (PR #186, main 20af69c); T09 DONE (PR #187, main 421314c); T10 DONE (PR #188, main f581132) |
 | E03 — Host Bridge / Desktop Commander | 11 | T01 DONE (PR #193, main 325d2f9); T02 DONE (PR #194, main cd6f0d4); T03 DONE (PR #195, main 8147223); T04 DONE (PR #196, main 2020b81); T05 DONE (PR #198, main 0dd07de); T06 DONE (PR #203, main 658a638); SEC-04 DONE (PR #200, main 7ced6826); SEC-03 VERIFY DONE (PR #201, main 5202510) |
 | E04 — workspace/executor | 6 | T03 slice DONE (PR #164, main 7affb3f); остальное NEEDS_REFINEMENT |
-| E05 — verification/recovery | 7 | NEEDS_REFINEMENT |
+| E05 — verification/recovery | 7 | T01 DONE (PR #205, main a9d7ad5); T02–T07 NEEDS_REFINEMENT |
 | E06 — modes/policy/UI | 6 | NEEDS_REFINEMENT |
 | E07 — memory/context | 5 | NEEDS_REFINEMENT |
 | E08 — cleanup/operations | 8 | NEEDS_REFINEMENT |
 | **Всего** | **65** | **33 READY, 32 предварительный, 0 заблокировано** |
 
-**Зависимости (решение владельца 2026-11-24).** DB-06/01/02 — versioned migrations для UI storage — prerequisite для расширения UI storage (FOUNDATION-механизм до появления ценных данных; миграций реальных данных нет — прод не запущен).
+**Зависимости (решение владельца 2026-11-24).** DB-06/01/02 — versioned migrations для UI storage — prerequisite для расширения UI storage (FOUNDATION-механизм до появления ценных данных; миграций реальных данных нет — прод не запущен). **DONE: PR #206 MERGED 2026-11-25 (main d2946af)** — versioned migrations для UI storage (`PRAGMA user_version`, ordered atomic steps под `BEGIN IMMEDIATE`, fail-closed на неизвестной схеме; v1 — additive normalization без DROP, v2 — global monotonic `seq` для сообщений; DROP gate — `allow_destructive_reset: bool = False` + env `SLAVIK_UI_STORAGE_ALLOW_DESTRUCTIVE_RESET` (strict `== "true"`)); MEM-01 — delta writes + `to_thread` (append-one-save: 4002 → 3 row changes); coverage 82.81%; 5 раундов Codex review — 6 findings, все закрыты регрессионными тестами; DB-01/02 закрыты механизмом.
 
 **E04–E08 — не исполнимые ticket specs до refinement.** Перед соответствующим эпиком Muse доводит каждый до полного шаблона: ЧТО, ЗАЧЕМ, проверенный code touchpoint/unknown, зависимости, scope, steps, delete-vs-wrap, positive/negative/E2E acceptance, postconditions, разрешения/запреты, evidence, `make check`, CI и независимый Codex review. До этого в `STATE.md` фиксируется `BLOCKED: ROADMAP_REFINEMENT`, в том числе E07-T04 и однострочные E08.
 
@@ -442,14 +442,16 @@ semantic dependencies и временные конфликты файлов ра
 
 ### Streams (2026-11-25)
 
-- **A — Host Bridge:** E03-T06 → T07 → T08 → T09 → T10-observe → T11.
+- **A — Host Bridge:** E03-T06 DONE (PR #203 MERGED, main 658a638) → T07 → T08 → T09 → T10-observe → T11.
   Worktree `Slavikai-rebuild`. T07 не запускался параллельно с T06 по решению
   владельца 2026-11-25 (finding в T06 мог закрыть окно); после мержа T06 —
-  следующий в стриме A.
-- **C — Foundation:** storage-группа (DB-06+DB-01/02+DB-03/04+MEM-01+TEST-01)
+  следующий в стриме A — E03-T07.
+- **C — Foundation:** storage-группа DONE (PR #206 MERGED 2026-11-25,
+  main d2946af; DB-06+DB-01/02+DB-03/04+MEM-01+TEST-01)
   → PLAN-группа → LATER-группа + SEC-05 срез + Ollama-gate.
   Worktree `Slavikai-foundation`.
-- **D — Verification & Recovery:** E05-T01 (refinement) → T02 → T03/T04 →
+- **D — Verification & Recovery:** E05-T01 DONE (PR #205 MERGED 2026-11-25,
+  main a9d7ad5) → T02 → T03/T04 →
   T05/T06 → E05-T07 (после E04-T05 и T11-step-9 wiring). Worktree
   `Slavikai-verification`.
 - **E — Workspace Executor:** после решения E04-T01 и refinement E04-T02:
@@ -460,8 +462,11 @@ semantic dependencies и временные конфликты файлов ра
 ### Порядок merge (§6 аудита, с поправкой: без массового rebase)
 
 1. PR #203 (T06) — MERGED 2026-11-25 (main 658a638).
-2. Первая волна независимых (любой порядок): T07; storage-группа; PLAN-группа;
-   E05-T01; SEC-05 срез; Ollama-gate. (T07 — после T06, см. выше.)
+2. Первая волна независимых (любой порядок): storage-группа — MERGED
+   (PR #206, main d2946af); E05-T01 — MERGED (PR #205, main a9d7ad5);
+   осталось: T07; PLAN-группа; SEC-05 срез; Ollama-gate. (T07 — после T06,
+   см. выше.) Docs-sync после первой волны — в работе; затем T07 / E05-T02 /
+   PLAN-группа.
 3. T08; E05-T02; E04-T02 (после решения T01); E06-T01 (UI).
 4. T09; E05-T04; E04-T03; E07-T02 (после T01).
 5. T10-observe; E04-T04; E05-T05 ∥ E05-T06; E06-T02 (после PLAN).
@@ -1453,7 +1458,7 @@ MERGED, main 658a638). Merge unit-file допустим раньше T07/T08.
 
 ### Epic E05 — verification, durable run state and recovery
 
-> **NEEDS_REFINEMENT:** нижеследующие пункты — предварительные цели. Перед началом эпика обязателен полный ticket refinement и owner decision по развилкам.
+> **T01 DONE (PR #205); T02–T07 NEEDS_REFINEMENT:** пункты T02–T07 ниже — предварительные цели. Перед началом соответствующего тикета обязателен полный ticket refinement и owner decision по развилкам.
 
 #### E05-T01 — postcondition model
 
@@ -1470,6 +1475,8 @@ custom_command
 ```
 
 **ЗАЧЕМ.** Проверять effect, а не tool return.
+
+**Выполнено (PR #205 MERGED 2026-11-25, main a9d7ad5).** Новый `core/postconditions.py` (не legacy `core/mwv/*`): frozen `Postcondition`, 7 kinds, pure checkers, `PostconditionReader` protocol; revision hash — sha256 canonical JSON, mismatch → STALE. 4 kinds канонизированы из существующих tool checks (`file_exists`/`file_content_matches`/`process_running` — DesktopVerifyTool; `browser_state` — E02-T10 contract B verbatim). Новые: `process_exit`, `service_state`, `custom_command` (v1 — только канонический `make check`; произвольные команды REJECTED). Claims без изменений (`runtime.verification.authoritative_acceptance` — target v1). Попутно исправлен `_overall_outcome`: state-changing plans теперь могут стать full DONE на уровне плана (раньше было захардкожено UNKNOWN). 64 новых теста в `tests/test_postconditions.py` + 1 в `tests/test_plan_execute.py`; `make check` зелёный (3144 passed). 4 раунда Codex review — 9 findings, все закрыты регрессионными тестами red/green; 9 тредов закрыты ответами с фиксами+тестами по прецеденту #196 на «ок» владельца; раунд 3 — расхождение маркера (`has_any_findings:false` при 3 живых тредах): сверка с кодом подтвердила, что фиксы держат, код не менялся.
 
 #### E05-T02 — effect→postcondition binding
 
