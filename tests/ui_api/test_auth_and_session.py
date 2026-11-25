@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from core.agent_response import AgentResponse
 from core.approval_policy import ApprovalPrompt, ApprovalRequest
 from core.plan_execute import PlanLoopCheckpoint, PlanLoopCheckpoints
@@ -1799,7 +1801,7 @@ def test_ui_chat_send_uses_restored_session_model_as_runtime_override(
     asyncio.run(run())
 
 
-def test_ui_storage_destructively_replaces_legacy_ui_messages_table(tmp_path) -> None:
+def test_ui_storage_legacy_ui_messages_fails_closed_without_flag(tmp_path) -> None:
     db_path = tmp_path / "ui_sessions.db"
     conn = sqlite3.connect(db_path)
     try:
@@ -1868,7 +1870,31 @@ def test_ui_storage_destructively_replaces_legacy_ui_messages_table(tmp_path) ->
     finally:
         conn.close()
 
-    storage = SQLiteUISessionStorage(db_path)
+    # Default: the legacy layout fails closed (DB-01) instead of silently
+    # discarding stored sessions. The failed open mutates nothing.
+    with pytest.raises(RuntimeError, match="Legacy ui_messages"):
+        SQLiteUISessionStorage(db_path)
+
+    verify_conn = sqlite3.connect(db_path)
+    try:
+        verify_conn.row_factory = sqlite3.Row
+        tables = {
+            str(row["name"])
+            for row in verify_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+            if isinstance(row, sqlite3.Row)
+        }
+        legacy_rows = verify_conn.execute("SELECT COUNT(*) FROM ui_messages").fetchone()
+        legacy_sessions = verify_conn.execute("SELECT COUNT(*) FROM ui_sessions").fetchone()
+    finally:
+        verify_conn.close()
+    assert "ui_messages" in tables
+    assert legacy_rows is not None and int(legacy_rows[0]) == 1
+    assert legacy_sessions is not None and int(legacy_sessions[0]) == 1
+
+    # With the explicit opt-in the storage resets to the current schema.
+    storage = SQLiteUISessionStorage(db_path, allow_destructive_reset=True)
     assert storage.load_sessions() == []
 
     verify_conn = sqlite3.connect(db_path)
@@ -1898,6 +1924,8 @@ def test_ui_storage_destructively_replaces_legacy_ui_messages_table(tmp_path) ->
     assert "workspace_messages" in tables
     assert "lane" not in chat_columns
     assert "lane" not in workspace_columns
+    assert "seq" in chat_columns
+    assert "seq" in workspace_columns
 
 
 def test_ui_storage_adds_folder_principal_column_without_data_loss(tmp_path) -> None:

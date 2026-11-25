@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import uuid
 from collections.abc import Collection, Sequence
@@ -12,7 +13,114 @@ from shared.models import JSONValue
 from shared.sanitize import safe_json_loads
 from shared.session_domain import normalize_policy_profile
 
+logger = logging.getLogger(__name__)
+
 MessageLane = Literal["chat", "workspace"]
+
+# Current versioned schema for UI session storage (DB-06/DB-01/DB-02).
+# The layout follows TaskRunStore's pattern: PRAGMA user_version stamps the
+# schema, ordered atomic steps migrate it, unknown schemas fail closed.
+# v1 is the pre-existing ad-hoc schema, normalized additively; v2 adds the
+# global monotonic message sequence (DB-04/DB-05) and the meta table.
+SCHEMA_VERSION_CURRENT = 2
+_MESSAGE_SEQ_KEY = "message_seq"
+
+_V1_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
+    "ui_sessions": (
+        "session_id",
+        "principal_id",
+        "created_at",
+        "updated_at",
+        "status",
+        "decision_json",
+        "model_provider",
+        "model_id",
+        "title_override",
+        "folder_id",
+        "output_text",
+        "output_updated_at",
+        "files_json",
+        "artifacts_json",
+        "workspace_root",
+        "policy_profile",
+        "yolo_armed",
+        "yolo_armed_at",
+        "tools_state_json",
+        "security_revision",
+        "mode",
+        "active_plan_json",
+        "active_task_json",
+        "auto_state_json",
+    ),
+    "ui_folders": ("folder_id", "name", "created_at", "updated_at", "principal_id"),
+    "chat_messages": (
+        "message_id",
+        "session_id",
+        "role",
+        "content",
+        "created_at",
+        "trace_id",
+        "parent_user_message_id",
+        "attachments_json",
+    ),
+    "workspace_messages": (
+        "message_id",
+        "session_id",
+        "role",
+        "content",
+        "created_at",
+        "trace_id",
+        "parent_user_message_id",
+        "attachments_json",
+    ),
+    "ui_storage_migrations": ("migration_id",),
+}
+
+_V2_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
+    **_V1_TABLE_COLUMNS,
+    "chat_messages": (*_V1_TABLE_COLUMNS["chat_messages"], "seq"),
+    "workspace_messages": (*_V1_TABLE_COLUMNS["workspace_messages"], "seq"),
+    "ui_storage_meta": ("key", "value"),
+}
+
+# Canonical v1 DDL for the message tables (no seq; seq arrives with v2).
+_MESSAGE_TABLE_DDL_V1 = """
+    CREATE TABLE {table_name} (
+        message_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        trace_id TEXT,
+        parent_user_message_id TEXT,
+        attachments_json TEXT NOT NULL DEFAULT '[]',
+        FOREIGN KEY(session_id) REFERENCES ui_sessions(session_id) ON DELETE CASCADE
+    )
+"""
+
+# ADD COLUMN definitions for additive repair of a message table. NOT NULL
+# columns need a default value (SQLite refuses ADD COLUMN ... NOT NULL
+# without one); the defaults only ever apply to a column a legacy table
+# lacked, and every write supplies the real value.
+_MESSAGE_COLUMN_ADD: tuple[tuple[str, str], ...] = (
+    ("session_id", "session_id TEXT NOT NULL DEFAULT ''"),
+    ("role", "role TEXT NOT NULL DEFAULT ''"),
+    ("content", "content TEXT NOT NULL DEFAULT ''"),
+    ("created_at", "created_at TEXT NOT NULL DEFAULT ''"),
+    ("trace_id", "trace_id TEXT"),
+    ("parent_user_message_id", "parent_user_message_id TEXT"),
+    ("attachments_json", "attachments_json TEXT NOT NULL DEFAULT '[]'"),
+)
+
+
+class _UnsupportedSchemaError(RuntimeError):
+    """UI session schema cannot be adopted or migrated automatically.
+
+    Raised for a legacy layout (ui_messages), an unknown user_version, or a
+    table/column set that additive normalization cannot repair (for example
+    an extra column, DB-02). The destructive-reset path catches only this
+    error, never unrelated SQLite or programming errors.
+    """
 
 
 @dataclass(frozen=True)
@@ -148,9 +256,17 @@ def split_persisted_session_domains(session: PersistedSession) -> PersistedSessi
 def legacy_session_from_domain_records(records: PersistedSessionDomainRecords) -> PersistedSession:
     chat = records.chat
     workspace = records.workspace
-    messages = [_message_with_legacy_lane(message, lane="chat") for message in chat.messages] + [
+    chat_messages = [_message_with_legacy_lane(message, lane="chat") for message in chat.messages]
+    workspace_messages = [
         _message_with_legacy_lane(message, lane="workspace") for message in workspace.messages
     ]
+    if all(isinstance(message.get("seq"), int) for message in chat_messages + workspace_messages):
+        # v2: every message carries the global monotonic sequence, so the
+        # true interleaved order survives the lane split. Without seq (v1
+        # records, tests) fall back to the historical lane-major order.
+        messages = sorted(chat_messages + workspace_messages, key=_message_seq_key)
+    else:
+        messages = chat_messages + workspace_messages
     return PersistedSession(
         session_id=chat.thread_id,
         principal_id=chat.principal_id,
@@ -364,8 +480,12 @@ class InMemoryUISessionStorage:
 
 
 class SQLiteUISessionStorage:
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, *, allow_destructive_reset: bool = False) -> None:
         self._db_path = db_path
+        # Off by default: an unsupported schema fails the start instead of
+        # silently discarding stored sessions (DB-01/DB-02). Only an explicit
+        # opt-in (SLAVIK_UI_STORAGE_ALLOW_DESTRUCTIVE_RESET=true) resets.
+        self._allow_destructive_reset = allow_destructive_reset
         self._initialize_schema()
 
     def migrate_principals_once(
@@ -416,9 +536,13 @@ class SQLiteUISessionStorage:
                 FROM ui_sessions
                 """,
             ).fetchall()
+            # DB-03: one batched message load (two SELECTs, one per lane)
+            # instead of one _load_messages call per session.
+            session_ids = [str(row["session_id"]) for row in rows]
+            messages_by_session = self._load_messages_for_sessions(conn, session_ids)
             for row in rows:
                 session_id = str(row["session_id"])
-                messages = self._load_messages(conn, session_id)
+                messages = messages_by_session.get(session_id, [])
                 sessions.append(
                     PersistedSession(
                         session_id=session_id,
@@ -559,40 +683,105 @@ class SQLiteUISessionStorage:
                     self._encode_json_object(session.auto_state),
                 ),
             )
-            conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session.session_id,))
-            conn.execute(
-                "DELETE FROM workspace_messages WHERE session_id = ?",
-                (session.session_id,),
-            )
-            for message in session.messages:
-                prepared = self._message_for_write(message)
-                table_name = self._message_table_for_lane(prepared["lane"])
-                conn.execute(
-                    f"""
-                    INSERT INTO {table_name} (
-                        message_id,
-                        session_id,
-                        role,
-                        content,
-                        created_at,
-                        trace_id,
-                        parent_user_message_id,
-                        attachments_json
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
+            # MEM-01: delta writes. Only removed messages are deleted, only
+            # changed messages are updated (keeping their DB seq), only new
+            # messages are inserted (taking the next seq from the counter).
+            # The whole history is no longer rewritten on every save.
+            prepared_messages = [self._message_for_write(message) for message in session.messages]
+            self._persist_messages_delta(conn, session.session_id, prepared_messages)
+            conn.commit()
+
+    def _persist_messages_delta(
+        self,
+        conn: sqlite3.Connection,
+        session_id: str,
+        prepared_messages: list[dict[str, str | None]],
+    ) -> None:
+        existing_by_table: dict[str, dict[str, tuple[int, tuple[str | None, ...]]]] = {}
+        for table_name in ("chat_messages", "workspace_messages"):
+            existing_by_table[table_name] = {
+                str(row["message_id"]): (
+                    int(row["seq"]),
                     (
-                        prepared["message_id"],
-                        session.session_id,
-                        prepared["role"],
-                        prepared["content"],
-                        prepared["created_at"],
-                        prepared["trace_id"],
-                        prepared["parent_user_message_id"],
-                        prepared["attachments_json"],
+                        str(row["role"]),
+                        str(row["content"]),
+                        str(row["created_at"]),
+                        _optional_str(row["trace_id"]),
+                        _optional_str(row["parent_user_message_id"]),
+                        str(row["attachments_json"]),
                     ),
                 )
-            conn.commit()
+                for row in conn.execute(
+                    "SELECT message_id, seq, role, content, created_at, trace_id, "
+                    "parent_user_message_id, attachments_json "
+                    f"FROM {table_name} WHERE session_id = ?",
+                    (session_id,),
+                ).fetchall()
+            }
+        kept_ids: dict[str, set[str]] = {"chat_messages": set(), "workspace_messages": set()}
+        next_seq: int | None = None
+        for prepared in prepared_messages:
+            table_name = self._message_table_for_lane(prepared["lane"])
+            fingerprint = (
+                prepared["role"],
+                prepared["content"],
+                prepared["created_at"],
+                prepared["trace_id"],
+                prepared["parent_user_message_id"],
+                prepared["attachments_json"],
+            )
+            message_id = str(prepared["message_id"])
+            kept_ids[table_name].add(message_id)
+            stored = existing_by_table[table_name].get(message_id)
+            if stored is not None:
+                stored_seq, stored_fingerprint = stored
+                if stored_fingerprint == fingerprint:
+                    continue
+                # Content changed: update in place, the DB seq is kept.
+                conn.execute(
+                    f"UPDATE {table_name} SET role = ?, content = ?, created_at = ?, "
+                    "trace_id = ?, parent_user_message_id = ?, attachments_json = ? "
+                    "WHERE message_id = ?",
+                    (*fingerprint, message_id),
+                )
+                continue
+            if next_seq is None:
+                next_seq = self._next_message_seq(conn)
+            conn.execute(
+                f"INSERT INTO {table_name} (message_id, session_id, role, content, "
+                "created_at, trace_id, parent_user_message_id, attachments_json, seq) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (message_id, session_id, *fingerprint, next_seq),
+            )
+            next_seq += 1
+        if next_seq is not None:
+            conn.execute(
+                "INSERT INTO ui_storage_meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_MESSAGE_SEQ_KEY, next_seq - 1),
+            )
+        for table_name in ("chat_messages", "workspace_messages"):
+            kept = kept_ids[table_name]
+            if kept:
+                placeholders = ", ".join("?" for _ in kept)
+                conn.execute(
+                    f"DELETE FROM {table_name} WHERE session_id = ? "
+                    f"AND message_id NOT IN ({placeholders})",
+                    (session_id, *kept),
+                )
+            else:
+                conn.execute(
+                    f"DELETE FROM {table_name} WHERE session_id = ?",
+                    (session_id,),
+                )
+
+    def _next_message_seq(self, conn: sqlite3.Connection) -> int:
+        row = conn.execute(
+            "SELECT value FROM ui_storage_meta WHERE key = ?",
+            (_MESSAGE_SEQ_KEY,),
+        ).fetchone()
+        current = int(row["value"]) if row is not None and row["value"] is not None else 0
+        return current + 1
 
     def delete_sessions(self, session_ids: Sequence[str]) -> None:
         if not session_ids:
@@ -679,74 +868,325 @@ class SQLiteUISessionStorage:
         conn = sqlite3.connect(self._db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
+        # Concurrent readers (two worktrees, UI + tests) wait instead of
+        # failing immediately on a locked database.
+        conn.execute("PRAGMA busy_timeout = 30000")
         return conn
 
     def _initialize_schema(self) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with self._connect() as conn:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("BEGIN IMMEDIATE")
+                self._migrate_to_current(conn)
+                conn.commit()
+        except _UnsupportedSchemaError:
+            # Only the destructive-reset opt-in discards stored sessions.
+            # Every other failure (locked DB, I/O error, programming error)
+            # propagates and fails the start instead.
+            if not self._allow_destructive_reset:
+                raise
+            self.reset_to_current_schema()
+
+    def reset_to_current_schema(self) -> None:
+        """Drop all UI session data and recreate the current schema.
+
+        Only reachable from _initialize_schema when allow_destructive_reset
+        is set. Logs loudly: this destroys stored sessions.
+        """
+        logger.warning(
+            "Resetting UI session storage schema to v%d; all stored sessions "
+            "are discarded (SLAVIK_UI_STORAGE_ALLOW_DESTRUCTIVE_RESET=true)",
+            SCHEMA_VERSION_CURRENT,
+        )
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
-            if self._requires_legacy_reset(conn):
-                conn.execute("DROP TABLE IF EXISTS ui_messages")
-                conn.execute("DROP TABLE IF EXISTS chat_messages")
-                conn.execute("DROP TABLE IF EXISTS workspace_messages")
-                conn.execute("DROP TABLE IF EXISTS ui_sessions")
-                conn.execute("DROP TABLE IF EXISTS ui_folders")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS ui_sessions (
-                    session_id TEXT PRIMARY KEY,
-                    principal_id TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    decision_json TEXT,
-                    model_provider TEXT,
-                    model_id TEXT,
-                    title_override TEXT,
-                    folder_id TEXT,
-                    output_text TEXT,
-                    output_updated_at TEXT,
-                    files_json TEXT,
-                    artifacts_json TEXT,
-                    workspace_root TEXT,
-                    policy_profile TEXT,
-                    yolo_armed INTEGER NOT NULL DEFAULT 0,
-                    yolo_armed_at TEXT,
-                    tools_state_json TEXT,
-                    security_revision TEXT,
-                    mode TEXT NOT NULL DEFAULT 'ask',
-                    active_plan_json TEXT,
-                    active_task_json TEXT,
-                    auto_state_json TEXT
-                )
-                """,
-            )
-            self._ensure_columns(conn)
-            conn.execute(
-                "UPDATE ui_sessions SET security_revision = lower(hex(randomblob(16))) "
-                "WHERE security_revision IS NULL"
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS ui_folders (
-                    folder_id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    principal_id TEXT
-                )
-                """,
-            )
-            self._ensure_folder_columns(conn)
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS ui_storage_migrations (
-                    migration_id TEXT PRIMARY KEY
-                )
-                """
-            )
-            self._ensure_message_tables(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            for table_name in (
+                "ui_messages",
+                "chat_messages",
+                "workspace_messages",
+                "ui_sessions",
+                "ui_folders",
+                "ui_storage_migrations",
+                "ui_storage_meta",
+            ):
+                conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+            conn.execute("PRAGMA user_version = 0")
+            self._migrate_to_current(conn)
             conn.commit()
+
+    def _migrate_to_current(self, conn: sqlite3.Connection) -> None:
+        version = self._read_schema_version(conn)
+        if version == 0:
+            self._adopt_v1(conn)
+            version = 1
+        if version == 1:
+            self._ensure_v1_schema(conn)
+            self._validate_v1_schema(conn)
+            self._upgrade_to_v2(conn)
+            version = 2
+        if version == 2:
+            self._ensure_v2_schema(conn)
+            self._validate_v2_schema(conn)
+            return
+        raise _UnsupportedSchemaError(f"Unsupported UI session storage schema version: {version}")
+
+    def _read_schema_version(self, conn: sqlite3.Connection) -> int:
+        row = conn.execute("PRAGMA user_version").fetchone()
+        if row is None or row[0] is None:
+            return 0
+        return int(row[0])
+
+    def _adopt_v1(self, conn: sqlite3.Connection) -> None:
+        """Adopt an unversioned (pre-v1) database as v1, without dropping.
+
+        The legacy ui_messages layout is not adoptable: it fails closed
+        (DB-01) unless the destructive-reset opt-in is set.
+        """
+        if self._requires_legacy_reset(conn):
+            raise _UnsupportedSchemaError(
+                "Legacy ui_messages table present; no automatic migration. "
+                "Set SLAVIK_UI_STORAGE_ALLOW_DESTRUCTIVE_RESET=true to reset."
+            )
+        self._create_v1_tables(conn)
+        self._ensure_v1_schema(conn)
+        self._validate_v1_schema(conn)
+        conn.execute("PRAGMA user_version = 1")
+
+    def _create_v1_tables(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ui_sessions (
+                session_id TEXT PRIMARY KEY,
+                principal_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                decision_json TEXT,
+                model_provider TEXT,
+                model_id TEXT,
+                title_override TEXT,
+                folder_id TEXT,
+                output_text TEXT,
+                output_updated_at TEXT,
+                files_json TEXT,
+                artifacts_json TEXT,
+                workspace_root TEXT,
+                policy_profile TEXT,
+                yolo_armed INTEGER NOT NULL DEFAULT 0,
+                yolo_armed_at TEXT,
+                tools_state_json TEXT,
+                security_revision TEXT,
+                mode TEXT NOT NULL DEFAULT 'ask',
+                active_plan_json TEXT,
+                active_task_json TEXT,
+                auto_state_json TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ui_folders (
+                folder_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                principal_id TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ui_storage_migrations (
+                migration_id TEXT PRIMARY KEY
+            )
+            """
+        )
+
+    def _ensure_v1_schema(self, conn: sqlite3.Connection) -> None:
+        """Additive normalization to the v1 layout (never drops anything)."""
+        self._ensure_columns(conn)
+        self._ensure_folder_columns(conn)
+        self._ensure_message_columns(conn)
+        self._ensure_message_indexes_v1(conn)
+        self._backfill_security_revision(conn)
+
+    def _ensure_v2_schema(self, conn: sqlite3.Connection) -> None:
+        """Additive healing of a v2 database (dropped column/index/meta)."""
+        self._ensure_columns(conn)
+        self._ensure_folder_columns(conn)
+        self._ensure_message_columns(conn)
+        self._backfill_security_revision(conn)
+        healed_seq = False
+        for table_name in ("chat_messages", "workspace_messages"):
+            columns = {
+                str(row["name"])
+                for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+                if isinstance(row, sqlite3.Row)
+            }
+            if "seq" not in columns:
+                conn.execute(f"ALTER TABLE {table_name} ADD COLUMN seq INTEGER NOT NULL DEFAULT 0")
+                healed_seq = True
+        tables = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+            if isinstance(row, sqlite3.Row) and row["name"] is not None
+        }
+        meta_missing = "ui_storage_meta" not in tables
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ui_storage_meta ("
+            "key TEXT PRIMARY KEY, value INTEGER NOT NULL)"
+        )
+        if healed_seq or meta_missing or self._has_unsequenced_messages(conn):
+            self._backfill_message_seq(conn)
+        for table_name in ("chat_messages", "workspace_messages"):
+            conn.execute(f"DROP INDEX IF EXISTS idx_{table_name}_session_created")
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{table_name}_session_seq "
+                f"ON {table_name} (session_id, seq)"
+            )
+
+    def _has_unsequenced_messages(self, conn: sqlite3.Connection) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM chat_messages WHERE seq = 0 "
+            "UNION ALL SELECT 1 FROM workspace_messages WHERE seq = 0 LIMIT 1"
+        ).fetchone()
+        return row is not None
+
+    def _upgrade_to_v2(self, conn: sqlite3.Connection) -> None:
+        """v1 -> v2: global monotonic message sequence (DB-04/DB-05).
+
+        Idempotent by construction (ADD COLUMN guarded, backfill recomputed
+        from scratch) and atomic: the version stamp lands in the same
+        transaction, so a crash mid-upgrade rolls everything back and the
+        next start retries from v1.
+        """
+        for table_name in ("chat_messages", "workspace_messages"):
+            columns = {
+                str(row["name"])
+                for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+                if isinstance(row, sqlite3.Row)
+            }
+            if "seq" not in columns:
+                conn.execute(f"ALTER TABLE {table_name} ADD COLUMN seq INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ui_storage_meta ("
+            "key TEXT PRIMARY KEY, value INTEGER NOT NULL)"
+        )
+        self._backfill_message_seq(conn)
+        for table_name in ("chat_messages", "workspace_messages"):
+            conn.execute(f"DROP INDEX IF EXISTS idx_{table_name}_session_created")
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{table_name}_session_seq "
+                f"ON {table_name} (session_id, seq)"
+            )
+        conn.execute("PRAGMA user_version = 2")
+
+    def _backfill_message_seq(self, conn: sqlite3.Connection) -> None:
+        """Assign one global seq order from (created_at, rowid, lane).
+
+        The order is deterministic: created_at first, rowid breaks ties
+        within a lane, lane breaks the remaining cross-lane ties. Re-running
+        it recomputes the same assignment, so it is safe to call again after
+        a healed (re-added) seq column.
+        """
+        rows = conn.execute(
+            """
+            SELECT message_id, lane FROM (
+                SELECT message_id, 'chat' AS lane, created_at, rowid
+                FROM chat_messages
+                UNION ALL
+                SELECT message_id, 'workspace' AS lane, created_at, rowid
+                FROM workspace_messages
+            ) ORDER BY created_at ASC, rowid ASC, lane ASC
+            """
+        ).fetchall()
+        for index, row in enumerate(rows, start=1):
+            table_name = "chat_messages" if row["lane"] == "chat" else "workspace_messages"
+            conn.execute(
+                f"UPDATE {table_name} SET seq = ? WHERE message_id = ?",
+                (index, row["message_id"]),
+            )
+        conn.execute(
+            "INSERT INTO ui_storage_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (_MESSAGE_SEQ_KEY, len(rows)),
+        )
+
+    def _validate_v1_schema(self, conn: sqlite3.Connection) -> None:
+        self._validate_schema_sets(conn, _V1_TABLE_COLUMNS, "v1")
+        for table_name in ("chat_messages", "workspace_messages"):
+            indexes = {
+                str(row["name"])
+                for row in conn.execute(f"PRAGMA index_list({table_name})").fetchall()
+                if isinstance(row, sqlite3.Row) and row["name"] is not None
+            }
+            if f"idx_{table_name}_session_created" not in indexes:
+                raise _UnsupportedSchemaError(
+                    f"UI session storage v1 schema is missing index "
+                    f"idx_{table_name}_session_created"
+                )
+
+    def _validate_v2_schema(self, conn: sqlite3.Connection) -> None:
+        self._validate_schema_sets(conn, _V2_TABLE_COLUMNS, "v2")
+        for table_name in ("chat_messages", "workspace_messages"):
+            indexes = {
+                str(row["name"])
+                for row in conn.execute(f"PRAGMA index_list({table_name})").fetchall()
+                if isinstance(row, sqlite3.Row) and row["name"] is not None
+            }
+            if f"idx_{table_name}_session_seq" not in indexes:
+                raise _UnsupportedSchemaError(
+                    f"UI session storage v2 schema is missing index idx_{table_name}_session_seq"
+                )
+
+    def _validate_schema_sets(
+        self,
+        conn: sqlite3.Connection,
+        expected: dict[str, tuple[str, ...]],
+        label: str,
+    ) -> None:
+        # Column comparison is by SET, not order: real dev databases prove
+        # order varies (security_revision landed at position 19 in one DB
+        # and last in another, depending on when _ensure_columns added it),
+        # while every access is by name. An extra or missing column still
+        # fails (DB-02); a missing column that additive normalization can
+        # repair never reaches this check.
+        tables = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+            if isinstance(row, sqlite3.Row) and row["name"] is not None
+        }
+        if tables != set(expected):
+            raise _UnsupportedSchemaError(
+                f"UI session storage {label} schema has unexpected tables: "
+                f"extra={sorted(tables - set(expected))}, "
+                f"missing={sorted(set(expected) - tables)}"
+            )
+        for table_name, columns in expected.items():
+            actual = {
+                str(row["name"])
+                for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+                if isinstance(row, sqlite3.Row)
+            }
+            if actual != set(columns):
+                raise _UnsupportedSchemaError(
+                    f"UI session storage {label} schema table {table_name} has "
+                    f"unexpected columns: extra={sorted(actual - set(columns))}, "
+                    f"missing={sorted(set(columns) - actual)}"
+                )
+
+    def _backfill_security_revision(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "UPDATE ui_sessions SET security_revision = lower(hex(randomblob(16))) "
+            "WHERE security_revision IS NULL"
+        )
 
     def _requires_legacy_reset(self, conn: sqlite3.Connection) -> bool:
         existing_tables = {
@@ -763,50 +1203,64 @@ class SQLiteUISessionStorage:
         conn: sqlite3.Connection,
         session_id: str,
     ) -> list[dict[str, JSONValue]]:
-        rows = conn.execute(
-            """
-            SELECT
-                message_id,
-                'chat' AS lane,
-                role,
-                content,
-                created_at,
-                trace_id,
-                parent_user_message_id,
-                attachments_json
-            FROM chat_messages
-            WHERE session_id = ?
-            UNION ALL
-            SELECT
-                message_id,
-                'workspace' AS lane,
-                role,
-                content,
-                created_at,
-                trace_id,
-                parent_user_message_id,
-                attachments_json
-            FROM workspace_messages
-            WHERE session_id = ?
-            ORDER BY created_at ASC
-            """,
-            (session_id, session_id),
-        ).fetchall()
-        messages: list[dict[str, JSONValue]] = []
-        for row in rows:
-            messages.append(
-                {
-                    "message_id": str(row["message_id"]),
-                    "lane": self._decode_lane(row["lane"]),
-                    "role": str(row["role"]),
-                    "content": str(row["content"]),
-                    "created_at": str(row["created_at"]),
-                    "trace_id": _optional_str(row["trace_id"]),
-                    "parent_user_message_id": _optional_str(row["parent_user_message_id"]),
-                    "attachments": self._decode_attachments(row["attachments_json"]),
-                },
-            )
-        return messages
+        return self._load_messages_for_sessions(conn, [session_id]).get(session_id, [])
+
+    def _load_messages_for_sessions(
+        self,
+        conn: sqlite3.Connection,
+        session_ids: list[str],
+    ) -> dict[str, list[dict[str, JSONValue]]]:
+        """Load messages for many sessions with two SELECTs (DB-03).
+
+        One SELECT per lane with `session_id IN (...)`, then a merge by the
+        global seq in Python. The statement count no longer grows with the
+        number of sessions. Messages come back in seq order (v2), which is
+        the true interleaved order across lanes.
+        """
+        by_session: dict[str, list[dict[str, JSONValue]]] = {
+            session_id: [] for session_id in session_ids
+        }
+        if not session_ids:
+            return by_session
+        placeholders = ", ".join("?" for _ in session_ids)
+        for table_name, lane in (("chat_messages", "chat"), ("workspace_messages", "workspace")):
+            rows = conn.execute(
+                f"""
+                SELECT
+                    message_id,
+                    session_id,
+                    '{lane}' AS lane,
+                    role,
+                    content,
+                    created_at,
+                    trace_id,
+                    parent_user_message_id,
+                    attachments_json,
+                    seq
+                FROM {table_name}
+                WHERE session_id IN ({placeholders})
+                ORDER BY seq ASC
+                """,
+                tuple(session_ids),
+            ).fetchall()
+            for row in rows:
+                by_session[str(row["session_id"])].append(self._decode_message_row(row))
+        for messages in by_session.values():
+            messages.sort(key=_message_seq_key)
+        return by_session
+
+    def _decode_message_row(self, row: sqlite3.Row) -> dict[str, JSONValue]:
+        return {
+            "message_id": str(row["message_id"]),
+            "lane": self._decode_lane(row["lane"]),
+            "role": str(row["role"]),
+            "content": str(row["content"]),
+            "created_at": str(row["created_at"]),
+            "trace_id": _optional_str(row["trace_id"]),
+            "parent_user_message_id": _optional_str(row["parent_user_message_id"]),
+            "attachments": self._decode_attachments(row["attachments_json"]),
+            "seq": int(row["seq"]),
+        }
 
     def _decode_decision(self, value: object) -> dict[str, JSONValue] | None:
         if value is None:
@@ -936,42 +1390,32 @@ class SQLiteUISessionStorage:
         if "principal_id" not in existing:
             conn.execute("ALTER TABLE ui_folders ADD COLUMN principal_id TEXT")
 
-    def _ensure_message_tables(self, conn: sqlite3.Connection) -> None:
-        expected_columns = [
-            "message_id",
-            "session_id",
-            "role",
-            "content",
-            "created_at",
-            "trace_id",
-            "parent_user_message_id",
-            "attachments_json",
-        ]
+    def _ensure_message_columns(self, conn: sqlite3.Connection) -> None:
+        """Additive normalization of the message tables (DB-02).
+
+        A table with a wrong column set is NO LONGER dropped and recreated:
+        missing columns are added, a missing table is created with the
+        canonical v1 DDL, and anything unrepairable (an extra column, a
+        missing message_id) is left for the strict validation to reject.
+        """
         for table_name in ("chat_messages", "workspace_messages"):
-            existing = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-            existing_names = [str(row["name"]) for row in existing if isinstance(row, sqlite3.Row)]
-            if existing_names != expected_columns:
-                conn.execute(f"DROP TABLE IF EXISTS {table_name}")
-                conn.execute(
-                    f"""
-                    CREATE TABLE {table_name} (
-                        message_id TEXT PRIMARY KEY,
-                        session_id TEXT NOT NULL,
-                        role TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        trace_id TEXT,
-                        parent_user_message_id TEXT,
-                        attachments_json TEXT NOT NULL DEFAULT '[]',
-                        FOREIGN KEY(session_id) REFERENCES ui_sessions(session_id) ON DELETE CASCADE
-                    )
-                    """,
-                )
+            existing = {
+                str(row["name"])
+                for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+                if isinstance(row, sqlite3.Row)
+            }
+            if not existing:
+                conn.execute(_MESSAGE_TABLE_DDL_V1.format(table_name=table_name))
+                existing = set(_V1_TABLE_COLUMNS[table_name])
+            for column, definition in _MESSAGE_COLUMN_ADD:
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {definition}")
+
+    def _ensure_message_indexes_v1(self, conn: sqlite3.Connection) -> None:
+        for table_name in ("chat_messages", "workspace_messages"):
             conn.execute(
-                f"""
-                CREATE INDEX IF NOT EXISTS idx_{table_name}_session_created
-                ON {table_name} (session_id, created_at)
-                """,
+                f"CREATE INDEX IF NOT EXISTS idx_{table_name}_session_created "
+                f"ON {table_name} (session_id, created_at)"
             )
 
     def _message_table_for_lane(self, lane: object) -> str:
@@ -1136,6 +1580,11 @@ def _normalize_legacy_lane(value: object) -> MessageLane:
         if normalized == "chat":
             return "chat"
     return "chat"
+
+
+def _message_seq_key(message: dict[str, JSONValue]) -> int:
+    seq = message.get("seq")
+    return seq if isinstance(seq, int) else 0
 
 
 def _message_without_legacy_lane(message: dict[str, JSONValue]) -> dict[str, JSONValue]:

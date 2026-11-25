@@ -33,7 +33,7 @@ module = "sentence_transformers"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-addopts = "--cov=core --cov=llm --cov=tools --cov=memory --cov=shared --cov=config --cov=host_bridge --cov-report=term-missing --cov-fail-under=80"
+addopts = "--cov=core --cov=llm --cov=tools --cov=memory --cov=shared --cov=config --cov=host_bridge --cov=server --cov-report=term-missing --cov-fail-under=80"
 testpaths = ["tests"]
 norecursedirs = ["vendor"]
 markers = [

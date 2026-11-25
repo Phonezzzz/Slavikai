@@ -380,7 +380,7 @@ class UIHub:
                 state = self._sessions.get(normalized)
                 if state is None:
                     self._sessions[normalized] = self._new_session_state(normalized_principal)
-                    self._persist_session_locked(normalized)
+                    await self._persist_session_locked(normalized)
                 elif state.principal_id != normalized_principal:
                     raise PermissionError("session belongs to another principal")
                 return normalized
@@ -388,7 +388,7 @@ class UIHub:
             while new_id in self._sessions:
                 new_id = uuid.uuid4().hex
             self._sessions[new_id] = self._new_session_state(normalized_principal)
-            self._persist_session_locked(new_id)
+            await self._persist_session_locked(new_id)
             self._prune_sessions_locked(keep_session_id=new_id)
             return new_id
 
@@ -457,7 +457,13 @@ class UIHub:
             message_lane = _normalize_message_lane(message.get("lane"), default="chat")
             if message_lane != normalized_lane:
                 continue
-            filtered.append(dict(message))
+            # "seq" is an internal storage ordering key (v2); it never
+            # leaves the server. It is stripped here so the wire format and
+            # the expected-history comparison in _append_message are
+            # unchanged.
+            item = dict(message)
+            item.pop("seq", None)
+            filtered.append(item)
         return filtered
 
     def _session_lane_stats(
@@ -557,7 +563,7 @@ class UIHub:
             state.output_text = next_content
             state.output_updated_at = _utc_iso_now() if next_content is not None else None
             state.updated_at = _utc_iso_now()
-            self._persist_session_locked(session_id)
+            await self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
 
     async def get_session_files(self, session_id: str) -> list[str] | None:
@@ -595,7 +601,7 @@ class UIHub:
                 return list(state.files)
             state.files = existing
             state.updated_at = _utc_iso_now()
-            self._persist_session_locked(session_id)
+            await self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
             return list(state.files)
 
@@ -618,7 +624,7 @@ class UIHub:
                 self._sessions[session_id] = state
             state.artifacts.append(dict(artifact))
             state.updated_at = _utc_iso_now()
-            self._persist_session_locked(session_id)
+            await self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
             return dict(artifact)
 
@@ -735,7 +741,7 @@ class UIHub:
                 return {"session_id": session_id, "title": normalized}
             state.title_override = normalized
             state.updated_at = _utc_iso_now()
-            self._persist_session_locked(session_id)
+            await self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
             return {"session_id": session_id, "title": normalized}
 
@@ -757,7 +763,7 @@ class UIHub:
                 return {"session_id": session_id, "folder_id": normalized_folder}
             state.folder_id = normalized_folder
             state.updated_at = _utc_iso_now()
-            self._persist_session_locked(session_id)
+            await self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
             return {"session_id": session_id, "folder_id": normalized_folder}
 
@@ -872,7 +878,7 @@ class UIHub:
                     created_at=created_at,
                     updated_at=restored_updated_at,
                 )
-                self._persist_session_state_locked(
+                await self._persist_session_state_locked(
                     item.session_id,
                     next_state,
                     expected_security_revision=existing.security_revision if existing else None,
@@ -988,7 +994,7 @@ class UIHub:
                 return
             state.workspace_root = normalized
             state.updated_at = _utc_iso_now()
-            self._persist_session_locked(session_id)
+            await self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
 
     async def get_session_security_snapshot(
@@ -1026,7 +1032,7 @@ class UIHub:
             merged = dict(state.tools_state or {})
             if tools_state is not None:
                 merged.update(tools_state)
-            next_state = self._commit_session_security_locked(
+            next_state = await self._commit_session_security_locked(
                 session_id,
                 state,
                 profile=self._normalize_policy_profile(profile)
@@ -1043,7 +1049,7 @@ class UIHub:
             revision=state.security_revision,
         )
 
-    def _commit_session_security_locked(
+    async def _commit_session_security_locked(
         self,
         session_id: str,
         state: _SessionState,
@@ -1066,7 +1072,7 @@ class UIHub:
             updated_at=_utc_iso_now(),
         )
         self._prune_sessions_locked(keep_session_id=session_id)
-        self._persist_session_state_locked(
+        await self._persist_session_state_locked(
             session_id,
             candidate,
             expected_security_revision=existing.security_revision if existing else None,
@@ -1089,7 +1095,7 @@ class UIHub:
     ) -> dict[str, JSONValue]:
         async with self._lock:
             state = self._sessions.get(session_id) or _SessionState()
-            state = self._commit_session_security_locked(
+            state = await self._commit_session_security_locked(
                 session_id,
                 state,
                 profile=self._normalize_policy_profile(profile)
@@ -1128,7 +1134,7 @@ class UIHub:
                 next_value = merged or None
             else:
                 next_value = dict(normalized)
-            state = self._commit_session_security_locked(
+            state = await self._commit_session_security_locked(
                 session_id, state, profile=state.policy_profile, tools_state=next_value
             )
             return self._normalize_tools_state(state.tools_state)
@@ -1147,7 +1153,7 @@ class UIHub:
             if not changed:
                 return
             state.updated_at = _utc_iso_now()
-            self._persist_session_locked(session_id)
+            await self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
             selected_model: dict[str, JSONValue] = {"provider": provider, "model": model_id}
             payload: dict[str, JSONValue] = {
@@ -1188,7 +1194,7 @@ class UIHub:
                 return
             state.status_state = normalized
             state.updated_at = _utc_iso_now()
-            self._persist_session_locked(session_id)
+            await self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
             payload = self._status_payload(session_id, normalized)
             subscribers = list(state.subscribers.values())
@@ -1204,7 +1210,7 @@ class UIHub:
             if state is None:
                 state = _SessionState()
                 self._sessions[session_id] = state
-                self._persist_session_locked(session_id)
+                await self._persist_session_locked(session_id)
             payload = self._status_payload(session_id, state.status_state)
         return self._build_event("status", payload)
 
@@ -1214,7 +1220,7 @@ class UIHub:
             if state is None:
                 state = _SessionState()
                 self._sessions[session_id] = state
-                self._persist_session_locked(session_id)
+                await self._persist_session_locked(session_id)
             payload: dict[str, JSONValue] = {
                 "session_id": session_id,
                 "mode": state.mode,
@@ -1240,7 +1246,7 @@ class UIHub:
             if state is None:
                 state = _SessionState()
                 self._sessions[session_id] = state
-                self._persist_session_locked(session_id)
+                await self._persist_session_locked(session_id)
             self._trim_event_buffer_locked(state)
             if normalized_last_id is None:
                 return [], False
@@ -1263,7 +1269,7 @@ class UIHub:
             if state is None:
                 state = _SessionState()
                 self._sessions[session_id] = state
-                self._persist_session_locked(session_id)
+                await self._persist_session_locked(session_id)
             return {
                 "mode": state.mode,
                 "active_plan": dict(state.active_plan) if state.active_plan is not None else None,
@@ -1338,7 +1344,7 @@ class UIHub:
                     state.active_plan = normalized_plan
                     state.active_task = normalized_task
                     state.updated_at = _utc_iso_now()
-                    self._persist_session_locked(session_id)
+                    await self._persist_session_locked(session_id)
                     self._prune_sessions_locked(keep_session_id=session_id)
                     payload = {
                         "session_id": session_id,
@@ -1406,7 +1412,7 @@ class UIHub:
             )
             self._sessions[session_id] = next_state
             try:
-                self._persist_session_locked(session_id)
+                await self._persist_session_locked(session_id)
             except Exception:
                 self._sessions[session_id] = previous
                 raise
@@ -1476,7 +1482,7 @@ class UIHub:
                 event: dict[str, JSONValue] | None = None
             else:
                 state.updated_at = _utc_iso_now()
-                self._persist_session_locked(session_id)
+                await self._persist_session_locked(session_id)
                 self._prune_sessions_locked(keep_session_id=session_id)
                 subscribers = list(state.subscribers.values())
                 event = self._build_event("session.workflow", payload)
@@ -1539,7 +1545,7 @@ class UIHub:
                 state.messages = state.messages[-self._max_messages_per_session :]
             history = self._messages_for_lane(state.messages, lane=lane)
             state.updated_at = _utc_iso_now()
-            self._persist_session_locked(session_id)
+            await self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
             subscribers = list(state.subscribers.values())
             event = self._build_event(
@@ -1597,7 +1603,7 @@ class UIHub:
             del state.messages[assistant_index]
             del state.messages[user_index]
             state.updated_at = _utc_iso_now()
-            self._persist_session_locked(session_id)
+            await self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
             subscribers = list(state.subscribers.values())
             event = self._build_event(
@@ -1622,7 +1628,7 @@ class UIHub:
             if state is None:
                 state = _SessionState()
                 self._sessions[session_id] = state
-                self._persist_session_locked(session_id)
+                await self._persist_session_locked(session_id)
             subscriber = _SubscriberState(session_id=session_id, queue=queue)
             state.subscribers[queue] = subscriber
             self._flush_pending_resync(subscriber)
@@ -1699,7 +1705,7 @@ class UIHub:
             ]
             self._sessions[session_id] = next_state
             try:
-                self._persist_session_locked(session_id)
+                await self._persist_session_locked(session_id)
             except Exception:
                 self._sessions[session_id] = previous
                 raise
@@ -1736,7 +1742,7 @@ class UIHub:
                 return
             state.decision_packet = next_decision
             state.updated_at = _utc_iso_now()
-            self._persist_session_locked(session_id)
+            await self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
             if state.decision_packet is None:
                 state.last_decision_id = None
@@ -1793,7 +1799,7 @@ class UIHub:
 
             state.decision_packet = candidate
             state.updated_at = _utc_iso_now()
-            self._persist_session_locked(session_id)
+            await self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
             decision_id_raw = candidate.get("id")
             if isinstance(decision_id_raw, str):
@@ -2319,14 +2325,18 @@ class UIHub:
             if restored.principal_id != principal_id:
                 migrated_session_ids.append(restored.session_id)
         for session_id in migrated_session_ids:
-            self._persist_session_state_locked(
-                session_id,
-                self._sessions[session_id],
+            # Sync __init__ path: save directly (the async funnel cannot
+            # run before the event loop exists). Same storage call, no
+            # split/rejoin round-trip, so the loaded seq order is kept.
+            self._storage.save_session(
+                self._build_persisted_session(session_id, self._sessions[session_id]),
                 restore_owner_principal_id=self._legacy_principal_id,
             )
         for session_id in recovered_session_ids:
             try:
-                self._persist_session_locked(session_id)
+                state = self._sessions.get(session_id)
+                if state is not None:
+                    self._storage.save_session(self._build_persisted_session(session_id, state))
             except Exception:  # noqa: BLE001
                 logging.getLogger(__name__).exception(
                     "Recovered session decision persistence failed"
@@ -2364,23 +2374,21 @@ class UIHub:
             if folder is not None and folder.principal_id == state.principal_id:
                 continue
             state.folder_id = None
-            self._persist_session_locked(session_id)
+            # Sync __init__ path: save directly, same as the async funnel.
+            self._storage.save_session(self._build_persisted_session(session_id, state))
 
-    def _persist_session_locked(self, session_id: str) -> None:
+    async def _persist_session_locked(self, session_id: str) -> None:
         state = self._sessions.get(session_id)
         if state is None:
             return
-        self._persist_session_state_locked(session_id, state)
+        await self._persist_session_state_locked(session_id, state)
 
-    def _persist_session_state_locked(
+    def _build_persisted_session(
         self,
         session_id: str,
         state: _SessionState,
-        *,
-        expected_security_revision: str | None = None,
-        restore_owner_principal_id: str | None = None,
-    ) -> None:
-        legacy_session = PersistedSession(
+    ) -> PersistedSession:
+        return PersistedSession(
             session_id=session_id,
             principal_id=state.principal_id,
             created_at=state.created_at,
@@ -2405,17 +2413,35 @@ class UIHub:
             active_task=(dict(state.active_task) if state.active_task is not None else None),
             auto_state=(dict(state.auto_state) if state.auto_state is not None else None),
         )
-        domains = split_persisted_session_domains(legacy_session)
-        persisted = legacy_session_from_domain_records(domains)
+
+    async def _persist_session_state_locked(
+        self,
+        session_id: str,
+        state: _SessionState,
+        *,
+        expected_security_revision: str | None = None,
+        restore_owner_principal_id: str | None = None,
+    ) -> None:
+        # The in-memory message order is persisted as-is: no split/rejoin
+        # round-trip here. The round-trip reorders messages lane-major,
+        # which would misassign the v2 global seq to interleaved messages.
+        # (The restore path still goes through split/rejoin at load, where
+        # every message carries a seq and the merge restores true order.)
+        persisted = self._build_persisted_session(session_id, state)
+        # MEM-01: SQLite writes run off the event loop, so a 2000-message
+        # save no longer stalls every concurrent request.
         if restore_owner_principal_id is not None:
-            self._storage.save_session(
+            await asyncio.to_thread(
+                self._storage.save_session,
                 persisted,
                 expected_security_revision=expected_security_revision,
                 restore_owner_principal_id=restore_owner_principal_id,
             )
         else:
-            self._storage.save_session(
-                persisted, expected_security_revision=expected_security_revision
+            await asyncio.to_thread(
+                self._storage.save_session,
+                persisted,
+                expected_security_revision=expected_security_revision,
             )
 
     def _prune_sessions_locked(self, *, keep_session_id: str | None = None) -> None:

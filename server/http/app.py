@@ -293,8 +293,16 @@ def create_app(
     app["plan_cancellation_registry"] = PlanCancellationRegistry()
     app["terminal_manager"] = TerminalTool()
     app["embedding_download_manager"] = EmbeddingDownloadManager()
+    if os.environ.get("SLAVIK_UI_STORAGE_ALLOW_DESTRUCTIVE_RESET") == "true":
+        logger.warning(
+            "UI session storage destructive reset is ENABLED: an unsupported "
+            "schema will discard all stored sessions instead of failing the "
+            "start (SLAVIK_UI_STORAGE_ALLOW_DESTRUCTIVE_RESET=true)"
+        )
     resolved_ui_storage = ui_storage or SQLiteUISessionStorage(
         api.PROJECT_ROOT / ".run" / "ui_sessions.db",
+        allow_destructive_reset=os.environ.get("SLAVIK_UI_STORAGE_ALLOW_DESTRUCTIVE_RESET")
+        == "true",
     )
     provider = cast(ScopedAgentProvider[AgentProtocol], app["agent_provider"])
 
