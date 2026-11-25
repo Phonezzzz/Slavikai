@@ -198,15 +198,16 @@
 - **E03-T05 — DONE** (process run/poll/kill: `host.process.run/poll/kill` только для approved command profiles; enforcement Landlock + NEWUSER|NEWNET|NEWIPC + NO_NEW_PRIVS + обязательный seccomp-запрет сокетов и метаданных; helper закрывает служебные FD до exec; startup-probe через тот же helper под реальным systemd user unit; tree kill — отдельный cgroup v2 на process_id, финальный статус — после опустошения cgroup и reap лидера; poll — SHA-256 хвостов + frozen snapshot, абсолютные offsets + retained_from; 14 rework-раундов по Codex review, 22 треда закрыты ответами с фиксами+тестами по прецеденту #196 на «ок» владельца). Evidence: PR #198 MERGED 2026-11-24 (main 0dd07de), `tests/test_host_bridge_process.py` (107 тестов), `make check` зелёный (2994 passed, coverage 83.28%); ветка `pr-e03-t05-process`.
 - **SEC-04 — DONE** (TOCTOU в UI-download: fd-based `_read_workspace_file_bytes` в `server/http/common/workspace_runtime.py` — обход по компонентам через `openat` + `O_NOFOLLOW`, сверка mount, чтение только из fd после `fstat`, кап проверяется на fstat и на реально прочитанных байтах; тот же helper в `settings.py:1044` для TTS-аудио; 1 rework-раунд по Codex review — 3 findings: двойной слеш `//`, относительный путь штатного TTS, macOS без `/proc/self/mountinfo` — все закрыты регрессионными тестами red/green). Evidence: PR #200 MERGED 2026-11-24 (main 7ced6826), `make check` зелёный (3005 passed, 3 известных ui_api); ветка `pr-sec04-ui-download`.
 - **SEC-03 — VERIFY DONE** (обход не доказан: все ветки fallback при недоступности rootless fail-closed — проверено runtime на реальном tool path: local `execute_python` → unavailable, `run_command` → ApprovalRequired, container без executor → failure, YOLO-режим → `sandbox_execution_failure`; 5 характеризационных тестов фиксируют fail-closed). Evidence: PR #201 MERGED 2026-11-24 (main 5202510), `tests/test_agent_computer_runtime.py` + `tests/test_terminal_sandbox.py`; ветка `pr-sec03-verify-tests`.
+- **E03-T06 — DONE** (run-scoped STOP with ownership binding: новая capability `host.process.stop`, ключ владения (principal_id, run_id), retry с другой привязкой → `binding_mismatch`; STOP убивает только процессы своего run; общий 4 s deadline STOP ограничивает сигнализацию; гонка RUN/STOP — через `_stopped_runs` marks + destroy в точке adoption; orphan sweep — только под доказанным эксклюзивным владением daemon (flock `host-bridge.lock`, namespaced scope tokens); namespaced probe scope; claim `runtime.host_bridge.daemon` v3 → v4, partial до T11; ADR-0013 §4 — отдельный открытый вопрос; 2 rework-раунда по Codex review — 5 findings раунда 1 (3 P1 + 2 P2) и 2 P2 раунда 2, все закрыты регрессионными тестами red/green; 7 тредов закрыты ответами с фиксами+тестами по прецеденту #196 на «ок» владельца). Evidence: PR #203 MERGED 2026-11-25 (main 658a638), `tests/test_host_bridge_process.py` + `tests/test_host_bridge_daemon.py`, `make check` зелёный (3045 passed, 18 skipped, coverage 83.36%, 3 известных ui_api); ветка `pr-e03-t06-stop-ownership`. Вне scope: `_kill` имеет ту же форму, что finding 1 раунда 2 (один `signal_tree` до вычисления deadline) — кандидат в отдельный follow-up (стрим A).
 
-## Readiness: 65 последовательных тикетов
+## Readiness: 65 тикетов (dependency-driven parallel development с 2026-11-25)
 
 | Epic | IDs | Count | Status |
 |---|---|---:|---|
 | E00 | T01–T03 | 3 | E00-T01 done; E00-T02 done; E00-T03 done |
 | E01 | T01–T09 | 9 | E01 T01–T09 DONE |
 | E02 | T01–T10 | 10 | T01 DONE (PR #166); T02 DONE (PR #167); T03 DONE (PR #180); T04 DONE (PR #181); T05 DONE (PR #182); T06 DONE (PR #183, main dd207de; acceptance закрыт PR #188); T07 DONE (PR #186, main 20af69c); T08 DONE (PR #191, main c779bff; ручная приёмка шагов 2 и 8 — 2026-11-23); T09 DONE (PR #187, main 421314c); T10 DONE (PR #188, main f581132) |
-| E03 | T01–T11 | 11 | T01 DONE (PR #193, main 325d2f9); T02 DONE (PR #194, main cd6f0d4); T03 DONE (PR #195, main 8147223); T04 DONE (PR #196, main 2020b81); T05 DONE (PR #198, main 0dd07de) |
+| E03 | T01–T11 | 11 | T01 DONE (PR #193, main 325d2f9); T02 DONE (PR #194, main cd6f0d4); T03 DONE (PR #195, main 8147223); T04 DONE (PR #196, main 2020b81); T05 DONE (PR #198, main 0dd07de); T06 DONE (PR #203, main 658a638) |
 | E04 | T01–T06 | 6 | T03 slice DONE (PR #164); остальное NEEDS_REFINEMENT |
 | E05 | T01–T07 | 7 | NEEDS_REFINEMENT |
 | E06 | T01–T06 | 6 | NEEDS_REFINEMENT |
@@ -216,13 +217,31 @@
 ## Обязательный цикл Muse
 
 1. Проверить `git worktree list`, `git status`, branch, current HEAD и `origin/main` во **втором** дереве. Исходный checkout не изменять.
-2. Прочитать `AGENTS.md`, `docs/workflow/dev_workflow.md`, соглашение, roadmap и `STATE.md`; брать ровно один тикет.
+2. Прочитать `AGENTS.md`, `docs/workflow/dev_workflow.md`, соглашение, roadmap и `STATE.md`; брать ровно один тикет на worktree (назначенный координатором).
 3. На чистой PR-ветке от актуального `origin/main` выполнить `make preflight`, реализовать тикет, targeted/E2E tests, `make check`; push и открыть PR.
 4. Дождаться успешного GitHub CI и независимого чистого Codex review для **последнего** commit, устранить blockers; выполнить `make git-check` и повторить fast-forward eligibility checks.
 5. **Вручную** выполнить FF push PR-ветки в `origin/main` из дерева Muse (`git push origin <pr-branch>:refs/heads/main`) только если политика GitHub допускает. Если нет — STOP и обратиться к владельцу, без обхода.
 6. Проверить точный SHA удалённого `main`, GitHub `merged`, обновить служебную ветку в worktree Muse fast-forward, записать доказательства, только затем следующий тикет. PR-ветки пока не удалять.
 7. Любая содержательная архитектурная развилка — `BLOCKED: REAL_IMPLEMENTATION_FORK`, варианты/trade-offs владельцу. `sudo` — отдельное явное согласование команды.
 
+### Координатор параллельной разработки (с 2026-11-25)
+
+- Один координатор (главный агент) — merge queue, docs-sync, распределение
+  задач между стримами, ведение dependency graph, контроль пересечения scope,
+  контроль Codex-бюджета, передача архитектурных развилок Technical Director.
+- Technical Director отвечает за совместимость архитектуры между стримами,
+  особенно общие contracts Host Bridge / Workspace Executor / Verification
+  Runtime. Инструкции обоих директорских плагинов обновляются под параллельную
+  разработку (workflow сейчас ориентирован на последовательную).
+- Реестр worktrees (актуально на 2026-11-25, main 658a638):
+  - A `Slavikai-rebuild` — E03-T06 DONE (PR #203 MERGED, main 658a638); следующий E03-T07.
+  - C `Slavikai-foundation` — storage-группа (схема утверждена владельцем 2026-11-25).
+  - D `Slavikai-verification` — E05-T01 (схема утверждена владельцем 2026-11-25).
+  - E `Slavikai-workspace` — не создан (после решения E04-T01 + refinement T02).
+  - Владелец `Slavikai` — read-only.
+- Один активный implementation-тикет на worktree; новый тикет берётся только
+  после merge предыдущего в этом worktree (или явного решения координатора).
+
 ## Resume
 
-**Next active:** E03-T06 (STOP and process ownership) — SEC-04 DONE (PR #200 MERGED 2026-11-24, main `7ced6826`); SEC-03 VERIFY DONE (PR #201 MERGED 2026-11-24, main `5202510`); следующий — E03-T06. E03-T01 — DONE (PR #193 MERGED, main `325d2f9`, ADR-0013); E03-T02 — DONE (PR #194 MERGED, main `cd6f0d4`); E03-T03 — DONE (PR #195 MERGED, main `8147223`); E03-T04 — DONE (PR #196 MERGED, main `2020b81`); E03-T05 — DONE (PR #198 MERGED 2026-11-24, main `0dd07de`). **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.
+**Next active:** E03-T07 (host diagnostics/service read-only, стрим A) — E03-T06 DONE (PR #203 MERGED 2026-11-25, main `658a638`; claim `runtime.host_bridge.daemon` v4 — partial до T11; ADR-0013 §4 — отдельный открытый вопрос). E03-T01 — DONE (PR #193 MERGED, main `325d2f9`, ADR-0013); E03-T02 — DONE (PR #194 MERGED, main `cd6f0d4`); E03-T03 — DONE (PR #195 MERGED, main `8147223`); E03-T04 — DONE (PR #196 MERGED, main `2020b81`); E03-T05 — DONE (PR #198 MERGED 2026-11-24, main `0dd07de`). **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание worktree без решения владельца, правки в исходном дереве.

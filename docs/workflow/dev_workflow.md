@@ -2,15 +2,21 @@
 
 Цель: линейная история `main`, PR-ветки вливаются без merge-коммитов, история PR сохраняется.
 
-## Рабочие деревья и изоляция — решение владельца от 2026-11-16
+## Рабочие деревья и изоляция — решение владельца от 2026-11-25 (параллельная разработка)
 
 - **Исходный worktree владельца:** `/home/ki/Project/Slavikai`, сейчас `main`. Muse не переключает в нём ветки, не меняет файлы, не делает merge. Состояние и неотслеживаемые файлы владельца сохраняются.
-- **Рабочий worktree Muse:** `/home/ki/Project/Slavikai-rebuild`, создан через `git worktree add` на ветке `muse/slavikai-rebuild` от `470a9a63280f9dac392f559a6fe99115db2e50d0`. Это второй worktree того же репозитория и **единственная рабочая директория Muse для roadmap**.
-- Ветка `muse/slavikai-rebuild` служебная и не принимает изменения тикетов. Muse создаёт новую `pr-* ` ветку от актуального `origin/main` на каждый тикет; после успешного merge возвращается на служебную ветку и обновляет её fast-forward.
-- Третье worktree, копия репозитория и параллельный implementation без отдельного согласия владельца запрещены. Muse не должна создавать другие деревья сама.
+- **Именованные рабочие worktrees Muse** (стримы, см. AGENTS.md):
+  - `/home/ki/Project/Slavikai-rebuild` — стрим A (Host Bridge), ветка `muse/slavikai-rebuild`;
+  - `/home/ki/Project/Slavikai-foundation` — стрим C (Foundation), ветка `muse/slavikai-foundation`;
+  - `/home/ki/Project/Slavikai-verification` — стрим D (Verification & Recovery), ветка `muse/slavikai-verification`;
+  - `/home/ki/Project/Slavikai-workspace` — стрим E (Workspace Executor), создаётся после решения E04-T01 и refinement E04-T02.
+- Служебные ветки `muse/slavikai-*` не принимают изменения тикетов. Muse создаёт новую `pr-* ` ветку от актуального `origin/main` в своём worktree на каждый тикет; после успешного merge возвращается на служебную ветку и обновляет её fast-forward. **Один активный implementation-тикет на worktree.**
+- Новое worktree — только решением владельца (новый стрим); список выше — закрытый. Копия репозитория без отдельного согласия владельца запрещена. Muse не должна создавать другие деревья сама.
 - Git worktree — не резервная копия. Recovery baseline фиксируется неизменяемым SHA исходного `main` (`470a9a63280f9dac392f559a6fe99115db2e50d0`); за дополнительным backup/тегом обратиться к владельцу.
 - `git reset`, `git clean`, `stash`, force push, удаление чужих изменений запрещены без явного решения. Между деревьями не переносить uncommitted changes. Независимые read-only анализы допустимы.
-- Все команды workflow ниже для Muse выполняются **только во втором дереве**; исходный используется владельцем и другими явно допущенными исполнителями.
+- Все команды workflow ниже для Muse выполняются **только в назначенном координатором worktree**; исходный используется владельцем и другими явно допущенными исполнителями.
+- **Merge queue — централизованная, с just-in-time rebase** (см. AGENTS.md): в `main` вливается ровно один PR за раз, только fast-forward, только после зелёного CI и чистого независимого Codex review вливаемого SHA. Перед merge выбранного PR — его just-in-time rebase на актуальный `origin/main` → `make check` → Codex ре-ревью нового head; остальные PR не трогаются без реальной зависимости, конфликта либо перед их собственной интеграцией.
+- **Runtime isolation: worktree — это не изоляция runtime** (см. AGENTS.md): отдельный `XDG_RUNTIME_DIR` на worktree для демона/тестов; общий venv только читается (`pip install` параллельно запрещён); opt-in verifier E2E — только с `SLAVIK_VERIFIER_E2E_STATE` свой на worktree.
 
 ## Данные локальной разработки
 
@@ -30,8 +36,8 @@
 
 ## Правила выполнения PR
 
-1. Muse работает только в `/home/ki/Project/Slavikai-rebuild`: прочитать `ROADMAP.md`, `STATE.md`, соглашение; выполнить `git worktree list`, `git status`, `git fetch origin`, сверить `origin/main` и текущий branch. Исходный checkout остаётся нетронутым.
-2. На каждый PR во втором дереве создать отдельную ветку `pr-<номер>-<slug>` непосредственно от актуального `origin/main` (не от служебной ветки без синхронизации). На чистой ветке до изменений запустить `make preflight`. Незавершённый PR продолжать в его ветке.
+1. Muse работает только в назначенном координатором worktree: прочитать `ROADMAP.md`, `STATE.md`, соглашение; выполнить `git worktree list`, `git status`, `git fetch origin`, сверить `origin/main` и текущий branch. Исходный checkout остаётся нетронутым.
+2. На каждый PR в своём worktree создать отдельную ветку `pr-<номер>-<slug>` непосредственно от актуального `origin/main` (не от служебной ветки без синхронизации). На чистой ветке до изменений запустить `make preflight`. Незавершённый PR продолжать в его ветке.
 3. Реализовать задачу и выполнить targeted tests. Перед commit запустить `make check`.
 4. Сделать commit, push PR-ветки на GitHub и открыть PR. Push необходим для GitHub
    CI и review, но не является завершением задачи.
@@ -40,15 +46,17 @@
 6. Перед merge обновить remote refs. Если `origin/main` продвинулся, rebase PR-ветку,
    повторить `make check`, push и необходимые проверки/review. После синхронизации
    запустить `make git-check`: он требует clean worktree, upstream без ahead/behind,
-   актуальную базу `origin/main` и повторяет canonical check.
+   актуальную базу `origin/main` и повторяет canonical check. Merge queue: rebase —
+   только выбранного PR (just-in-time, делает координатор); остальные PR при этом
+   не трогаются.
 7. После `make git-check`, CI и независимого чистого Codex review **текущего опубликованного HEAD** выполнить обычный **ручной fast-forward merge**:
-   - Для Muse (во втором дереве): повторить `git fetch origin`; убедиться, что `origin/main` является предком текущей PR-ветки и remote PR HEAD равен локальному; выполнить `git push origin <pr-branch>:refs/heads/main`. Non-fast-forward push Git отклонит. Это обновляет `main` непосредственно без merge-коммита и без работы в исходном worktree.
+   - Для Muse (в своём worktree): повторить `git fetch origin`; убедиться, что `origin/main` является предком текущей PR-ветки и remote PR HEAD равен локальному; выполнить `git push origin <pr-branch>:refs/heads/main`. Non-fast-forward push Git отклонит. Это обновляет `main` непосредственно без merge-коммита и без работы в исходном worktree.
    - Для владельца/исполнителя в исходном дереве прежний порядок остаётся: `git merge --ff-only <pr-branch>` в `main` и `git push origin main`.
-   - GitHub auto-merge и merge queue не включать. Если branch protection отвергает прямой push, `origin/main` изменился или есть blocker/неразрешённая развилка — **STOP**, сообщить владельцу, не выполнять обходов.
+   - GitHub auto-merge и встроенную merge queue GitHub не включать. Если branch protection отвергает прямой push, `origin/main` изменился или есть blocker/неразрешённая развилка — **STOP**, сообщить владельцу, не выполнять обходов.
 8. Подтвердить `git ls-remote origin refs/heads/main` == точный PR HEAD и статус `merged` на GitHub; `closed` без `merged` недостаточно. Если GitHub не отображает PR как merged, выяснить причину до перехода к следующему тикету.
-9. Для Muse вернуться в служебную `muse/slavikai-rebuild` и обновить её `git merge --ff-only origin/main` (только после clean status); `main` во втором дереве не check out. Тикетные ветки пока **не удалять**; удаление требует отдельного решения владельца. Для исходного worktree допускается прежнее завершение на `main`. Следующий тикет — только по очереди `STATE.md`, без параллельного запуска.
+9. Для Muse вернуться в служебную ветку своего worktree (`muse/slavikai-*`) и обновить её `git merge --ff-only origin/main` (только после clean status); `main` в рабочих деревьях не check out. Тикетные ветки пока **не удалять**; удаление требует отдельного решения владельца. Для исходного worktree допускается прежнее завершение на `main`. Следующий тикет в том же worktree — только после merge предыдущего; параллельные стримы — по Streams в ROADMAP.md.
 
-`make preflight` — pre-implementation gate. `make git-check` — последний pre-merge gate. Правило двух worktree и ручного fast-forward для Muse также закреплено в [рабочем соглашении](../../slavikai-how-to-work-with-muse.md).
+`make preflight` — pre-implementation gate. `make git-check` — последний pre-merge gate. Правило именованных worktrees и ручного fast-forward для Muse также закреплено в [рабочем соглашении](../../slavikai-how-to-work-with-muse.md).
 Они имеют разные требования и не взаимозаменяемы.
 
 ## CI и review

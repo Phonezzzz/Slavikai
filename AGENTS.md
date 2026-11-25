@@ -53,13 +53,28 @@
 
 ## Non-negotiable rules
 
-- **Два согласованных Git worktree (решение владельца 2026-11-16):**
-  - `/home/ki/Project/Slavikai` — исходное дерево владельца, обычно `main`; Muse не переключает в нём ветки и не меняет файлы.
-  - `/home/ki/Project/Slavikai-rebuild` — выделенное дерево Muse, созданное от `main` 470a9a6 на служебной ветке `muse/slavikai-rebuild`. Все тикеты перестройки выполняются **только здесь**.
-- Эти два дерева принадлежат одному Git-репозиторию, имеют общую историю и отдельные HEAD/index/working files. Это не две независимые копии и не backup: исходный baseline закреплён Git SHA.
-- Для Muse: строго один активный тикет → одна отдельная PR-ветка от актуального `origin/main` во втором дереве; исходный checkout не использовать даже для merge. Служебная `muse/slavikai-rebuild` — не PR-ветка.
-- Третье дерево и дополнительные копии запрещены без нового согласования владельца.
-- Параллельные read-only subagents допустимы, но изменения исходного дерева владельца и рабочего дерева Muse не смешиваются.
+- **Именованные Git worktrees (решение владельца 2026-11-25, переход от двух
+  деревьев к dependency-driven parallel development):**
+  - `/home/ki/Project/Slavikai` — исходное дерево владельца, обычно `main`;
+    Muse не переключает в нём ветки и не меняет файлы (read-only).
+  - `/home/ki/Project/Slavikai-rebuild` — стрим A (Host Bridge), служебная ветка
+    `muse/slavikai-rebuild`.
+  - `/home/ki/Project/Slavikai-foundation` — стрим C (Foundation), служебная ветка
+    `muse/slavikai-foundation`.
+  - `/home/ki/Project/Slavikai-verification` — стрим D (Verification & Recovery),
+    служебная ветка `muse/slavikai-verification`.
+  - `/home/ki/Project/Slavikai-workspace` — стрим E (Workspace Executor),
+    создаётся после решения E04-T01 и refinement E04-T02.
+- Все деревья принадлежат одному Git-репозиторию, имеют общую историю и
+  отдельные HEAD/index/working files. Это не независимые копии и не backup:
+  исходный baseline закреплён Git SHA.
+- **Один активный implementation-тикет на worktree.** Два worktree никогда не
+  работают на одной PR-ветке и не получают пересекающийся scope без согласования
+  координатора. Служебные ветки `muse/slavikai-*` — не PR-ветки; каждая PR-ветка
+  создаётся от актуального `origin/main` в своём worktree.
+- Новое дерево — только решением владельца (новый стрим), список выше — закрытый.
+- Параллельные read-only subagents допустимы, но изменения исходного дерева
+  владельца и рабочих деревьев Muse не смешиваются.
 - Работа никогда не ведётся напрямую в `main`.
 - Каждая задача выполняется в отдельной PR-ветке.
 - На новой чистой PR-ветке до изменений: `make preflight`.
@@ -70,7 +85,69 @@
 - После commit и push перед merge: `make git-check`.
 - `main` сохраняет линейную историю: **только fast-forward**, без merge-коммитов. В исходном дереве допустим старый маршрут `git merge --ff-only` → `git push origin main`; **Muse исходное дерево не трогает** и после всех gates выполняет явный `git push origin <pr-branch>:refs/heads/main` из своего worktree (Git отклоняет non-fast-forward). Перед push обязательно `make git-check`, актуальный fetch, проверка `origin/main` как предка PR HEAD; при запрете push защитой ветки — STOP и вопрос владельцу, без обхода.
 - После подтверждённого merge Muse возвращается в служебную ветку `muse/slavikai-rebuild` и fast-forward синхронизирует её с `origin/main`, **не переходя на `main` во втором дереве**.
-- Ветки завершённых тикетов Muse пока сохраняются; удаление только по отдельному решению владельца. GitHub auto-merge и merge queue не включать.
+- **Merge queue — централизованная, с just-in-time rebase (решение 2026-11-25).
+  Массового rebase всех открытых PR после каждого merge НЕТ.**
+  - Единственный координатор (главный агент) управляет merge в `main`,
+    docs-sync и распределением задач между стримами.
+  - В `main` вливается ровно один PR за раз, только fast-forward, только после
+    зелёного CI и чистого независимого Codex review именно того SHA, который
+    вливается (инвариант из правила выше — без изменений).
+  - Перед merge выбранного PR координатор делает его just-in-time rebase на
+    актуальный `origin/main` → `make check` → Codex ре-ревью нового head.
+    Остальные открытые PR НЕ трогаются при каждом merge: они обновляются
+    только при реальной зависимости, конфликте либо перед их собственной
+    интеграцией.
+  - Порядок merge — по §6 аудита параллельности (`parallel-audit-2026-11-25.md`)
+    и DAG в ROADMAP.md; порядок merge не является новой искусственной
+    последовательностью всего roadmap. Hard dependencies, semantic dependencies
+    и временные конфликты файлов различаются: временный конфликт не блокирует
+    чужой стрим, а решается в merge queue.
+  - Общие contracts между E03, E04 и E05 согласовываются до реализации
+    зависимых компонентов (refinement-контракт до имплементации).
+  - Refinement-конвейер идёт на несколько тикетов вперёд независимо от
+    implementation (read-only работа на этой VM, worktree не требует).
+- **Runtime isolation: worktree — это не изоляция runtime (проверено пробой
+  2026-11-25).**
+  - Git branches — отдельные; working directories — отдельные; runtime sockets —
+    отдельные (`XDG_RUNTIME_DIR` свой на worktree, socket dir демона
+    `$XDG_RUNTIME_DIR/slavikai/` — свой на worktree).
+  - Systemd scopes — общий user manager на весь UID; изоляция — только через
+    уникальные имена unit (`slavikai-bridge-<uuid>.scope`) и orphan sweep строго
+    в своём namespace (T06, PR #203).
+  - Test databases — отдельные: `TaskRunStore`/`PreferencesStore` изолированы
+    в `tmp_path` (conftest), `.run/task_runs.db` в тестах — только в tmp.
+  - Runtime ports — без пересечения: все тестовые HTTP-серверы биндятся на
+    порт 0 (эфемерный); фиксированных портов в тестах нет.
+  - Build caches — отдельные: `.pytest_cache`, `.coverage`, `__pycache__`,
+    `.ruff_cache`, `.mypy_cache` живут внутри каждого worktree.
+  - Python venv — общий `/home/ki/Project/Slavikai/venv` (override
+    `VENV_DIR=... PYTHON=.../bin/python`) только при отсутствии изменений
+    requirements. `make check` его только читает. `pip install` / `make venv`
+    в двух worktrees одновременно запрещён; перед первой параллельной проверкой
+    venv один раз приводится в порядок последовательно.
+  - Тестовые ресурсы — `tmp_path`/`tmp_path_factory` на каждый запуск; исключение:
+    opt-in verifier E2E (`SLAVIK_RUN_QUALIFIED_VERIFIER_E2E=1`) использует
+    фиксированный `~/.cache/slavikai-qualified-verifier-e2e` — при запуске
+    задавать `SLAVIK_VERIFIER_E2E_STATE` свой на worktree.
+  - `main` — единственный координатор merge (см. merge queue выше).
+  - **Чеклист перед первым параллельным `make check`:**
+    1. Один последовательный `make venv` с override на общий venv (или сверка +
+       `touch` маркеров `.installed` / `.installed-dev`) — иначе первый `make check`
+       в новом worktree начнёт `pip install` в общий venv.
+    2. `npm ci` в `ui/` каждого нового worktree.
+    3. Отдельный `XDG_RUNTIME_DIR` на worktree для любого запуска демона/тестов
+       (в т.ч. live-тестов).
+    4. Конкурентные live bridge-тесты — только после мержа фикса P1 4687943835
+       (T06) + namespaced probe scope: оба в PR #203 (main `658a638`, 2026-11-25).
+    5. Opt-in verifier E2E — только с `SLAVIK_VERIFIER_E2E_STATE` свой на worktree.
+- **Codex-бюджет — приоритет стримам A (Host Bridge) и C (Foundation).**
+  При исчерпании лимита review gates для security-critical и
+  architecture-critical PR **не ослабляются автоматически**. В это время
+  продолжается refinement и другая доступная работа; маленькие PR — Muse
+  self-review (standing rule). Открытые архитектурные решения (§4 ADR-0013 и
+  др.) остаются открытыми: переход к параллельной разработке не является их
+  автоматическим утверждением.
+- Ветки завершённых тикетов Muse пока сохраняются; удаление только по отдельному решению владельца. GitHub auto-merge и встроенную merge queue GitHub не включать.
 - Полный цикл согласованного PR до merge разрешён без дополнительного подтверждения,
   если владелец прямо поручил такой цикл; иначе требуется решение владельца.
 - В утверждённом объёме обычные инженерные решения принимать самостоятельно по
@@ -123,7 +200,11 @@
 
 ## Workflow (кратко)
 
-1. Для работ Muse: использовать только `/home/ki/Project/Slavikai-rebuild`, прочитать `ROADMAP.md`, `STATE.md` и соглашение, проверить `git worktree list`, fetch актуального `origin/main`. Исходный `/home/ki/Project/Slavikai` остаётся деревом владельца. Незавершённый PR продолжать в его рабочей ветке.
+1. Для работ Muse: использовать только назначенное координатором worktree
+(см. список выше), прочитать `ROADMAP.md`, `STATE.md` и соглашение, проверить
+`git worktree list`, fetch актуального `origin/main`. Исходное
+`/home/ki/Project/Slavikai` остаётся деревом владельца. Незавершённый PR
+продолжать в его рабочей ветке и его worktree.
 2. `git checkout -b pr-<id>-<name>`; `make preflight`.
 3. Реализация + targeted tests; `make check`.
 4. Commit + `git push -u origin HEAD`; открыть PR.

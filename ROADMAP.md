@@ -413,14 +413,20 @@ Final outcome
 
 ## Critical path and ordered epics
 
-**Программа: 65 тикетов, строго последовательно**, один тикет = одна ветка = один PR. Список пересматривается по подтверждённым фактам после эпиков: sunk cost не является основанием сохранять механизм.
+**Программа: dependency-driven parallel development (решение владельца
+2026-11-25).** Стримы §5 аудита параллельности, порядок merge — ниже.
+Последовательным остаётся только то, что в DAG помечено SEQ: hard dependencies,
+semantic dependencies и временные конфликты файлов различаются. Один тикет =
+одна ветка = один PR; один активный тикет на worktree. Список пересматривается
+по подтверждённым фактам после эпиков: sunk cost не является основанием
+сохранять механизм.
 
 | Epic | Tickets | Статус |
 |---|---:|---|
 | E00 — baseline/docs | 3 | E00-T01 DONE; E00-T02 DONE; E00-T03 DONE |
 | E01 — canonical execution | 9 | E01 T01–T09 DONE (PR #163, main 0f894c6) |
 | E02 — persistent browser | 10 | T01 DONE (PR #166); T02 DONE (PR #167); T03 DONE (PR #180, main f2e94ba); T04 DONE (PR #181, main 30bd0da); T05 DONE (PR #182, main b2a4257); T06 DONE (PR #183, main dd207de; acceptance закрыт PR #188); T07 DONE (PR #186, main 20af69c); T09 DONE (PR #187, main 421314c); T10 DONE (PR #188, main f581132) |
-| E03 — Host Bridge / Desktop Commander | 11 | T01 DONE (PR #193, main 325d2f9); T02 DONE (PR #194, main cd6f0d4); T03 DONE (PR #195, main 8147223); T04 DONE (PR #196, main 2020b81); T05 DONE (PR #198, main 0dd07de); SEC-04 DONE (PR #200, main 7ced6826); SEC-03 VERIFY DONE (PR #201, main 5202510) |
+| E03 — Host Bridge / Desktop Commander | 11 | T01 DONE (PR #193, main 325d2f9); T02 DONE (PR #194, main cd6f0d4); T03 DONE (PR #195, main 8147223); T04 DONE (PR #196, main 2020b81); T05 DONE (PR #198, main 0dd07de); T06 DONE (PR #203, main 658a638); SEC-04 DONE (PR #200, main 7ced6826); SEC-03 VERIFY DONE (PR #201, main 5202510) |
 | E04 — workspace/executor | 6 | T03 slice DONE (PR #164, main 7affb3f); остальное NEEDS_REFINEMENT |
 | E05 — verification/recovery | 7 | NEEDS_REFINEMENT |
 | E06 — modes/policy/UI | 6 | NEEDS_REFINEMENT |
@@ -432,7 +438,42 @@ Final outcome
 
 **E04–E08 — не исполнимые ticket specs до refinement.** Перед соответствующим эпиком Muse доводит каждый до полного шаблона: ЧТО, ЗАЧЕМ, проверенный code touchpoint/unknown, зависимости, scope, steps, delete-vs-wrap, positive/negative/E2E acceptance, postconditions, разрешения/запреты, evidence, `make check`, CI и независимый Codex review. До этого в `STATE.md` фиксируется `BLOCKED: ROADMAP_REFINEMENT`, в том числе E07-T04 и однострочные E08.
 
-Ни один следующий тикет не начинается до merge предыдущего. Это прямо следует из рабочего соглашения Muse.
+Следующий тикет в том же worktree не начинается до merge предыдущего; параллельные стримы работают независимо (см. Streams ниже). Это прямо следует из рабочего соглашения Muse.
+
+### Streams (2026-11-25)
+
+- **A — Host Bridge:** E03-T06 → T07 → T08 → T09 → T10-observe → T11.
+  Worktree `Slavikai-rebuild`. T07 не запускался параллельно с T06 по решению
+  владельца 2026-11-25 (finding в T06 мог закрыть окно); после мержа T06 —
+  следующий в стриме A.
+- **C — Foundation:** storage-группа (DB-06+DB-01/02+DB-03/04+MEM-01+TEST-01)
+  → PLAN-группа → LATER-группа + SEC-05 срез + Ollama-gate.
+  Worktree `Slavikai-foundation`.
+- **D — Verification & Recovery:** E05-T01 (refinement) → T02 → T03/T04 →
+  T05/T06 → E05-T07 (после E04-T05 и T11-step-9 wiring). Worktree
+  `Slavikai-verification`.
+- **E — Workspace Executor:** после решения E04-T01 и refinement E04-T02:
+  T02 → T03 → T04 → T05 → T06. Worktree `Slavikai-workspace` (создать тогда).
+- **F — Memory/UI/ops (без отдельного worktree):** read-only работа, E07-T01,
+  E08-T08, UI-хвосты — в окнах других стримов.
+
+### Порядок merge (§6 аудита, с поправкой: без массового rebase)
+
+1. PR #203 (T06) — MERGED 2026-11-25 (main 658a638).
+2. Первая волна независимых (любой порядок): T07; storage-группа; PLAN-группа;
+   E05-T01; SEC-05 срез; Ollama-gate. (T07 — после T06, см. выше.)
+3. T08; E05-T02; E04-T02 (после решения T01); E06-T01 (UI).
+4. T09; E05-T04; E04-T03; E07-T02 (после T01).
+5. T10-observe; E04-T04; E05-T05 ∥ E05-T06; E06-T02 (после PLAN).
+6. E04-T05; E06-T03; E07-T03/T05; E08-T02/T03.
+7. **T11** (интеграция E03; §4 — решить до или в этот момент).
+8. E06-T04 → E06-T05 → E06-T06; E05-T07 (после E04-T05 и T11-step-9 wiring); E07-T04.
+9. E08-T06; E08-T01/T04/T05 хвосты.
+10. **E08-T07 — последним** (scheduler gate).
+
+Merge — строго по одному, fast-forward, после CI + чистого Codex на вливаемом
+SHA. JIT rebase — только выбранного PR, остальные — при реальной зависимости,
+конфликте либо перед интеграцией (см. AGENTS.md, Merge queue).
 
 ### Epic E00 — baseline после merge PR #151 и разделение worktree
 
@@ -1280,6 +1321,11 @@ upload → external/write
 
 **Negative.** `service.restart` отсутствует в registry.
 
+**Зависимость (уточнение 2026-11-25).** Hard deps — только T02/T03 (готовы).
+T07→T08→T09 — НЕ жёсткая последовательность: T07 имплементируется независимо
+(новый `host_bridge/diag.py` + capabilities в `protocol.py` + dispatch в
+`daemon.py`); merge — после T06 (PR #203 MERGED, main 658a638).
+
 #### E03-T08 — audit/effect log
 
 **ЧТО.** Bridge возвращает structured effect; SlavikAI сохраняет request metadata + effect + observation.
@@ -1288,6 +1334,11 @@ upload → external/write
 
 **Negative.** stdout secrets redacted; raw env never logged.
 
+**Зависимость (уточнение 2026-11-25).** Daemon half — SEQ после мержа T06
+(формы effect от T04/T05/T06; PR #203 MERGED, main 658a638); server half
+(effect store + `server/http` проводка) проектируется параллельно. С T07 связи
+нет; T07→T08→T09 — НЕ жёсткая последовательность.
+
 #### E03-T09 — systemd hardening
 
 **ЧТО.** Service sandboxing по реально нужным capabilities: `NoNewPrivileges`, restricted filesystem view, `PrivateDevices` где возможно, address-family restrictions, explicit writable paths. systemd поддерживает эти controls, но они должны проверяться фактическим `systemd-analyze security`/runtime tests, а не считаться магической защитой.
@@ -1295,6 +1346,10 @@ upload → external/write
 **Acceptance.** Daemon не имеет доступа к запрещённым roots.
 
 **Negative.** Hardening не ломает socket lifecycle/restart.
+
+**Зависимость (уточнение 2026-11-25).** Unit-file независим (его не трогает
+никто); acceptance-тесты SEQ после T06 (требуют стабильного lifecycle; PR #203
+MERGED, main 658a638). Merge unit-file допустим раньше T07/T08.
 
 #### E03-T10 — optional desktop observation/control split
 
@@ -1320,6 +1375,11 @@ upload → external/write
 8. Symlink escape отвергнут.
 9. STOP long process подтверждён.
 10. Restart bridge → old finished effects не повторяются.
+
+**Зависимость (уточнение 2026-11-25).** Refinement T11 называет §6.1 map
+(`process_id → (principal_id, run_id, final_observed_at)` в ToolGateway/RunPolicy
++ вызов stop при отмене run) явным deliverable шага 9; E05-T07 — SEQ на wiring
+шага 9. ADR-0013 §4 — решить до или в T11.
 
 Только после этого Desktop Commander capability считается настоящей.
 
@@ -1448,6 +1508,10 @@ custom_command
 **ЧТО.** Run cancellation propagates workspace, browser, owner-host bridge.
 
 **Acceptance.** Новые tool calls после STOP запрещены.
+
+**Зависимость (уточнение 2026-11-25).** Зависимость от T11 реальна, но частична:
+SEQ на wiring шага 9 T11 (§6.1 map); также SEQ на E04-T05 и T06 (bridge stop —
+PR #203 MERGED, main 658a638). Browser cancel готов (E02).
 
 ### Epic E06 — modes, policy and UI simplification
 
@@ -1749,16 +1813,16 @@ update STATE
 next ticket
 ```
 
-Решением владельца от 2026-11-16 разрешены **ровно два linked worktree**: `/home/ki/Project/Slavikai` — исходный checkout владельца и `/home/ki/Project/Slavikai-rebuild` — единственная рабочая директория Muse. Один тикет/ветка/PR, без параллельной реализации. После Codex review последнего HEAD, зелёного CI и `make git-check` Muse выполняет **ручной fast-forward push** своей PR-ветки в `origin/main` из второго worktree, предварительно проверив что текущий `origin/main` — предок PR HEAD. Original checkout не трогать. При GitHub protection rejection или non-FF — STOP, решение владельца. **GitHub auto-merge и merge queue не включать.**
+Решением владельца от 2026-11-25 разрешены **именованные linked worktrees** (стримы A/C/D/E, см. Streams выше): `/home/ki/Project/Slavikai` — исходный checkout владельца; `/home/ki/Project/Slavikai-rebuild`, `/home/ki/Project/Slavikai-foundation`, `/home/ki/Project/Slavikai-verification` (+ `/home/ki/Project/Slavikai-workspace` после решения E04-T01) — рабочие директории Muse. Один тикет/ветка/PR на worktree, параллельная реализация — по стримам и централизованной merge queue. После Codex review последнего HEAD, зелёного CI и `make git-check` Muse выполняет **ручной fast-forward push** своей PR-ветки в `origin/main` из своего worktree, предварительно проверив что текущий `origin/main` — предок PR HEAD. Original checkout не трогать. При GitHub protection rejection или non-FF — STOP, решение владельца. **GitHub auto-merge и встроенную merge queue GitHub не включать.**
 
 Muse **не спрашивает владельца** о названиях внутренних функций, разбиении helper-ов, тестовой структуре, formatting, выборе очевидного стандартного Python API или локальном refactor внутри утверждённого тикета.
 
-Muse **обязана спросить при любой реальной развилке реализации «так или иначе»** (значимые варианты A/B, влияющие на архитектуру, контракты, security, продукт, backlog или поддержку), а также при расширении host roots, privileged operations, external send, root daemon, VM/container/OS-user, удалении пользовательских данных, создании третьего worktree, вмешательстве в исходный checkout и любом sudo с точной командой. Требуются trade-offs, рекомендация и последствия; до ответа — `BLOCKED: REAL_IMPLEMENTATION_FORK`.
+Muse **обязана спросить при любой реальной развилке реализации «так или иначе»** (значимые варианты A/B, влияющие на архитектуру, контракты, security, продукт, backlog или поддержку), а также при расширении host roots, privileged operations, external send, root daemon, VM/container/OS-user, удалении пользовательских данных, создании worktree без решения владельца, вмешательстве в исходный checkout и любом sudo с точной командой. Требуются trade-offs, рекомендация и последствия; до ответа — `BLOCKED: REAL_IMPLEMENTATION_FORK`.
 
-Весь roadmap имеет один строгий critical path:
+Критический путь roadmap (порядок возможностей; реализация — dependency-driven parallel development с 2026-11-25, см. Streams выше):
 
 ```text
-PR #151 merged (470a9a6) + two worktrees verified
+PR #151 merged (470a9a6) + named worktrees verified
 → docs PR #152 accepted and E00 complete
 → repository baseline
 → canonical Run contract
