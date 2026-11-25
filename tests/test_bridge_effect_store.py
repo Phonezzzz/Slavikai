@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from core.bridge_effect_store import BridgeEffectStore
+from core.bridge_effect_store import _TRIGGER_IMMUTABILITY_V3, BridgeEffectStore
 
 _OWNER = "owner"
 _BOOT = "b" * 32
@@ -92,10 +92,10 @@ def _attach(
 # --- schema ------------------------------------------------------------------
 
 
-def test_schema_created_v3(tmp_path: Path) -> None:
+def test_schema_created_v4(tmp_path: Path) -> None:
     store = BridgeEffectStore(tmp_path / "effects.db")
     with sqlite3.connect(store.path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
         tables = {
             row[0]
             for row in conn.execute(
@@ -107,14 +107,16 @@ def test_schema_created_v3(tmp_path: Path) -> None:
         "effect_records",
         "effect_observations",
         "pruned_daemon_ranges",
+        "pruned_request_ids",
     }
 
 
-def test_v1_database_migrates_to_v3(tmp_path: Path) -> None:
+def test_v1_database_migrates_to_v4(tmp_path: Path) -> None:
     """A journal written by the v1 schema (PR #209 head) opens
-    under v3: the chain v1 -> v2 (pruned-ranges table) -> v3
-    (prune-safe resolution trigger) runs, existing rows are
-    untouched, and recording keeps working."""
+    under v4: the chain v1 -> v2 (pruned-ranges table) -> v3
+    (prune-safe resolution trigger) -> v4 (pruned-request-ids
+    table) runs, existing rows are untouched, and recording
+    keeps working."""
     path = tmp_path / "effects.db"
     with sqlite3.connect(path) as conn:
         conn.executescript(
@@ -165,7 +167,7 @@ def test_v1_database_migrates_to_v3(tmp_path: Path) -> None:
         )
     store = BridgeEffectStore(path)
     with sqlite3.connect(store.path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
     record = store.get_record(1)
     assert record is not None
     assert record["daemon_seq"] == 1
@@ -174,13 +176,12 @@ def test_v1_database_migrates_to_v3(tmp_path: Path) -> None:
     assert store.count() == 2
 
 
-def test_v2_database_migrates_to_v3(tmp_path: Path) -> None:
+def test_v2_database_migrates_to_v4(tmp_path: Path) -> None:
     """A journal written by the v2 schema (PR #209 rework 1) opens
-    under v3: only the immutability trigger is replaced (the
-    prune may drop a resolution pointer once its target is
-    pruned); existing rows — including a resolved unknown — are
-    untouched, and a prune past a resolution link works on the
-    migrated journal."""
+    under v4: the v2 -> v3 trigger replacement and the v3 -> v4
+    pruned-request-ids table run; existing rows — including a
+    resolved unknown — are untouched, and a prune past a
+    resolution link works on the migrated journal."""
     path = tmp_path / "effects.db"
     with sqlite3.connect(path) as conn:
         conn.executescript(
@@ -267,7 +268,7 @@ def test_v2_database_migrates_to_v3(tmp_path: Path) -> None:
         )
     store = BridgeEffectStore(path, effect_cap=2)
     with sqlite3.connect(store.path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
     attempt = store.get_record(2)
     assert attempt is not None
     assert attempt["resolved_by_seq"] == 1
@@ -280,6 +281,86 @@ def test_v2_database_migrates_to_v3(tmp_path: Path) -> None:
     assert attempt is not None
     assert attempt["resolved_at"] == "2026-11-25T00:02:00+00:00"
     assert attempt["resolved_by_seq"] is None
+
+
+def test_v3_database_migrates_to_v4(tmp_path: Path) -> None:
+    """A journal written by the v3 schema (PR #209 rework 7)
+    opens under v4: only the pruned-request-ids table is
+    added; existing rows are untouched, recording keeps
+    working, and a prune on the migrated journal tombstones
+    the pruned request_id."""
+    path = tmp_path / "effects.db"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE effect_meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+            CREATE TABLE effect_records (
+                seq INTEGER PRIMARY KEY,
+                recorded_at TEXT NOT NULL,
+                daemon_boot_id TEXT,
+                daemon_seq INTEGER,
+                request_id TEXT NOT NULL,
+                capability TEXT NOT NULL,
+                principal_id TEXT,
+                run_id TEXT,
+                params_json TEXT NOT NULL,
+                effect_json TEXT,
+                outcome TEXT NOT NULL CHECK (outcome IN ('effect', 'no_effect', 'unknown')),
+                error_code TEXT,
+                unknown_reason TEXT,
+                resolved_by_seq INTEGER REFERENCES effect_records(seq),
+                resolved_at TEXT,
+                CHECK ((daemon_boot_id IS NULL) = (daemon_seq IS NULL)),
+                CHECK ((outcome = 'effect') = (effect_json IS NOT NULL)),
+                CHECK ((outcome = 'unknown') = (unknown_reason IS NOT NULL))
+            );
+            CREATE UNIQUE INDEX effect_emission_identity
+                ON effect_records (daemon_boot_id, daemon_seq) WHERE daemon_seq IS NOT NULL;
+            CREATE TABLE effect_observations (
+                id INTEGER PRIMARY KEY,
+                effect_seq INTEGER NOT NULL REFERENCES effect_records(seq) ON DELETE CASCADE,
+                attached_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_ref TEXT,
+                observation_json TEXT NOT NULL,
+                observation_sha256 TEXT NOT NULL,
+                UNIQUE (effect_seq, source, observation_sha256)
+            );
+            CREATE TABLE pruned_daemon_ranges (
+                daemon_boot_id TEXT NOT NULL,
+                seq_from INTEGER NOT NULL,
+                seq_to INTEGER NOT NULL,
+                PRIMARY KEY (daemon_boot_id, seq_from)
+            );
+            INSERT INTO effect_meta (key, value) VALUES ('next_seq', 2);
+            INSERT INTO effect_records
+                (seq, recorded_at, daemon_boot_id, daemon_seq, request_id, capability,
+                 principal_id, run_id, params_json, effect_json, outcome, error_code,
+                 unknown_reason)
+                VALUES (1, '2026-11-25T00:00:00+00:00', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        1, 'req-1', 'host.fs.write', 'owner', NULL,
+                        '{"path": "a.txt"}', '{"kind": "fs.write"}', 'effect', NULL, NULL);
+            PRAGMA user_version = 3;
+            """
+            + _TRIGGER_IMMUTABILITY_V3
+        )
+    store = BridgeEffectStore(path, effect_cap=1)
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'pruned_request_ids'"
+            ).fetchone()[0]
+            == 1
+        )
+    record = store.get_record(1)
+    assert record is not None
+    assert record["request_id"] == "req-1"
+    _record(store, request_id="req-2", effect=_effect(seq=2))
+    assert store.count() == 1
+    assert store.get_record(1) is None
+    assert store.has_request_id("req-1") is True
 
 
 def test_unknown_schema_fails_closed(tmp_path: Path) -> None:
@@ -472,6 +553,37 @@ def test_retention_prunes_oldest_with_cascade(tmp_path: Path) -> None:
     # transaction (no orphaned observation rows).
     with sqlite3.connect(store.path) as conn:
         assert conn.execute("SELECT count(*) FROM effect_observations").fetchone()[0] == 0
+
+
+def test_pruned_request_ids_survive_retention(tmp_path: Path) -> None:
+    """Codex round 8, finding 2: retention prunes the row but
+    not the retry signal — a request_id whose record was
+    pruned is still recognised, so a later retry is not
+    misread as a first call."""
+    store = BridgeEffectStore(tmp_path / "effects.db", effect_cap=1)
+    first = _record(store, request_id="req-1", effect=_effect(seq=1))
+    _record(store, request_id="req-2", effect=_effect(seq=2))
+    assert store.count() == 1
+    assert store.get_record(int(first["seq"])) is None
+    assert store.has_request_id("req-1") is True
+    assert store.has_request_id("req-2") is True
+    assert store.has_request_id("req-never") is False
+
+
+def test_pruned_request_ids_evict_oldest(tmp_path: Path) -> None:
+    """The tombstone table is bounded like the journal itself
+    (same cap): the oldest pruned request_id leaves first. A
+    retry is recognised unless more than ~2x effect_cap
+    records were written after the original attempt — the same
+    bounded-horizon trade-off as pruned_daemon_ranges."""
+    store = BridgeEffectStore(tmp_path / "effects.db", effect_cap=1)
+    _record(store, request_id="req-1", effect=_effect(seq=1))
+    _record(store, request_id="req-2", effect=_effect(seq=2))
+    _record(store, request_id="req-3", effect=_effect(seq=3))
+    assert store.count() == 1
+    assert store.has_request_id("req-1") is False  # evicted
+    assert store.has_request_id("req-2") is True
+    assert store.has_request_id("req-3") is True
 
 
 def test_per_effect_observation_cap_evicts_oldest(tmp_path: Path) -> None:

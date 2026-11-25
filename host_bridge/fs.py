@@ -1146,9 +1146,12 @@ class HostFsService:
         actual set); for a commit the chunk projection is unused
         and the caller's value is returned unchanged. Raises
         effect_build_failed -- after removing the created
-        directories again -- when the real answer cannot fit: the
-        journal reads that code as no_effect, so nothing the call
-        created may remain."""
+        directories again, confirmed -- when the real answer
+        cannot fit: the journal reads that code as no_effect, so
+        nothing the call created may remain. When the rollback
+        cannot be confirmed (a concurrent actor used a created
+        directory in the meantime), io_error instead: the outcome
+        stays unknown (Codex round 8, finding 1)."""
         if not parents_created:
             return parents_projection
         projection: dict[str, object] | None = None
@@ -1204,7 +1207,19 @@ class HostFsService:
                 "effect": {**projection, "parents_created": list(parents_created)},
             }
         if not self._effect_emitter.frame_fits(answer, request_id):
-            self._remove_created_parents(root, parents_created)
+            # Codex round 8, finding 1: effect_build_failed is
+            # read by the journal as no_effect, so it may only be
+            # raised when the rollback is confirmed — a concurrent
+            # writer may have used a created directory in the
+            # meantime (rmdir fails ENOTEMPTY and the directory
+            # stays). Anything left behind keeps the outcome
+            # unknown instead (the round 5, finding 1 discipline).
+            if not self._rollback_created_parents(root, parents_created):
+                raise FsError(
+                    "io_error",
+                    "effect does not fit the response frame budget and "
+                    "the created parents could not be removed",
+                )
             raise FsError(
                 EFFECT_BUILD_FAILED,
                 "effect does not fit the response frame budget",
@@ -1892,9 +1907,11 @@ class HostFsService:
                         # set and frame-check the real answer now,
                         # before the staging file exists, so a
                         # failure can still roll the mutation back
-                        # (the directories are removed again and
-                        # effect_build_failed, which the journal
-                        # reads as no_effect, stays true).
+                        # (the directories are removed again,
+                        # confirmed, and effect_build_failed, which
+                        # the journal reads as no_effect, stays
+                        # true; an unconfirmed rollback is io_error
+                        # instead — Codex round 8, finding 1).
                         parents_projection = self._check_created_parents_frame(
                             root=target.root,
                             parents_projection=parents_projection,

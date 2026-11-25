@@ -383,6 +383,109 @@ def test_unknown_write_id_retry_is_unknown(recorder: BridgeEffectRecorder) -> No
     assert record["unknown_reason"] == "unknown_write_id_on_retry"
 
 
+def test_process_not_found_retry_after_retention_prune_is_unknown(
+    tmp_path: Path,
+) -> None:
+    """Codex round 8, finding 2: the retry test (has_request_id)
+    must survive retention. With effect_cap=1, the timeout of
+    the original kill is pruned by one foreign record — but the
+    retry is still a retry: the process may be gone BECAUSE the
+    first attempt killed it, so process_not_found proves
+    nothing and the outcome stays unknown. Before the fix the
+    retry was misread as a first call and recorded no_effect.
+    A genuinely new request_id still reads no_effect."""
+    store = BridgeEffectStore(tmp_path / "effects.db", effect_cap=1)
+    recorder = BridgeEffectRecorder(store)
+    unknown = recorder.record_transport_failure(
+        capability="host.process.kill",
+        request_id="kill-1",
+        principal_id=_OWNER,
+        run_id="run-A",
+        params={"process_id": "p1"},
+        reason="timeout",
+    )
+    assert unknown.outcome == "unknown"
+    # One foreign record prunes the original unknown row (cap 1).
+    foreign = recorder.record_success(
+        capability="host.fs.write",
+        request_id="other-1",
+        principal_id=_OWNER,
+        run_id=None,
+        params={"root_id": "work", "path": "a.txt"},
+        result=_write_result(effect=_effect(seq=5, root_id="work", path="a.txt")),
+    )
+    assert foreign.outcome == "effect"
+    assert store.get_record(int(unknown.seq or 0)) is None
+    retry = recorder.record_error(
+        capability="host.process.kill",
+        request_id="kill-1",
+        principal_id=_OWNER,
+        run_id="run-A",
+        params={"process_id": "p1"},
+        code="process_not_found",
+        message="process_not_found happened",
+    )
+    assert retry.outcome == "unknown"
+    record = store.get_record(int(retry.seq or 0))
+    assert record is not None
+    assert record["unknown_reason"] == "process_not_found_on_retry"
+    # A request_id never seen before is still a first call.
+    first = recorder.record_error(
+        capability="host.process.kill",
+        request_id="kill-fresh",
+        principal_id=_OWNER,
+        run_id="run-A",
+        params={"process_id": "p9"},
+        code="process_not_found",
+        message="process_not_found happened",
+    )
+    assert first.outcome == "no_effect"
+
+
+def test_unknown_write_id_retry_after_retention_prune_is_unknown(
+    tmp_path: Path,
+) -> None:
+    """Codex round 8, finding 2 (write side): the same
+    retention hole for an unknown write session — the first
+    chunk may have created parents before the timeout, so an
+    unknown write_id on the retry cannot prove no_effect."""
+    store = BridgeEffectStore(tmp_path / "effects.db", effect_cap=1)
+    recorder = BridgeEffectRecorder(store)
+    unknown = recorder.record_transport_failure(
+        capability="host.fs.write",
+        request_id="write-1",
+        principal_id=_OWNER,
+        run_id=None,
+        params={"root_id": "work", "path": "a.txt", "write_id": "w-1"},
+        reason="timeout",
+    )
+    assert unknown.outcome == "unknown"
+    # One foreign record prunes the original unknown row (cap 1).
+    foreign = recorder.record_success(
+        capability="host.fs.write",
+        request_id="other-1",
+        principal_id=_OWNER,
+        run_id=None,
+        params={"root_id": "work", "path": "a.txt"},
+        result=_write_result(effect=_effect(seq=5, root_id="work", path="a.txt")),
+    )
+    assert foreign.outcome == "effect"
+    assert store.get_record(int(unknown.seq or 0)) is None
+    retry = recorder.record_error(
+        capability="host.fs.write",
+        request_id="write-1",
+        principal_id=_OWNER,
+        run_id=None,
+        params={"root_id": "work", "path": "a.txt", "write_id": "w-1"},
+        code="invalid_params",
+        message="unknown write_id",
+    )
+    assert retry.outcome == "unknown"
+    record = store.get_record(int(retry.seq or 0))
+    assert record is not None
+    assert record["unknown_reason"] == "unknown_write_id_on_retry"
+
+
 # --- unknown resolution (owner condition 2) -----------------------------------
 
 

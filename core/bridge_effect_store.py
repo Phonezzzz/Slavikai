@@ -86,7 +86,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeVar
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 # Retention bounds (owner conditions 3 and 7).
 DEFAULT_EFFECT_CAP = 10_000
@@ -146,6 +146,19 @@ _PRUNED_RANGES_TABLE = """CREATE TABLE IF NOT EXISTS pruned_daemon_ranges (
         PRIMARY KEY (daemon_boot_id, seq_from)
     );"""
 
+# (Codex round 8, finding 2): request_ids retention just
+# deleted, so the retry test (has_request_id) survives the
+# prune. pruned_at_seq is the largest server seq deleted for
+# that request_id in its prune batch — batches are monotone,
+# so oldest-first eviction by it is correct. Bounded by the
+# same cap as the journal (see _insert); a retry is
+# recognised unless more than ~2x effect_cap records were
+# written after the original attempt.
+_PRUNED_REQUEST_IDS_TABLE = """CREATE TABLE IF NOT EXISTS pruned_request_ids (
+        request_id TEXT PRIMARY KEY,
+        pruned_at_seq INTEGER NOT NULL
+    );"""
+
 _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS effect_meta (
         key TEXT PRIMARY KEY,
@@ -184,6 +197,7 @@ _SCHEMA = (
         UNIQUE (effect_seq, source, observation_sha256)
     );""",
     _PRUNED_RANGES_TABLE,
+    _PRUNED_REQUEST_IDS_TABLE,
     # The immutability trigger (v3 definition lives in
     # _TRIGGER_IMMUTABILITY_V3 above, so the v2 -> v3 migration
     # reuses the same text; fresh databases get it directly).
@@ -204,6 +218,10 @@ _MIGRATION_2_TO_3 = (
     "DROP TRIGGER IF EXISTS immutable_effect_record_update",
     _TRIGGER_IMMUTABILITY_V3,
 )
+
+# v3 -> v4 (Codex round 8, finding 2): only the
+# pruned-request-ids table; no existing row changes.
+_MIGRATION_3_TO_4 = (_PRUNED_REQUEST_IDS_TABLE,)
 
 _EXPECTED_COLUMNS = {
     "effect_meta": ["key", "value"],
@@ -234,6 +252,7 @@ _EXPECTED_COLUMNS = {
         "observation_sha256",
     ],
     "pruned_daemon_ranges": ["daemon_boot_id", "seq_from", "seq_to"],
+    "pruned_request_ids": ["request_id", "pruned_at_seq"],
 }
 
 _T = TypeVar("_T")
@@ -316,6 +335,12 @@ class BridgeEffectStore:
                 for statement in _MIGRATION_2_TO_3:
                     conn.execute(statement)
                 version = 3
+            if version == 3:
+                # v3 -> v4 (Codex round 8, finding 2): add the
+                # pruned-request-ids table; no existing row changes.
+                for statement in _MIGRATION_3_TO_4:
+                    conn.execute(statement)
+                version = 4
             if version == _SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
                 self._validate_schema(conn)
@@ -497,6 +522,20 @@ class BridgeEffectStore:
                     " AND daemon_seq IS NOT NULL",
                     (over,),
                 ).fetchall()
+                # Codex round 8, finding 2: the request_ids of
+                # the rows about to be deleted (every outcome,
+                # not just effects — a pruned no_effect row's
+                # retry must be recognised as a retry too, or
+                # its absence error is misread as a first
+                # call's no_effect). Read before the DELETE
+                # below; inserted into the tombstone table after
+                # it, in the same transaction.
+                doomed_ids = conn.execute(
+                    "SELECT request_id, MAX(seq) AS max_seq FROM effect_records"
+                    " WHERE seq IN (SELECT seq FROM effect_records ORDER BY seq ASC LIMIT ?)"
+                    " GROUP BY request_id",
+                    (over,),
+                ).fetchall()
                 # Codex round 2, finding 4: the rows about to be
                 # deleted may be named by resolution links
                 # (resolved_by_seq REFERENCES effect_records(seq),
@@ -519,6 +558,28 @@ class BridgeEffectStore:
                     (over,),
                 )
                 self._record_pruned_ranges(conn, doomed)
+                conn.executemany(
+                    "INSERT OR IGNORE INTO pruned_request_ids"
+                    " (request_id, pruned_at_seq) VALUES (?, ?)",
+                    [(row["request_id"], row["max_seq"]) for row in doomed_ids],
+                )
+                # The tombstone is bounded like the journal
+                # itself (same cap, oldest-first eviction): a
+                # retry is recognised unless more than ~2x
+                # effect_cap records were written after the
+                # original attempt — the same bounded-horizon
+                # trade-off as pruned_daemon_ranges.
+                tomb_over = (
+                    conn.execute("SELECT count(*) FROM pruned_request_ids").fetchone()[0]
+                    - self._effect_cap
+                )
+                if tomb_over > 0:
+                    conn.execute(
+                        "DELETE FROM pruned_request_ids WHERE request_id IN ("
+                        " SELECT request_id FROM pruned_request_ids"
+                        " ORDER BY pruned_at_seq ASC, request_id ASC LIMIT ?)",
+                        (tomb_over,),
+                    )
                 # Prune data for boots with no retained rows is dead
                 # weight: their gaps can never be computed.
                 conn.execute(
@@ -634,15 +695,19 @@ class BridgeEffectStore:
 
     def has_request_id(self, request_id: str) -> bool:
         """True when any row already exists for this logical request
-        (the recorder's retry test)."""
-        return self._read(
-            lambda conn: int(
-                conn.execute(
-                    "SELECT count(*) FROM effect_records WHERE request_id = ?",
-                    (request_id,),
+        (the recorder's retry test) — or when the request_id was
+        pruned by retention (Codex round 8, finding 2): the
+        tombstone keeps the retry signal after the row is gone,
+        so a retry after a prune is never misread as a first
+        call. A request_id never seen before still reads False."""
+        return bool(
+            self._read(
+                lambda conn: conn.execute(
+                    "SELECT EXISTS(SELECT 1 FROM effect_records WHERE request_id = ?)"
+                    " OR EXISTS(SELECT 1 FROM pruned_request_ids WHERE request_id = ?)",
+                    (request_id, request_id),
                 ).fetchone()[0]
             )
-            > 0
         )
 
     # -- observations --------------------------------------------------------

@@ -2014,3 +2014,60 @@ def test_write_chunk_race_created_parents_overflow_rolls_back(
     assert renamed["done"] is True
     assert not (work / "directory").exists()  # recreated tree rolled back
     assert (work / "moved-directory").is_dir()  # original tree untouched
+
+
+def test_write_chunk_race_created_parents_unremovable_is_unknown(
+    fs_service: HostFsService, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 8, finding 1: the same race as the overflow
+    test above recreates a whole 120-deep existing tree, so the
+    finalized answer cannot fit the frame — but a concurrent
+    writer has put a file inside one recreated parent, so the
+    rollback cannot remove it (rmdir fails ENOTEMPTY). The call
+    must NOT claim effect_build_failed (the journal reads that
+    as no_effect while a new directory stays on disk): the
+    outcome is unknown (io_error), and the concurrent file is
+    untouched. Before the fix the call returned
+    effect_build_failed with the directories left behind."""
+    work = home / "Project" / "work"
+    (work / _deep_path(120, leaf="")).mkdir(parents=True)
+    renamed = {"done": False}
+    planted = {"done": False}
+    orig_open_dirs = fs_service._open_dirs
+
+    def _renaming_open_dirs(root, parts, *, create=False, token=None, created_out=None):
+        if not renamed["done"]:
+            renamed["done"] = True
+            (work / "directory").rename(work / "moved-directory")
+        result = orig_open_dirs(root, parts, create=create, token=token, created_out=created_out)
+        if create and not planted["done"]:
+            planted["done"] = True
+            deepest = work / _deep_path(120, leaf="")
+            (deepest / "concurrent.txt").write_text("concurrent writer\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(fs_service, "_open_dirs", _renaming_open_dirs)
+    request = BridgeRequest(
+        version=1,
+        request_id="race-overflow-unremovable-1",
+        capability="host.fs.write",
+        principal_id=_OWNER,
+        run_id=None,
+        params={
+            "root_id": "work",
+            "path": _deep_path(120),
+            "mode": "create",
+            "content": "x",
+        },
+    )
+    with pytest.raises(FsError) as exc_info:
+        fs_service.handle(request, _token())
+    assert exc_info.value.code == "io_error"
+    assert renamed["done"] is True
+    assert planted["done"] is True
+    assert (work / "directory").is_dir()  # rollback could not remove it
+    assert (work / _deep_path(120, leaf="") / "concurrent.txt").read_text(
+        encoding="utf-8"
+    ) == "concurrent writer\n"
+    assert (work / "moved-directory").is_dir()  # original tree untouched
+    assert not (work / _deep_path(120)).exists()  # target file never created
