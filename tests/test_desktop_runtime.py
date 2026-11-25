@@ -450,7 +450,8 @@ class _CountingPostconditionReader:
         self.service_calls.append((unit, scope))
         return {"active_state": "active"}
 
-    def canonical_check(self) -> VerificationResult:
+    def canonical_check(self, criterion_sha256: str | None = None) -> VerificationResult:
+        del criterion_sha256
         raise AssertionError("canonical_check must not run after cancellation")
 
 

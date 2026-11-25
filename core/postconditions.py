@@ -245,6 +245,12 @@ class ProcessRunningParams:
             _require_number(self.create_time, field_name="create_time")
             if self.create_time < 0:
                 raise ValueError("create_time must not be negative")
+            # Normalize to float here, not only in from_json: an int
+            # create_time (10) and its round-tripped float (10.0)
+            # compare equal as dataclass values but hash different
+            # canonical JSON, so a bound criterion would go STALE
+            # right after its own round-trip.
+            object.__setattr__(self, "create_time", float(self.create_time))
         if self.process_id is not None:
             _require_str(self.process_id, field_name="process_id")
             if self.create_time is not None:
@@ -437,8 +443,9 @@ class CustomCommandParams:
     ``argv`` must equal the canonical check command
     (``make -B -r -f Makefile check``); anything else evaluates to
     ``INCONCLUSIVE`` and never spawns. ``criterion_sha256`` is the
-    Makefile hash fixed before the loop (the executor enforces it);
-    the checker does not read the Makefile itself.
+    Makefile hash fixed before the loop; the checker passes it to the
+    reader so the executor enforces it at execution (the checker
+    itself does not read the Makefile).
     """
 
     argv: tuple[str, ...]
@@ -640,7 +647,10 @@ class PostconditionReader(Protocol):
     ``os_process_running`` returns ``(alive, create_time)``; a zombie
     counts as not alive; an access denial raises ``PermissionError``.
     ``service_status`` returns the systemd unit dict or ``None`` when
-    the unit is not found.
+    the unit is not found. ``canonical_check`` runs the canonical
+    check through the executor bound to the given criterion hash:
+    the executor enforces the hash at execution, so a PASSED for
+    another Makefile never confirms this postcondition.
     """
 
     def describe_file(self, path: str) -> FileInfo: ...
@@ -653,7 +663,7 @@ class PostconditionReader(Protocol):
 
     def service_status(self, unit: str, scope: str) -> dict[str, JSONValue] | None: ...
 
-    def canonical_check(self) -> VerificationResult: ...
+    def canonical_check(self, criterion_sha256: str | None = None) -> VerificationResult: ...
 
 
 # ---------------------------------------------------------------------------
@@ -1366,18 +1376,23 @@ def evaluate_browser_state(
     ]
     if not matching:
         return failed(f"no browser_state facts for entity {params.entity_id}")
-    fact = matching[0]
     if params.kind == "text":
-        # The booleans below were computed by the tool against the
-        # expectation in its own declaration. The facts carry the
-        # digest of that expectation; require it to equal this
-        # postcondition's revision, or facts taken for one expectation
-        # would confirm a postcondition declaring another. A missing
-        # digest fails closed: unbound facts prove nothing.
-        if fact.get("expectation_sha256") != postcondition.revision():
+        # One run may capture the same entity twice (Pending -> Saved
+        # -> Published): the first fact is not necessarily the one
+        # proving this expectation. Select the first fact whose digest
+        # binds the expectation this postcondition declares; facts for
+        # another expectation (or unbound facts) prove nothing.
+        bound = [
+            fact for fact in matching if fact.get("expectation_sha256") == postcondition.revision()
+        ]
+        if not bound:
             return failed(
                 f"browser facts were captured for a different expectation: {params.entity_id}"
             )
+        fact = bound[0]
+        # The booleans below were computed by the tool against the
+        # expectation in its own declaration. A missing digest fails
+        # closed: unbound facts prove nothing.
         if fact.get("after_matches_after") is not True:
             return failed(f"browser text does not match the expected state: {params.entity_id}")
         if fact.get("before_matches_after") is not False:
@@ -1396,6 +1411,10 @@ def evaluate_browser_state(
             evidence=evidence,
         )
     # kind == "count": the contract expects exactly one element.
+    # Count facts carry no expectation digest, so the first capture
+    # is the transition proof (0 -> 1); a later capture would be 1
+    # -> 1 and cannot prove the change.
+    fact = matching[0]
     if isinstance(params.after, bool) or not isinstance(params.after, int) or params.after != 1:
         return failed(f"browser count expects exactly one element: {params.entity_id}")
     before_count = fact.get("before_count")
@@ -1453,7 +1472,11 @@ def evaluate_custom_command(
             evidence={"argv": list(params.argv)},
         )
     try:
-        result = reader.canonical_check()
+        # The declared criterion hash travels to the reader, so the
+        # executor enforces it at execution: without it, one PASSED
+        # would confirm two postconditions bound to different
+        # Makefile hashes.
+        result = reader.canonical_check(criterion_sha256=params.criterion_sha256)
     except (OSError, ValueError) as exc:
         return _evaluation(
             postcondition,

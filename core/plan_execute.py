@@ -780,11 +780,30 @@ def _overall_outcome(
             state_changing=any_state_changing,
         )
     unverified = [step for step in steps if not step.outcome.is_full_done]
-    return RunOutcome(
-        phase=RunPhase.TERMINAL,
-        terminal_reason=TerminalReason.COMPLETED,
-        disposition=Disposition.FULL,
-        verification=Verification(
+    # A step check that disproved its postcondition is FAILED, not
+    # UNKNOWN: combine the steps' own verification evidence, so a
+    # confirmed mismatch survives plan-level aggregation. Steps with
+    # no evidence keep the per-step row naming them unverified.
+    combined = combine_verifications(
+        [step.outcome.verification for step in steps],
+        source="plan_execute",
+    )
+    if combined is not None and combined.outcome is VerificationOutcome.FAILED:
+        verification = Verification(
+            outcome=VerificationOutcome.FAILED,
+            checks=tuple(combined.checks)
+            + tuple(
+                PostconditionCheck(
+                    name="step_verification",
+                    passed=False,
+                    detail=f"шаг {step.step_id}: {step.outcome.ui_label}",
+                )
+                for step in unverified
+            ),
+            source="plan_execute",
+        )
+    else:
+        verification = Verification(
             outcome=VerificationOutcome.UNKNOWN,
             checks=tuple(
                 PostconditionCheck(
@@ -795,7 +814,12 @@ def _overall_outcome(
                 for step in unverified
             ),
             source="plan_execute",
-        ),
+        )
+    return RunOutcome(
+        phase=RunPhase.TERMINAL,
+        terminal_reason=TerminalReason.COMPLETED,
+        disposition=Disposition.FULL,
+        verification=verification,
         state_changing=any_state_changing,
     )
 

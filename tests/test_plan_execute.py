@@ -18,7 +18,7 @@ from core.plan_execute import (
 )
 from core.postconditions import FileExistsParams, Postcondition, PostconditionKind
 from core.run_contract import build_run_spec
-from core.run_outcome import TerminalReason, VerificationOutcome
+from core.run_outcome import PostconditionCheck, TerminalReason, Verification, VerificationOutcome
 from core.tool_gateway import ToolGateway
 from llm.types import LLMResult, ToolCall
 from server.http.common.workflow_state import plan_hash_payload
@@ -576,6 +576,55 @@ def test_write_step_with_typed_postcondition_is_full_done(tmp_path) -> None:
     assert result.outcome.is_full_done is True
     assert result.outcome.terminal_reason is TerminalReason.COMPLETED
     assert result.outcome.verification.outcome is VerificationOutcome.PASSED
+
+
+def test_failed_step_verification_is_preserved_in_plan_outcome() -> None:
+    # Round-2 finding: a step check that disproves its postcondition
+    # must survive plan-level aggregation — a confirmed mismatch is
+    # FAILED, not UNKNOWN. The step keeps FAILED; the plan keeps it too.
+    write_calls: list = []
+
+    def workspace_write(request):
+        write_calls.append(request)
+        return ToolResult.success({})
+
+    brain = ScriptedBrain([("workspace_write", {"path": "x.txt"})])
+    agent = FakePlanAgent(
+        brain=brain,
+        tools=[("workspace_write", workspace_write, "write", [])],
+    )
+    agent.set_session_context("s1", {"FS_DELETE_OVERWRITE"})
+    plan, task = _approved_plan([_step("step-1", "workspace_write", {"path": "x.txt"})])
+
+    def step_verification(step, loop_result):
+        del step, loop_result
+        return Verification(
+            outcome=VerificationOutcome.FAILED,
+            checks=(
+                PostconditionCheck(
+                    name="file_exists:x.txt", passed=False, detail="file does not exist"
+                ),
+            ),
+            source="test",
+        )
+
+    result = execute_approved_plan(
+        agent=agent,
+        plan=plan,
+        task=task,
+        session_id="s1",
+        plan_hash_fn=plan_hash_payload,
+        checkpoints=PlanLoopCheckpoints(),
+        step_verification=step_verification,
+    )
+
+    assert len(write_calls) == 1
+    assert result.steps[0].status == "done"
+    assert result.steps[0].outcome.verification.outcome is VerificationOutcome.FAILED
+    assert result.outcome.is_full_done is False
+    assert result.outcome.terminal_reason is TerminalReason.COMPLETED
+    assert result.outcome.verification.outcome is VerificationOutcome.FAILED
+    assert "file_exists:x.txt" in [check.name for check in result.outcome.verification.checks]
 
 
 def test_cancelled_plan_returns_cancelled_outcome() -> None:

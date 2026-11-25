@@ -129,8 +129,8 @@ class FakeReader:
         self.calls.append(("service_status", (unit, scope)))
         return self.services.get((unit, scope))
 
-    def canonical_check(self) -> VerificationResult:
-        self.calls.append(("canonical_check", None))
+    def canonical_check(self, criterion_sha256: str | None = None) -> VerificationResult:
+        self.calls.append(("canonical_check", criterion_sha256))
         if self._canonical is None:
             return _result(VerificationStatus.ERROR)
         return self._canonical
@@ -206,6 +206,21 @@ def test_browser_state_empty_text_round_trips() -> None:
             kind=PostconditionKind.BROWSER_STATE, params=params, source="test"
         ).with_revision()
         assert Postcondition.from_json(pc.to_json()) == pc
+
+
+def test_process_running_int_create_time_round_trips_without_stale() -> None:
+    # Round-2 finding: an int create_time (10) and the float from_json
+    # produces (10.0) hash different revisions, so a bound criterion
+    # goes STALE right after its own JSON round-trip. Construction
+    # normalizes to float, so the revision is stable.
+    params = ProcessRunningParams(pid=1234, create_time=10)
+    assert isinstance(params.create_time, float)
+    assert params.create_time == 10.0
+    pc = _bound(PostconditionKind.PROCESS_RUNNING, params)
+    restored = Postcondition.from_json(pc.to_json())
+    assert restored.revision() == pc.revision()
+    reader = FakeReader(os_processes={1234: (True, 10.0)})
+    assert evaluate_postcondition(restored, reader, now=1.0).outcome is CheckOutcome.PASSED
 
 
 def test_revision_is_stable_across_key_order() -> None:
@@ -811,6 +826,39 @@ def test_browser_state_facts_for_other_before_do_not_confirm() -> None:
     assert evaluation.evidence["reason"] == "browser_postcondition_unconfirmed"
 
 
+def test_browser_state_selects_fact_bound_to_expectation() -> None:
+    # Round-2 finding: one run may change the same entity twice
+    # (Pending -> Saved -> Published); the checker must not stop at
+    # the first fact when its digest binds another expectation. The
+    # Published capture confirms after="Published" even with a valid
+    # Saved capture before it.
+    facts = _text_facts(after="Saved") + _text_facts(after="Published")
+    published = BrowserStateParams(entity_id="publish-btn", kind="text", after="Published")
+    assert (
+        evaluate_postcondition(
+            _bound(PostconditionKind.BROWSER_STATE, published),
+            None,
+            browser_facts=facts,
+            now=1.0,
+        ).outcome
+        is CheckOutcome.PASSED
+    )
+    saved = BrowserStateParams(entity_id="publish-btn", kind="text", after="Saved")
+    assert (
+        evaluate_postcondition(
+            _bound(PostconditionKind.BROWSER_STATE, saved), None, browser_facts=facts, now=1.0
+        ).outcome
+        is CheckOutcome.PASSED
+    )
+    deleted = BrowserStateParams(entity_id="publish-btn", kind="text", after="Deleted")
+    assert (
+        evaluate_postcondition(
+            _bound(PostconditionKind.BROWSER_STATE, deleted), None, browser_facts=facts, now=1.0
+        ).outcome
+        is CheckOutcome.FAILED
+    )
+
+
 def test_browser_state_count_requires_exactly_one() -> None:
     params = BrowserStateParams(entity_id="item", kind="count", after=1)
     facts = [{"entity_id": "item", "kind": "count", "before_count": 0, "after_count": 1}]
@@ -865,6 +913,46 @@ def test_custom_command_other_argv_never_spawns() -> None:
     assert evaluation.outcome is CheckOutcome.INCONCLUSIVE
     assert evaluation.evidence["reason"] == "non_canonical_command"
     assert calls == []
+
+
+def test_custom_command_passes_criterion_hash_to_reader() -> None:
+    # Round-2 finding: a declared criterion_sha256 must reach the
+    # reader before the check runs, so the executor can enforce it —
+    # one PASSED must not confirm two postconditions bound to
+    # different Makefile hashes.
+    reader = FakeReader(canonical=_result(VerificationStatus.PASSED))
+    pc = _bound(
+        PostconditionKind.CUSTOM_COMMAND,
+        CustomCommandParams(argv=tuple(CANONICAL_CHECK_COMMAND), criterion_sha256="abc"),
+    )
+    evaluation = evaluate_postcondition(pc, reader, now=1.0)
+    assert evaluation.outcome is CheckOutcome.PASSED
+    assert ("canonical_check", "abc") in reader.calls
+
+
+def test_custom_command_hash_mismatch_is_not_a_pass() -> None:
+    # The reader enforces the hash it receives (as the executor does
+    # via execute_command(criterion_sha256=...)): a PASSED for
+    # another Makefile must not confirm this postcondition.
+    def canonical(criterion_sha256: str | None = None) -> VerificationResult:
+        if criterion_sha256 != "abc":
+            raise ValueError("criterion mismatch")
+        return _result(VerificationStatus.PASSED)
+
+    reader = FakeReader(canonical=_result(VerificationStatus.PASSED))
+    reader.canonical_check = canonical  # type: ignore[method-assign]
+    bound = _bound(
+        PostconditionKind.CUSTOM_COMMAND,
+        CustomCommandParams(argv=tuple(CANONICAL_CHECK_COMMAND), criterion_sha256="abc"),
+    )
+    assert evaluate_postcondition(bound, reader, now=1.0).outcome is CheckOutcome.PASSED
+    other = _bound(
+        PostconditionKind.CUSTOM_COMMAND,
+        CustomCommandParams(argv=tuple(CANONICAL_CHECK_COMMAND), criterion_sha256="zzz"),
+    )
+    evaluation = evaluate_postcondition(other, reader, now=1.0)
+    assert evaluation.outcome is CheckOutcome.INCONCLUSIVE
+    assert evaluation.evidence["reason"] == "canonical_check_error"
 
 
 def test_custom_command_empty_argv_is_construction_error() -> None:

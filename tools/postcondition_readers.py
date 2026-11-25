@@ -47,7 +47,7 @@ class DesktopPostconditionReader:
         security: DesktopPathSecurity,
         *,
         systemd_runner: CommandRunner | None = None,
-        canonical_check: Callable[[], VerificationResult] | None = None,
+        canonical_check: Callable[[str | None], VerificationResult] | None = None,
         max_read_bytes: int = 1_048_576,
     ) -> None:
         self._security = security
@@ -139,9 +139,12 @@ class DesktopPostconditionReader:
             "scope": scope,
         }
 
-    def canonical_check(self) -> VerificationResult:
+    def canonical_check(self, criterion_sha256: str | None = None) -> VerificationResult:
         if self._canonical_check is not None:
-            return self._canonical_check()
+            # The declared criterion hash travels to the executor, so
+            # it can enforce it at execution (see
+            # VerifierRuntime.run / execute_command).
+            return self._canonical_check(criterion_sha256)
         return sandbox_verification_unavailable(list(CANONICAL_CHECK_COMMAND))
 
 
@@ -183,8 +186,8 @@ class BridgePostconditionReader:
     def service_status(self, unit: str, scope: str) -> dict[str, JSONValue] | None:
         return self._desktop.service_status(unit, scope)
 
-    def canonical_check(self) -> VerificationResult:
-        return self._desktop.canonical_check()
+    def canonical_check(self, criterion_sha256: str | None = None) -> VerificationResult:
+        return self._desktop.canonical_check(criterion_sha256=criterion_sha256)
 
 
 __all__ = ["BridgePostconditionReader", "DesktopPostconditionReader"]
