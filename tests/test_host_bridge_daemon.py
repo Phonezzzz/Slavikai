@@ -193,6 +193,10 @@ def test_version(bridge: Path) -> None:
 
 
 def test_capabilities(bridge: Path) -> None:
+    # E03-T07: the read-only diag capabilities are always visible,
+    # even with no profiles (process caps stay hidden when the
+    # process subsystem is unavailable) — the diagnosis must answer
+    # exactly when the diagnosed subsystem is broken.
     assert client.capabilities(bridge) == [
         "bridge.ping",
         "bridge.version",
@@ -205,6 +209,10 @@ def test_capabilities(bridge: Path) -> None:
         "host.fs.move",
         "host.fs.delete",
         "host.fs.search",
+        "host.diag.service_status",
+        "host.diag.process_list",
+        "host.diag.disk",
+        "host.diag.host",
     ]
 
 

@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, Final
 
+from host_bridge.diag import HostDiagService
 from host_bridge.fs import CancelToken, HostFsService
 from host_bridge.process import HostProcessService, ProcessError, build_process_service
 from host_bridge.protocol import (
@@ -54,6 +55,7 @@ from host_bridge.protocol import (
     CAPABILITY_CAPABILITIES,
     CAPABILITY_PING,
     CAPABILITY_VERSION,
+    DIAG_CAPABILITIES,
     FS_CAPABILITIES,
     MAX_FRAME_BYTES,
     PROCESS_CAPABILITIES,
@@ -154,6 +156,7 @@ class HostBridgeDaemon:
         dispatch_fn: Callable[[BridgeRequest], dict[str, object]] | None = None,
         fs_service: HostFsService | None = None,
         process_service: HostProcessService | None = None,
+        diag_service: HostDiagService | None = None,
         capability_deadlines: Mapping[str, float] | None = None,
     ) -> None:
         self._socket_path = socket_path
@@ -175,6 +178,18 @@ class HostBridgeDaemon:
                 self._fs_service.registry,
                 self._fs_service,
                 runtime_dir=socket_path.parent,
+            )
+        )
+        # Read-only diagnostics (E03-T07): built from the daemon's
+        # own services by default; injectable for tests (same
+        # pattern as fs_service / process_service).
+        self._diag_service = (
+            diag_service
+            if diag_service is not None
+            else HostDiagService(
+                fs_service=self._fs_service,
+                process_service=self._process_service,
+                daemon_pid=os.getpid(),
             )
         )
         self._listener: socket.socket | None = None
@@ -200,6 +215,9 @@ class HostBridgeDaemon:
         touch the socket, and a single inode check never has to
         carry ownership through the sweep.
         """
+        # Diagnostics start time (E03-T07): service_status reports
+        # when this instance started serving.
+        self._diag_service.note_started()
         parent = self._socket_path.parent
         try:
             parent.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
@@ -505,5 +523,19 @@ class HostBridgeDaemon:
                 # service records it as the ownership binding.
                 principal_id=request.principal_id,
                 run_id=request.run_id,
+            )
+        if request.capability in DIAG_CAPABILITIES:
+            # Read-only diagnostics (E03-T07): always visible, even
+            # when the enforcement probe failed — the diagnosis must
+            # answer exactly when the diagnosed subsystem is broken.
+            # The envelope principal_id is the ownership key for the
+            # process_list filter (E03-T06 pair), never read from
+            # params.
+            return self._diag_service.handle(
+                request.capability,
+                request.params,
+                request.request_id,
+                token,
+                principal_id=request.principal_id,
             )
         raise UnknownCapabilityError(request.capability, request_id=request.request_id)

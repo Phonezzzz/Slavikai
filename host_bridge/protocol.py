@@ -81,6 +81,16 @@ CAPABILITY_PROCESS_POLL: Final[str] = "host.process.poll"
 CAPABILITY_PROCESS_KILL: Final[str] = "host.process.kill"
 CAPABILITY_PROCESS_STOP: Final[str] = "host.process.stop"
 
+# Read-only host diagnostics (E03-T07, ADR-0013 §6). Wire schema for
+# the params of each capability lives in host_bridge.diag; the
+# envelope is unchanged. No deadlines entries: diag handlers are
+# instant by design (systemctl 2 s, disk under a shared 2 s budget),
+# so the 5 s default covers them with margin.
+CAPABILITY_DIAG_SERVICE_STATUS: Final[str] = "host.diag.service_status"
+CAPABILITY_DIAG_PROCESS_LIST: Final[str] = "host.diag.process_list"
+CAPABILITY_DIAG_DISK: Final[str] = "host.diag.disk"
+CAPABILITY_DIAG_HOST: Final[str] = "host.diag.host"
+
 CAPABILITIES: Final[tuple[str, ...]] = (
     CAPABILITY_PING,
     CAPABILITY_VERSION,
@@ -97,6 +107,10 @@ CAPABILITIES: Final[tuple[str, ...]] = (
     CAPABILITY_PROCESS_POLL,
     CAPABILITY_PROCESS_KILL,
     CAPABILITY_PROCESS_STOP,
+    CAPABILITY_DIAG_SERVICE_STATUS,
+    CAPABILITY_DIAG_PROCESS_LIST,
+    CAPABILITY_DIAG_DISK,
+    CAPABILITY_DIAG_HOST,
 )
 
 # Per-capability daemon deadlines (E03-T04): tree walks and moves over
@@ -135,6 +149,19 @@ PROCESS_CAPABILITIES: Final[frozenset[str]] = frozenset(
         CAPABILITY_PROCESS_POLL,
         CAPABILITY_PROCESS_KILL,
         CAPABILITY_PROCESS_STOP,
+    }
+)
+
+# Read-only diagnostics (E03-T07): unlike the process capabilities,
+# these are never hidden when the enforcement probe fails — the
+# diagnosis must answer exactly when the diagnosed subsystem is
+# broken (see daemon._dispatch).
+DIAG_CAPABILITIES: Final[frozenset[str]] = frozenset(
+    {
+        CAPABILITY_DIAG_SERVICE_STATUS,
+        CAPABILITY_DIAG_PROCESS_LIST,
+        CAPABILITY_DIAG_DISK,
+        CAPABILITY_DIAG_HOST,
     }
 )
 

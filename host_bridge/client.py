@@ -26,6 +26,10 @@ from typing import Final
 
 from host_bridge.protocol import (
     CAPABILITY_CAPABILITIES,
+    CAPABILITY_DIAG_DISK,
+    CAPABILITY_DIAG_HOST,
+    CAPABILITY_DIAG_PROCESS_LIST,
+    CAPABILITY_DIAG_SERVICE_STATUS,
     CAPABILITY_PING,
     CAPABILITY_PROCESS_STOP,
     CAPABILITY_VERSION,
@@ -209,3 +213,62 @@ def stop(
         params={"run_id": run_id},
         timeout=timeout,
     )
+
+
+def service_status(socket_path: Path, *, timeout: float | None = None) -> dict[str, object]:
+    """Read-only daemon + systemd unit state (E03-T07)."""
+    return call(socket_path, CAPABILITY_DIAG_SERVICE_STATUS, timeout=timeout)
+
+
+def process_list(
+    socket_path: Path,
+    run_id: str | None = None,
+    *,
+    principal_id: str | None = None,
+    timeout: float | None = None,
+) -> dict[str, object]:
+    """Read-only process listing (E03-T07).
+
+    With ``run_id`` given, only the processes bound to the
+    (principal_id, run_id) ownership pair are returned; the
+    principal goes in the envelope, the run id in the params —
+    exactly where the daemon reads them (same shape as ``stop``).
+    The result carries ``processes``, ``count`` (total matching)
+    and ``truncated`` (true when the frame budget trimmed it).
+    """
+    result = call(
+        socket_path,
+        CAPABILITY_DIAG_PROCESS_LIST,
+        principal_id=principal_id,
+        run_id=run_id,
+        params={"run_id": run_id} if run_id is not None else None,
+        timeout=timeout,
+    )
+    processes = result.get("processes")
+    count = result.get("count")
+    if not isinstance(processes, list) or not isinstance(count, int) or isinstance(count, bool):
+        raise BridgeClientError(
+            "malformed_response", "process_list must return a list of processes and a count"
+        )
+    return result
+
+
+def disk(
+    socket_path: Path, root_id: str | None = None, *, timeout: float | None = None
+) -> dict[str, object]:
+    """Read-only per-root disk usage (E03-T07)."""
+    result = call(
+        socket_path,
+        CAPABILITY_DIAG_DISK,
+        params={"root_id": root_id} if root_id is not None else None,
+        timeout=timeout,
+    )
+    disks = result.get("disks")
+    if not isinstance(disks, list):
+        raise BridgeClientError("malformed_response", "disk must return a list of roots")
+    return result
+
+
+def host(socket_path: Path, *, timeout: float | None = None) -> dict[str, object]:
+    """Read-only host facts (E03-T07)."""
+    return call(socket_path, CAPABILITY_DIAG_HOST, timeout=timeout)

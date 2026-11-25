@@ -1386,6 +1386,14 @@ MERGED, main 658a638). Merge unit-file допустим раньше T07/T08.
 + вызов stop при отмене run) явным deliverable шага 9; E05-T07 — SEQ на wiring
 шага 9. ADR-0013 §4 — решить до или в T11.
 
+**Диагностика процессов (уточнение владельца 2026-11-25, E03-T07).**
+`host.diag.process_list` daemon-side возвращает весь registry: в v1 все
+run'ы — владельца. Server-side ownership policy применяется к `process_list`
+в T11 adoption: глобальная диагностика (без фильтра `run_id`) — только для
+соответствующего доверенного контекста; недоверенный контекст получает
+только записи своего (principal_id, run_id). T11 adoption contract обязан
+это зафиксировать до/в T11.
+
 Только после этого Desktop Commander capability считается настоящей.
 
 ### Epic E04 — собственная рабочая среда агента

@@ -1956,6 +1956,43 @@ class HostProcessService:
             return False
         return self.probe().available
 
+    def list_processes(
+        self, *, run_id: str | None = None, principal_id: str | None = None
+    ) -> list[dict[str, object]]:
+        """Read-only snapshot of the process records (E03-T07).
+
+        The only way diagnostics reads the registry (owner
+        clarification 2): a frozen copy of the wire-visible fields,
+        sorted by ``started_at`` (then ``process_id`` for a stable
+        order). No refresh, no finalization, no mutation of any
+        kind — a record whose reaper has not finalized it yet is
+        reported with its last published state.
+
+        With ``run_id`` given, only the records bound to the
+        (principal_id, run_id) ownership pair are returned; an
+        unknown run yields an empty list. Without it — all records.
+        No argv/env/cwd/stdout/stderr/scope names ever leave the
+        service: the snapshot carries exactly the fields the wire
+        schema allows.
+        """
+        with self._lock:
+            entries: list[dict[str, object]] = [
+                {
+                    "process_id": record.process_id,
+                    "profile_id": record.profile_id,
+                    "state": record.state,
+                    "run_id": record.run_id,
+                    "started_at": record.started_at,
+                    "finished_at": record.finished_at,
+                    "exit_code": record.exit_code,
+                    "signal": record.exit_signal,
+                }
+                for record in self._records.values()
+                if run_id is None or (record.principal_id, record.run_id) == (principal_id, run_id)
+            ]
+        entries.sort(key=lambda entry: (str(entry["started_at"]), str(entry["process_id"])))
+        return entries
+
     # -- dispatch ------------------------------------------------------------
 
     def handle(
