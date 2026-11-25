@@ -31,6 +31,7 @@ from host_bridge.daemon import (
     PeerCred,
     resolve_socket_path,
 )
+from host_bridge.process import scope_namespace_for, scope_unit_name
 from host_bridge.protocol import MAX_FRAME_BYTES
 
 
@@ -410,10 +411,15 @@ def test_orphan_sweep_destroy_failure_fails_start(
     re-check -> sweep -> fail), not a mocked service object."""
     shim_dir = tmp_path / "shim"
     shim_dir.mkdir()
+    socket_path = tmp_path / "slavikai" / "host-bridge.sock"
+    # The shim must report a scope in THIS daemon's namespace: the
+    # sweep only destroys scopes of its own socket directory, so a
+    # legacy un-namespaced name would be (correctly) ignored.
+    orphan_unit = scope_unit_name(scope_namespace_for(socket_path.parent), "deadbeef")
     _write_systemctl_shim(
         shim_dir,
         'if [ "$2" = "list-units" ]; then\n'
-        '  printf "slavikai-bridge-deadbeef.scope loaded active running\\n"\n'
+        f'  printf "{orphan_unit} loaded active running\\n"\n'
         "  exit 0\n"
         "fi\n"
         'if [ "$2" = "show" ]; then\n'
@@ -424,7 +430,6 @@ def test_orphan_sweep_destroy_failure_fails_start(
     )
     original_path = os.environ["PATH"]
     monkeypatch.setenv("PATH", f"{shim_dir}:{original_path}")
-    socket_path = tmp_path / "slavikai" / "host-bridge.sock"
     daemon = HostBridgeDaemon(socket_path)
     with pytest.raises(BridgeConfigError, match="orphan sweep failed"):
         daemon.start()

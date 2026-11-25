@@ -1277,8 +1277,13 @@ class SystemdRunSpawner:
         unreachable because the system was not booted with systemd):
         then no scope can exist, so the sweep is vacuously empty.
         A broken-but-present manager must never be mistaken for
-        an absent one: only those two precise signatures count
-        as "no manager".
+        an absent one: only two precise signatures count as "no
+        manager" — "not booted with systemd", and a bus-connect
+        failure whose errno proves the bus socket itself does not
+        exist ("No such file or directory"). Any other bus failure
+        ("Permission denied", "Connection refused", a transient
+        error) means a manager may be alive behind an unreachable
+        bus, so the sweep refuses to start.
         """
         try:
             out = subprocess.run(
@@ -1301,10 +1306,15 @@ class SystemdRunSpawner:
             raise BridgeConfigError(f"orphan sweep cannot list scopes: {exc}") from exc
         if out.returncode != 0:
             err = out.stderr or ""
-            if "System has not been booted with systemd" in err or (
-                "Failed to connect to bus" in err
-            ):
-                return []  # no user manager: no scopes can exist
+            if "System has not been booted with systemd" in err:
+                return []  # no systemd at all: no scopes can exist
+            if "Failed to connect to bus" in err and "No such file or directory" in err:
+                # The bus socket itself does not exist: no manager
+                # is listening at the address the whole stack
+                # derives from XDG_RUNTIME_DIR, so no scope can
+                # exist. Any other bus failure leaves the question
+                # open and fails closed below.
+                return []
             raise BridgeConfigError(
                 "orphan sweep cannot list scopes: systemctl exited "
                 f"{out.returncode}: {err.strip()[:200]}"
@@ -1392,17 +1402,40 @@ class ProbeResult:
     reason: str
 
 
+def scope_namespace_for(runtime_dir: Path) -> str:
+    """Namespace token binding bridge scopes to one daemon's socket
+    directory: the first 12 hex chars of the SHA-256 of the canonical
+    socket directory. Stable across restarts of the same daemon (same
+    socket dir -> same namespace, so crash recovery still finds its
+    own orphans) and distinct across socket dirs (a second daemon
+    with another socket directory never sweeps the first's scopes:
+    the flock guards one socket directory only, while the systemd
+    user manager is shared per UID)."""
+    return hashlib.sha256(str(Path(runtime_dir).resolve()).encode("utf-8")).hexdigest()[:12]
+
+
+def scope_unit_name(namespace: str, process_id: str) -> str:
+    """Scope unit name for one process of one daemon namespace."""
+    return f"slavikai-bridge-{namespace}-{process_id}.scope"
+
+
 def _process_id_from_unit(unit_name: str) -> str | None:
     """The process_id encoded in a bridge scope unit name
-    (``slavikai-bridge-<process_id>.scope``), or None when the
-    name does not follow that shape (e.g. the probe unit).
+    (``slavikai-bridge-<namespace>-<process_id>.scope``), or None
+    when the name does not follow that shape (e.g. the probe unit,
+    or a scope of another daemon's namespace).
     Used by the E03-T06 orphan sweep to skip scopes that gained
     a live record while the sweep was running."""
     prefix, suffix = "slavikai-bridge-", ".scope"
     if not unit_name.startswith(prefix) or not unit_name.endswith(suffix):
         return None
-    process_id = unit_name[len(prefix) : -len(suffix)]
-    return process_id or None
+    middle = unit_name[len(prefix) : -len(suffix)]
+    namespace, _, process_id = middle.partition("-")
+    if len(namespace) != 12 or not all(c in "0123456789abcdef" for c in namespace):
+        return None
+    if not process_id or process_id == "probe":
+        return None
+    return process_id
 
 
 def _read_status_file(run_dir: Path) -> dict[str, object] | None:
@@ -1609,10 +1642,14 @@ def run_enforcement_probe(
             spec_path = probe_dir / "spec.json"
             spec_path.write_text(json.dumps(probe_spec), encoding="utf-8")
             spec_path.chmod(0o600)
+            # The probe scope carries this daemon's namespace like
+            # any other scope: two daemons probing at once must not
+            # share one unit name.
+            probe_namespace = scope_namespace_for(runtime_dir)
             try:
                 handle = spawner.spawn(
                     spec_path,
-                    unit_name="slavikai-bridge-probe.scope",
+                    unit_name=f"slavikai-bridge-{probe_namespace}-probe.scope",
                     run_dir=probe_dir,
                 )
             except SpawnError as exc:
@@ -1629,7 +1666,7 @@ def run_enforcement_probe(
                 status = _read_status_file(probe_dir)
                 if status is not None and status.get("state") == "running":
                     cgroup = str(status.get("cgroup") or "")
-                    if "slavikai-bridge-probe.scope" in cgroup:
+                    if f"slavikai-bridge-{probe_namespace}-probe.scope" in cgroup:
                         placement_ok = True
                 try:
                     stdout = (probe_dir / "stdout").read_bytes()
@@ -1855,6 +1892,12 @@ class HostProcessService:
         self.runtime_dir = runtime_dir
         self._run_base = runtime_dir / "host-bridge-proc"
         self._run_base.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Scope namespace (E03-T06 rework 1): scopes this daemon
+        # creates — and the orphan sweep destroys — carry the hash
+        # of the socket directory, so a second daemon with another
+        # socket directory (same user manager) never loses its
+        # trees to this daemon's startup sweep.
+        self._scope_namespace = scope_namespace_for(runtime_dir)
         self._profiles = {p.id: p for p in profiles}
         self._spawner = spawner or SystemdRunSpawner()
         self._records: dict[str, _Record] = {}
@@ -2106,6 +2149,18 @@ class HostProcessService:
                 self._finalize(record, "spawn_failed")
             raise
         except RequestTimeoutError:
+            # The request deadline expired while the launch was still
+            # preparing (grants walk, before the spawner returned a
+            # handle): no tree can exist yet, so settle the record
+            # now instead of leaving it to a reaper that cannot
+            # finalize a handle-less record — a record stopped
+            # mid-launch would otherwise stay "killing" forever,
+            # leak its slot, and no repeat STOP would ever report
+            # all_final. When the spawn DID start, the record keeps
+            # the reaper path: the tree may exist and must be
+            # killed, not forgotten.
+            if not record.spawn_started:
+                self._finalize(record, "spawn_failed")
             raise
         except BaseException as exc:
             # A failure before the spawner returned means no process
@@ -2200,7 +2255,7 @@ class HostProcessService:
         try:
             handle = self._spawner.spawn(
                 spec_path,
-                unit_name=f"slavikai-bridge-{record.process_id}.scope",
+                unit_name=scope_unit_name(self._scope_namespace, record.process_id),
                 run_dir=run_dir,
             )
         except SpawnError as exc:
@@ -2686,6 +2741,22 @@ class HostProcessService:
                 for record in self._records.values()
                 if (record.principal_id, record.run_id) == pair
             ]
+        # Natural completion first, as _kill() does: a process that
+        # already finished on its own (cgroup empty, leader reaped)
+        # keeps its published exit code instead of being rewritten
+        # to "killed" because the reaper had not finalized it yet.
+        # Runs outside the lock: _try_finalize finalizes through it.
+        for record in targets:
+            if not record.final:
+                self._try_finalize(record)
+        # Mark every target before signalling any of them, and signal
+        # each independently: a SIGTERM failure (systemctl timeout or
+        # OSError) for one process must not leave the rest of the run
+        # running. The signal is best-effort — the grace deadline +
+        # kill_all in the wait loop (and the reaper) still destroy
+        # the tree.
+        to_signal: list[SpawnHandle] = []
+        with self._lock:
             for record in targets:
                 if record.final:
                     continue
@@ -2700,7 +2771,12 @@ class HostProcessService:
                     record.state = "killing"
                     record.kill_deadline = now + KILL_GRACE_S
                     if record.handle is not None:
-                        self._spawner.signal_tree(record.handle, signal.SIGTERM)
+                        to_signal.append(record.handle)
+        for handle in to_signal:
+            try:
+                self._spawner.signal_tree(handle, signal.SIGTERM)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
         deadline = time.monotonic() + min(token.remaining_s, STOP_WAIT_MAX_S)
         while time.monotonic() < deadline:
             if all(record.final for record in targets):
@@ -2715,7 +2791,12 @@ class HostProcessService:
                     and record.handle is not None
                     and time.monotonic() >= record.kill_deadline
                 ):
-                    self._spawner.kill_all(record.handle)
+                    try:
+                        self._spawner.kill_all(record.handle)
+                    except (OSError, subprocess.TimeoutExpired):
+                        # The reaper retries the destroy; a failing
+                        # kill must not abort the STOP answer.
+                        pass
             if all(record.final for record in targets):
                 break
             time.sleep(0.05)
@@ -2937,11 +3018,20 @@ class HostProcessService:
         ownership of the socket namespace is established and
         before the daemon serves requests. No adoption: any scope
         or run dir found here belongs to a dead daemon, and the
-        process that owned it is gone. Fail-closed: any error
-        raises BridgeConfigError and the daemon refuses to start.
+        process that owned it is gone. Only scopes carrying this
+        daemon's namespace are destroyed: the systemd user manager
+        is shared per UID, so a scope of another (live) daemon
+        with a different socket directory must never be touched.
+        Fail-closed: any error raises BridgeConfigError and the
+        daemon refuses to start.
         """
         scopes = self._spawner.list_bridge_scopes()
+        own_prefix = f"slavikai-bridge-{self._scope_namespace}-"
         for unit_name in scopes:
+            if not unit_name.startswith(own_prefix):
+                # Another daemon's namespace (same user manager, a
+                # different socket directory): never ours to destroy.
+                continue
             process_id = _process_id_from_unit(unit_name)
             with self._lock:
                 if process_id is not None and process_id in self._records:
@@ -3015,4 +3105,6 @@ __all__ = [
     "build_process_service",
     "load_profiles",
     "run_enforcement_probe",
+    "scope_namespace_for",
+    "scope_unit_name",
 ]

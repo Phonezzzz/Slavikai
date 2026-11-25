@@ -43,6 +43,8 @@ from host_bridge.process import (
     SpawnError,
     SpawnHandle,
     load_profiles,
+    scope_namespace_for,
+    scope_unit_name,
 )
 from host_bridge.protocol import (
     MAX_FRAME_BYTES,
@@ -430,12 +432,14 @@ def _service_with_spawner(
     registry: RootsRegistry,
     tmp_path: Path,
     spawner: object,
+    *,
+    runtime_dir: Path | None = None,
 ) -> HostProcessService:
     """A service like the ``service`` fixture, but with a custom spawner."""
     svc = HostProcessService(
         fs_service,
         registry,
-        runtime_dir=tmp_path / "run",
+        runtime_dir=tmp_path / "run" if runtime_dir is None else runtime_dir,
         profiles=load_profiles(registry),
         spawner=spawner,  # type: ignore[arg-type]
     )
@@ -529,6 +533,13 @@ def _wait_state(
             return last
         time.sleep(0.05)
     raise AssertionError(f"process {process_id} did not reach {state}: {last}")
+
+
+def _unit_name(svc: HostProcessService, process_id: str) -> str:
+    """Scope unit name the service assigns to one process: the unit
+    carries the daemon's socket-dir namespace, so the orphan sweep
+    never touches another daemon's scopes."""
+    return scope_unit_name(svc._scope_namespace, process_id)
 
 
 # --- profile loading -------------------------------------------------------
@@ -1289,7 +1300,7 @@ def test_run_and_poll_finish(service: HostProcessService, spawner: FakeSpawner) 
     result = _run(service, "true", "req-true")
     process_id = result["process_id"]
     assert result["state"] == "running"
-    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    handle = spawner.units[_unit_name(service, process_id)]["handle"]
     spawner.finish(handle, state="exited", exit_code=0, stdout=b"ok\n")
     final = _wait_state(service, process_id, "exited")
     assert final["exit_code"] == 0
@@ -1303,7 +1314,7 @@ def test_run_and_poll_finish(service: HostProcessService, spawner: FakeSpawner) 
 def test_poll_offsets_and_retained_from(service: HostProcessService, spawner: FakeSpawner) -> None:
     result = _run(service, "true", "req-off")
     process_id = result["process_id"]
-    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    handle = spawner.units[_unit_name(service, process_id)]["handle"]
     # Total 10 bytes, first 4 already dropped: tail holds bytes 4..9.
     spawner.set_output(handle, stdout=b"456789", stdout_total=10, stdout_retained_from=4)
     first = _poll(service, process_id, stdout_offset=0)
@@ -1322,7 +1333,7 @@ def test_poll_offsets_and_retained_from(service: HostProcessService, spawner: Fa
 def test_poll_frame_budget(service: HostProcessService, spawner: FakeSpawner) -> None:
     result = _run(service, "true", "req-frame")
     process_id = result["process_id"]
-    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    handle = spawner.units[_unit_name(service, process_id)]["handle"]
     # 40 KiB of '"' serializes to ~80 KiB: the poll must shrink it.
     spawner.set_output(handle, stdout=b'"' * 40_000)
     chunk = _poll(service, process_id, max_bytes=32 * 1024)
@@ -1334,7 +1345,7 @@ def test_poll_frame_budget(service: HostProcessService, spawner: FakeSpawner) ->
 def test_poll_utf8_replacement(service: HostProcessService, spawner: FakeSpawner) -> None:
     result = _run(service, "true", "req-utf8")
     process_id = result["process_id"]
-    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    handle = spawner.units[_unit_name(service, process_id)]["handle"]
     spawner.set_output(handle, stdout=b"\xff\xfe hello")
     chunk = _poll(service, process_id)
     assert chunk["stdout"] == "\ufffd\ufffd hello"
@@ -1348,7 +1359,7 @@ def test_poll_pairs_tail_with_consistent_counters(
     offset_out_of_range), and no bytes are lost between polls."""
     result = _run(service, "true", "req-snap")
     process_id = result["process_id"]
-    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    handle = spawner.units[_unit_name(service, process_id)]["handle"]
     # The helper flushed a 6-byte tail; the status still says 3.
     spawner.set_output(handle, stdout=b"abcdef", stdout_total=3)
     first = _poll(service, process_id, stdout_offset=0)
@@ -1385,7 +1396,7 @@ def test_poll_rotation_snapshot_is_generation_bound(
     try:
         result = _run(svc, "true", "req-gen")
         process_id = result["process_id"]
-        handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+        handle = spawner.units[_unit_name(svc, process_id)]["handle"]
         # Rotated tail: A x 262140 then B x 4 (absolute 262144..262147).
         (handle.run_dir / "stdout").write_bytes(b"A" * 262140 + b"B" * 4)
         (handle.run_dir / "stderr").write_bytes(b"")
@@ -1448,7 +1459,7 @@ def test_poll_flush_window_snapshot_is_hash_bound(
     try:
         result = _run(svc, "true", "req-flush")
         process_id = result["process_id"]
-        handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+        handle = spawner.units[_unit_name(svc, process_id)]["handle"]
         # Rotated tail: A x 262140 then B x 4 (absolute 262144..262147).
         new_tail = b"A" * 262140 + b"B" * 4
         (handle.run_dir / "stdout").write_bytes(new_tail)
@@ -1515,7 +1526,7 @@ def test_poll_raises_when_snapshot_never_consistent(
     try:
         result = _run(svc, "true", "req-torn")
         process_id = result["process_id"]
-        handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+        handle = spawner.units[_unit_name(svc, process_id)]["handle"]
         new_tail = b"A" * 262140 + b"B" * 4
         (handle.run_dir / "stdout").write_bytes(new_tail)
         (handle.run_dir / "stderr").write_bytes(b"")
@@ -1558,7 +1569,7 @@ def test_poll_uses_snapshot_counters_despite_concurrent_refresh(
     try:
         result = _run(svc, "true", "req-snap-race")
         process_id = result["process_id"]
-        handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+        handle = spawner.units[_unit_name(svc, process_id)]["handle"]
         old_tail = b"A" * 262140 + b"1234"
         new_tail = b"A" * 262136 + b"1234" + b"BBBB"
         (handle.run_dir / "stdout").write_bytes(old_tail)
@@ -1619,7 +1630,7 @@ def test_poll_frame_budget_keeps_source_byte_offsets(
     bytes: one 0xff byte decodes to one U+FFFD, not three UTF-8 bytes."""
     result = _run(service, "true", "req-bytes")
     process_id = result["process_id"]
-    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    handle = spawner.units[_unit_name(service, process_id)]["handle"]
     spawner.set_output(handle, stdout=b"\xff" * 40_000, stderr=b"\xff" * 40_000)
     first = _poll(service, process_id, max_bytes=32 * 1024)
     assert 0 < first["stdout_next_offset"] < 40_000
@@ -1647,7 +1658,7 @@ def test_poll_chunk_eof_is_per_slice(service: HostProcessService, spawner: FakeS
     of the process state."""
     result = _run(service, "true", "req-slice")
     process_id = result["process_id"]
-    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    handle = spawner.units[_unit_name(service, process_id)]["handle"]
     spawner.finish(handle, state="exited", exit_code=0, stdout="a€b".encode())
     _wait_state(service, process_id, "exited")
     first = _poll(service, process_id, max_bytes=3)
@@ -1683,7 +1694,7 @@ def test_poll_invalid_byte_before_incomplete_char(
     not be replaced along with it."""
     result = _run(service, "true", "req-bad-byte")
     process_id = result["process_id"]
-    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    handle = spawner.units[_unit_name(service, process_id)]["handle"]
     spawner.finish(handle, state="exited", exit_code=0, stdout=b"\xff\xe2\x82\xac")
     _wait_state(service, process_id, "exited")
     first = _poll(service, process_id, max_bytes=3)
@@ -1703,7 +1714,7 @@ def test_poll_max_bytes_smaller_than_char(
     too-small-limit error (the FS read precedent)."""
     result = _run(service, "true", "req-small-limit")
     process_id = result["process_id"]
-    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    handle = spawner.units[_unit_name(service, process_id)]["handle"]
     spawner.finish(handle, state="exited", exit_code=0, stdout="€".encode())
     _wait_state(service, process_id, "exited")
     with pytest.raises(ProcessError) as excinfo:
@@ -1724,7 +1735,7 @@ def test_poll_incomplete_char_at_live_stream_end_returns_empty_chunk(
     """
     result = _run(service, "true", "req-half-char")
     process_id = result["process_id"]
-    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    handle = spawner.units[_unit_name(service, process_id)]["handle"]
     spawner.set_output(handle, stdout=b"\xe2")
     first = _poll(service, process_id)
     assert first["stdout"] == ""
@@ -1763,7 +1774,7 @@ def test_poll_frame_budget_trim_never_stalls(
     monkeypatch.setattr(process_module, "_frame_fits", _tiny_budget)
     result = _run(service, "true", "req-tiny-budget")
     process_id = result["process_id"]
-    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    handle = spawner.units[_unit_name(service, process_id)]["handle"]
     spawner.finish(handle, state="exited", exit_code=0, stdout="€".encode())
     _wait_state(service, process_id, "exited")
     polled = _poll(service, process_id)
@@ -1916,7 +1927,7 @@ def test_reaper_timeout_after_natural_exit_keeps_exit_code(
     try:
         result = _run(svc, "sleep", "req-exit-before-timeout", args=["5"], timeout_s=1)
         process_id = result["process_id"]
-        handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+        handle = spawner.units[_unit_name(svc, process_id)]["handle"]
         # The process exits 0 just before its 1 s deadline; the
         # reaper runs 0.15 s after it.
         spawner.finish(handle, state="exited", exit_code=0)
@@ -2059,7 +2070,7 @@ def test_finished_record_cap(service: HostProcessService, spawner: FakeSpawner) 
     for i in range(MAX_FINISHED_RECORDS + 1):
         result = _run(service, "true", f"req-fin-{i}")
         process_id = result["process_id"]
-        handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+        handle = spawner.units[_unit_name(service, process_id)]["handle"]
         spawner.finish(handle, state="exited", exit_code=0)
         # The reaper finalizes asynchronously; wait for it before the
         # next run, or the concurrency cap (4 running) trips first.
@@ -2219,8 +2230,8 @@ def test_late_spawn_handle_is_destroyed_not_adopted(
         record = svc._records[process_id]
         assert record.final
         assert record.state == "spawn_failed"
-        assert spawner.kill_calls == [f"slavikai-bridge-{process_id}.scope"]
-        handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+        assert spawner.kill_calls == [_unit_name(svc, process_id)]
+        handle = spawner.units[_unit_name(svc, process_id)]["handle"]
         assert handle.popen is None or handle.popen.poll() is not None
         # No resurrection: the record stays spawn_failed.
         time.sleep(0.5)
@@ -2263,8 +2274,8 @@ def test_shutdown_destroys_inflight_launch(
         record = svc._records[process_id]
         assert record.final
         assert record.state == "spawn_failed"
-        assert spawner.kill_calls == [f"slavikai-bridge-{process_id}.scope"]
-        handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+        assert spawner.kill_calls == [_unit_name(svc, process_id)]
+        handle = spawner.units[_unit_name(svc, process_id)]["handle"]
         deadline = time.monotonic() + 2.0
         while (
             handle.popen is not None and handle.popen.poll() is None and time.monotonic() < deadline
@@ -2318,7 +2329,7 @@ def test_stop_preserves_partial_state(service: HostProcessService, spawner: Fake
         service, "sleep", "req-stop-partial", principal_id="p1", run_id="run-A", args=["5"]
     )
     process_id = result["process_id"]
-    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    handle = spawner.units[_unit_name(service, process_id)]["handle"]
     spawner.set_output(handle, stdout=b"line0\nline1\nline2\n")
     stopped = _stop(service, "run-A", principal_id="p1")
     assert stopped["all_final"] is True
@@ -2340,7 +2351,7 @@ def test_stop_lists_final_without_rekill(service: HostProcessService, spawner: F
     their final states and are not re-killed (no new signals)."""
     result = _run_bound(service, "true", "req-stop-final", principal_id="p1", run_id="run-A")
     process_id = result["process_id"]
-    handle = spawner.units[f"slavikai-bridge-{process_id}.scope"]["handle"]
+    handle = spawner.units[_unit_name(service, process_id)]["handle"]
     spawner.finish(handle, state="exited", exit_code=0)
     assert _wait_state(service, process_id, "exited")["state"] == "exited"
     signals_before = len(spawner.signal_calls)
@@ -2352,6 +2363,36 @@ def test_stop_lists_final_without_rekill(service: HostProcessService, spawner: F
     ]
     assert len(spawner.signal_calls) == signals_before
     assert len(spawner.kill_calls) == kills_before
+
+
+def test_stop_preserves_natural_exit_before_reaper_finalizes(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rework 1, finding 2 (P2): a process that already exited on its
+    own (cgroup empty, exit code 7) keeps its published exit when
+    STOP arrives before the reaper finalized it — the stop checks
+    natural completion first, as _kill() does, instead of rewriting
+    the result to "killed" with no exit code."""
+    spawner = FakeSpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    # Park the reaper like test_reaper_timeout_after_natural_exit_keeps_exit_code
+    # does: otherwise it finalizes the scripted exit before STOP runs.
+    monkeypatch.setattr(svc, "_reap_once", lambda: None)
+    try:
+        result = _run_bound(svc, "true", "req-stop-natural", principal_id="p1", run_id="run-A")
+        process_id = result["process_id"]
+        handle = spawner.units[_unit_name(svc, process_id)]["handle"]
+        spawner.finish(handle, state="exited", exit_code=7)
+        stopped = _stop(svc, "run-A", principal_id="p1")
+        assert stopped["all_final"] is True
+        assert stopped["processes"] == [
+            {"process_id": process_id, "state": "exited", "exit_code": 7, "signal": None}
+        ]
+    finally:
+        svc.shutdown()
 
 
 def test_stop_leaves_unbound_processes_alone(
@@ -2486,6 +2527,76 @@ def test_spawn_crossing_stop_is_destroyed(
                 handle.popen.kill()
 
 
+def test_stop_during_grants_timeout_finalizes_spawn_failed(
+    fs_service: HostFsService,
+    registry: RootsRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rework 1, finding 4 (P2): a STOP that lands while the grants
+    walk is still preparing a launch (no handle yet) must not leave
+    the record stuck in "killing" forever — when the walk then hits
+    the request deadline, the launch finalizes as spawn_failed (the
+    process never started), the slot is freed, and a repeat STOP
+    reports all_final."""
+    spawner = FakeSpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    entered = threading.Event()
+    release = threading.Event()
+    original_grants = process_module._compute_cwd_grants
+    calls = 0
+
+    def slow_grants(*args: object, **kwargs: object) -> list:
+        # Only the first grants walk stalls and times out; later
+        # walks (the follow-up run below) behave normally.
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            assert release.wait(timeout=5.0), "the test never released the grants walk"
+            raise RequestTimeoutError(request_id="req-grants-timeout")
+        return original_grants(*args, **kwargs)
+
+    monkeypatch.setattr(process_module, "_compute_cwd_grants", slow_grants)
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            _run_bound(svc, "true", "req-grants-timeout", principal_id="p1", run_id="run-A")
+        except BaseException as exc:  # noqa: BLE001 - captured for the test
+            errors.append(exc)
+
+    try:
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        assert entered.wait(timeout=5.0), "the launch never reached the grants walk"
+        stopped = _stop(svc, "run-A", principal_id="p1")
+        assert stopped["all_final"] is False
+        assert stopped["processes"][0]["state"] == "killing"
+        release.set()
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "the launch did not return after the grants timeout"
+        assert errors and isinstance(errors[0], RequestTimeoutError)
+        process_id = svc._by_request_id["req-grants-timeout"]
+        record = svc._records[process_id]
+        assert record.final
+        assert record.state == "spawn_failed"
+        assert record.handle is None
+        retry = _stop(svc, "run-A", principal_id="p1")
+        assert retry["all_final"] is True
+        assert retry["processes"] == [
+            {"process_id": process_id, "state": "spawn_failed", "exit_code": None, "signal": None}
+        ]
+        # The slot is freed: a new run for another run id starts.
+        ok = _run_bound(
+            svc, "sleep", "req-grants-after", principal_id="p1", run_id="run-B", args=["5"]
+        )
+        assert ok["state"] == "running"
+    finally:
+        release.set()
+        svc.shutdown()
+
+
 def test_run_retry_with_different_binding_is_rejected(
     service: HostProcessService, spawner: FakeSpawner
 ) -> None:
@@ -2574,6 +2685,46 @@ def test_stop_shares_one_deadline(
         assert len(spawner.signal_calls) == signals
         for process_id in ids:
             assert _wait_state(svc, process_id, "killed", timeout_s=10.0)["state"] == "killed"
+    finally:
+        svc.shutdown()
+
+
+class _FailingSignalSpawner(FakeSpawner):
+    """signal_tree raises on the first call (systemctl timing out),
+    then works: a STOP must still stop every process of the run."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._failed_once = False
+
+    def signal_tree(self, handle: SpawnHandle, sig: int) -> None:
+        if not self._failed_once:
+            self._failed_once = True
+            raise subprocess.TimeoutExpired(["systemctl", "kill"], 5.0)
+        super().signal_tree(handle, sig)
+
+
+def test_stop_signals_remaining_processes_when_first_signal_fails(
+    fs_service: HostFsService, registry: RootsRegistry, tmp_path: Path
+) -> None:
+    """Rework 1, finding 1 (P1): a SIGTERM failure for the first
+    process of a run must not leave the rest of the run running —
+    every target is marked killing first, then each is signalled
+    independently, and the reaper still cleans up."""
+    spawner = _FailingSignalSpawner()
+    svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
+    try:
+        a = _run_bound(svc, "sleep", "req-sigfail-a", principal_id="p1", run_id="run-A", args=["5"])
+        b = _run_bound(svc, "sleep", "req-sigfail-b", principal_id="p1", run_id="run-A", args=["5"])
+        stopped = _stop(svc, "run-A", principal_id="p1")
+        assert stopped["all_final"] is True
+        by_id = {p["process_id"]: p for p in stopped["processes"]}
+        assert by_id[a["process_id"]]["state"] == "killed"
+        assert by_id[b["process_id"]]["state"] == "killed"
+        # The second process was signalled even though the first
+        # signal raised: its unit is in the signal log.
+        signalled = {unit for unit, _ in spawner.signal_calls}
+        assert _unit_name(svc, b["process_id"]) in signalled
     finally:
         svc.shutdown()
 
@@ -2704,25 +2855,68 @@ def test_reap_orphans_removes_stale_scopes_and_run_dirs(
         (stale_dir / "status.json").write_text("{}", encoding="utf-8")
         stale_handle = SpawnHandle(
             popen=None,
-            unit_name="slavikai-bridge-deadbeef.scope",
+            unit_name=scope_unit_name(svc._scope_namespace, "deadbeef"),
             cgroup_path=None,
             run_dir=stale_dir,
         )
-        spawner.units["slavikai-bridge-deadbeef.scope"] = {
+        spawner.units[scope_unit_name(svc._scope_namespace, "deadbeef")] = {
             "handle": stale_handle,
             "procs": ["4242"],
         }
         result = _run(svc, "sleep", "req-sweep-live", args=["5"])
         live_id = result["process_id"]
-        live_unit = f"slavikai-bridge-{live_id}.scope"
+        live_unit = _unit_name(svc, live_id)
         assert live_unit in spawner.units
         svc.reap_orphans()
-        assert "slavikai-bridge-deadbeef.scope" not in spawner.units
+        assert scope_unit_name(svc._scope_namespace, "deadbeef") not in spawner.units
         assert not stale_dir.exists()
         assert live_unit in spawner.units
         assert _poll(svc, live_id)["state"] == "running"
     finally:
         svc.shutdown()
+
+
+def test_reap_orphans_ignores_foreign_namespace_scopes(
+    fs_service: HostFsService, registry: RootsRegistry, tmp_path: Path
+) -> None:
+    """Rework 1, finding 5 (P1): two daemons sharing one user manager
+    but different socket directories have different scope namespaces
+    — the startup sweep of one must never destroy the other's trees.
+    A stale scope in the sweeping daemon's own namespace is still
+    removed."""
+    spawner = FakeSpawner()
+    svc_a = _service_with_spawner(
+        fs_service, registry, tmp_path, spawner, runtime_dir=tmp_path / "run-a"
+    )
+    svc_b = _service_with_spawner(
+        fs_service, registry, tmp_path, spawner, runtime_dir=tmp_path / "run-b"
+    )
+    assert svc_a._scope_namespace != svc_b._scope_namespace
+    try:
+        result = _run(svc_a, "sleep", "req-foreign-live", args=["5"])
+        live_id = result["process_id"]
+        live_unit = _unit_name(svc_a, live_id)
+        assert live_unit in spawner.units
+        stale_dir = svc_b._run_base / "deadbeef"
+        stale_dir.mkdir(parents=True)
+        stale_handle = SpawnHandle(
+            popen=None,
+            unit_name=scope_unit_name(svc_b._scope_namespace, "deadbeef"),
+            cgroup_path=None,
+            run_dir=stale_dir,
+        )
+        spawner.units[scope_unit_name(svc_b._scope_namespace, "deadbeef")] = {
+            "handle": stale_handle,
+            "procs": ["4242"],
+        }
+        svc_b.reap_orphans()
+        assert scope_unit_name(svc_b._scope_namespace, "deadbeef") not in spawner.units
+        assert not stale_dir.exists()
+        assert live_unit in spawner.units
+        assert _poll(svc_a, live_id)["state"] == "running"
+    finally:
+        svc_a.shutdown()
+        svc_b.shutdown()
 
 
 class _FailingListSpawner(FakeSpawner):
@@ -2760,10 +2954,10 @@ def test_reap_orphans_destroy_failure_is_fatal(
     spawner = _FailingDestroySpawner()
     svc = _service_with_spawner(fs_service, registry, tmp_path, spawner)
     try:
-        spawner.units["slavikai-bridge-deadbeef.scope"] = {
+        spawner.units[scope_unit_name(svc._scope_namespace, "deadbeef")] = {
             "handle": SpawnHandle(
                 popen=None,
-                unit_name="slavikai-bridge-deadbeef.scope",
+                unit_name=scope_unit_name(svc._scope_namespace, "deadbeef"),
                 cgroup_path=None,
                 run_dir=tmp_path / "run" / "host-bridge-proc" / "deadbeef",
             ),
@@ -2773,6 +2967,37 @@ def test_reap_orphans_destroy_failure_is_fatal(
             svc.reap_orphans()
     finally:
         svc.shutdown()
+
+
+def test_list_bridge_scopes_bus_errors_are_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rework 1, finding 3 (P1): a bus-connect failure is not proof
+    that no manager exists — only "not booted with systemd" and a
+    missing bus socket ("No such file or directory") prove it.
+    "Permission denied" (and any other bus failure) must fail the
+    sweep instead of returning an empty list and letting the daemon
+    start over live scopes."""
+
+    def fake_run(stderr: str) -> object:
+        def _run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=stderr)
+
+        return _run
+
+    cases = [
+        ("Failed to connect to bus: Permission denied", True),
+        ("Failed to connect to bus: Connection refused", True),
+        ("Failed to connect to bus: No such file or directory", False),
+        ("System has not been booted with systemd", False),
+    ]
+    for stderr, must_raise in cases:
+        monkeypatch.setattr(subprocess, "run", fake_run(stderr))
+        if must_raise:
+            with pytest.raises(BridgeConfigError):
+                process_module.SystemdRunSpawner.list_bridge_scopes()
+        else:
+            assert process_module.SystemdRunSpawner.list_bridge_scopes() == []
 
 
 class _RaisingSpawner:
@@ -4916,7 +5141,18 @@ def test_live_crash_recovery_whole_tree(
         **os.environ,
         "HOME": str(home),
         "XDG_RUNTIME_DIR": str(runtime_dir),
+        # The spawned daemon resolves its config through
+        # XDG_CONFIG_HOME (or SLAVIK_HOST_BRIDGE_CONFIG): pin both
+        # to the fake home, or an ambient setting on the machine
+        # (CI runners set XDG_CONFIG_HOME) makes the daemon miss
+        # the test config and answer "unknown capability:
+        # 'host.process.run'".
+        "XDG_CONFIG_HOME": str(home / ".config"),
     }
+    env.pop("SLAVIK_HOST_BRIDGE_CONFIG", None)
+    # The daemon's scopes carry the namespace of its socket
+    # directory (runtime_dir / "slavikai").
+    namespace = scope_namespace_for(runtime_dir / "slavikai")
     units: list[str] = []
     proc: subprocess.Popen[bytes] | None = None
     try:
@@ -4945,8 +5181,8 @@ def test_live_crash_recovery_whole_tree(
             run_id="run-A",
         )
         units = [
-            f"slavikai-bridge-{normal['process_id']}.scope",
-            f"slavikai-bridge-{setsid['process_id']}.scope",
+            scope_unit_name(namespace, normal["process_id"]),
+            scope_unit_name(namespace, setsid["process_id"]),
         ]
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
