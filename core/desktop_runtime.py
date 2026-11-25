@@ -13,6 +13,11 @@ from typing import Protocol, TypeVar
 from core.approval_policy import ApprovalRequired
 from core.mwv.models import VerificationResult, VerificationStatus
 from core.mwv.verifier_runtime import VerifierRuntime, desktop_last_state_change_succeeded
+from core.postconditions import (
+    Postcondition,
+    PostconditionReader,
+    collect_browser_state_facts,
+)
 from core.response_preferences import ResponsePreferences, compose_response_preferences
 from core.run_contract import RunBudget
 from core.run_outcome import (
@@ -181,14 +186,32 @@ class DesktopRuntime:
         *,
         messages: Sequence[LLMMessage] = (),
         cancellation_token: asyncio.Event | None = None,
+        postconditions: Sequence[Postcondition] | None = None,
+        postcondition_reader: PostconditionReader | None = None,
     ) -> DesktopRunOutcome:
+        """Run one desktop goal.
+
+        ``postconditions`` (E05-T01) are typed effect checks evaluated
+        against real state after the loop and joined into the canonical
+        derivation as a third channel. ``postcondition_reader`` supplies
+        the state reads; without it, reader-dependent checks evaluate
+        to BLOCKED (never a pass). Resume re-derives without typed
+        checks in T01 — T02 carries bound postconditions through the
+        continuation.
+        """
         conversation = tuple(
             LLMMessage(role=message.role, content=message.content)
             for message in messages
             if message.role in {"user", "assistant"}
         )
         return self._on_owner(
-            lambda: self._run(goal, messages=conversation, cancellation_token=cancellation_token)
+            lambda: self._run(
+                goal,
+                messages=conversation,
+                cancellation_token=cancellation_token,
+                postconditions=postconditions,
+                postcondition_reader=postcondition_reader,
+            )
         )
 
     def _on_owner(self, operation: Callable[[], _T]) -> _T:
@@ -201,6 +224,8 @@ class DesktopRuntime:
         *,
         messages: Sequence[LLMMessage],
         cancellation_token: asyncio.Event | None = None,
+        postconditions: Sequence[Postcondition] | None = None,
+        postcondition_reader: PostconditionReader | None = None,
     ) -> DesktopRunOutcome:
         with self._state_lock:
             self._cancel_pending()
@@ -216,7 +241,11 @@ class DesktopRuntime:
             self._lease_held = True
             try:
                 return self._run_with_lease(
-                    goal, messages=messages, cancellation_token=cancellation_token
+                    goal,
+                    messages=messages,
+                    cancellation_token=cancellation_token,
+                    postconditions=postconditions,
+                    postcondition_reader=postcondition_reader,
                 )
             finally:
                 if self._paused is None:
@@ -443,6 +472,8 @@ class DesktopRuntime:
         cancellation_token: asyncio.Event | None = None,
         continuation: ToolLoopContinuation | None = None,
         messages: Sequence[LLMMessage] = (),
+        postconditions: Sequence[Postcondition] | None = None,
+        postcondition_reader: PostconditionReader | None = None,
     ) -> DesktopRunOutcome:
         brain = self.parent._get_main_brain()
         capability = brain.native_tool_capability()
@@ -546,11 +577,25 @@ class DesktopRuntime:
         # деривации. Неподтверждённый click/submit даёт UNVERIFIED, а
         # не DONE и не ошибку выполнения.
         browser_verification = self.verifier.verify_browser_postconditions(observations)
+        # E05-T01: the typed channel joins the same derivation. It
+        # reads real state (never a tool's ok flag); a failed typed
+        # check gives UNVERIFIED, an unproven one UNKNOWN — never a
+        # silent DONE.
+        typed_verification = None
+        if postconditions:
+            typed_verification = self.verifier.verify_postconditions(
+                postconditions,
+                postcondition_reader,
+                browser_facts=collect_browser_state_facts(
+                    [result for _, _, result in observations]
+                ),
+            )
         canonical_outcome = self._derive_canonical_outcome(
             loop_result,
             combine_verification_results(
                 verification,
                 browser_verification,
+                typed=typed_verification,
                 primary_name="desktop_observations",
             ),
             gate_errors,

@@ -5,6 +5,8 @@ import asyncio
 import pytest
 
 from core.approval_policy import ApprovalContext
+from core.desktop_security import DesktopPathSecurity
+from core.mwv.verifier_runtime import VerifierRuntime
 from core.plan_execute import (
     PlanExecutionBindingError,
     PlanLoopApprovalPending,
@@ -14,12 +16,14 @@ from core.plan_execute import (
     resume_approved_plan,
     validate_approved_plan,
 )
+from core.postconditions import FileExistsParams, Postcondition, PostconditionKind
 from core.run_contract import build_run_spec
 from core.run_outcome import TerminalReason, VerificationOutcome
 from core.tool_gateway import ToolGateway
 from llm.types import LLMResult, ToolCall
 from server.http.common.workflow_state import plan_hash_payload
 from shared.models import JSONValue, ToolResult
+from tools.postcondition_readers import DesktopPostconditionReader
 from tools.tool_registry import ToolRegistry
 from tools.workspace_tools import ReadFileTool, WriteFileTool
 
@@ -521,6 +525,57 @@ def test_write_step_without_postcondition_is_not_full_done() -> None:
     assert result.outcome.is_full_done is False
     assert result.outcome.terminal_reason is TerminalReason.COMPLETED
     assert result.outcome.verification.outcome is VerificationOutcome.UNKNOWN
+
+
+def test_write_step_with_typed_postcondition_is_full_done(tmp_path) -> None:
+    # E05-T01 group 11: the same write step with a typed file_exists
+    # check (via the step_verification hook, the T02 seam) is full DONE.
+    target = tmp_path / "x.txt"
+    write_calls: list = []
+
+    def workspace_write(request):
+        write_calls.append(request)
+        target.write_text("written", encoding="utf-8")
+        return ToolResult.success({})
+
+    brain = ScriptedBrain([("workspace_write", {"path": "x.txt"})])
+    agent = FakePlanAgent(
+        brain=brain,
+        tools=[("workspace_write", workspace_write, "write", [])],
+    )
+    agent.set_session_context("s1", {"FS_DELETE_OVERWRITE"})
+    plan, task = _approved_plan([_step("step-1", "workspace_write", {"path": "x.txt"})])
+    security = DesktopPathSecurity(
+        home=tmp_path,
+        policy_store_path=tmp_path / ".run" / "desktop_approvals.json",
+    )
+    reader = DesktopPostconditionReader(security)
+    check = Postcondition(
+        kind=PostconditionKind.FILE_EXISTS,
+        params=FileExistsParams(path=str(target)),
+        source="test",
+    ).with_revision()
+
+    def step_verification(step, loop_result):
+        del step, loop_result
+        return VerifierRuntime().verify_postconditions([check], reader)
+
+    result = execute_approved_plan(
+        agent=agent,
+        plan=plan,
+        task=task,
+        session_id="s1",
+        plan_hash_fn=plan_hash_payload,
+        checkpoints=PlanLoopCheckpoints(),
+        step_verification=step_verification,
+    )
+
+    assert len(write_calls) == 1
+    assert target.exists()
+    assert result.steps[0].status == "done"
+    assert result.outcome.is_full_done is True
+    assert result.outcome.terminal_reason is TerminalReason.COMPLETED
+    assert result.outcome.verification.outcome is VerificationOutcome.PASSED
 
 
 def test_cancelled_plan_returns_cancelled_outcome() -> None:

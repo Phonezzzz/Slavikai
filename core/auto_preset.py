@@ -45,7 +45,7 @@ import os
 import stat
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -66,6 +66,11 @@ from core.mwv.verifier_runtime import (
     is_repo_workspace,
 )
 from core.mwv.verifier_summary import extract_verifier_excerpt
+from core.postconditions import (
+    Postcondition,
+    PostconditionReader,
+    collect_browser_state_facts,
+)
 from core.response_preferences import compose_response_preferences
 from core.run_contract import RunBudget
 from core.run_outcome import (
@@ -329,7 +334,14 @@ class AutoPresetRunner:
         run_root_override: Path | None = None,
         capture_binding: CaptureBinding | None = None,
         cancellation_token: asyncio.Event | None = None,
+        postconditions: Sequence[Postcondition] | None = None,
+        postcondition_reader: PostconditionReader | None = None,
     ) -> AutoRunOutcome:
+        # E05-T01: ``postconditions`` are typed effect checks evaluated
+        # against real state after the loop and joined into the
+        # canonical derivation as a third channel. Resume re-derives
+        # without typed checks in T01 — T02 carries bound
+        # postconditions through the frame/continuation.
         if capture_binding is not None and (
             capture_binding.run.scope.principal_id != self.parent.user_id
             or capture_binding.run.scope.session_id != self.parent.session_id
@@ -406,7 +418,12 @@ class AutoPresetRunner:
             repo_verification_required=repo_verification_required,
             verifier_criterion_rejected=criterion.status == "rejected",
         )
-        return self._execute_frame(frame, cancellation_token=cancellation_token)
+        return self._execute_frame(
+            frame,
+            cancellation_token=cancellation_token,
+            postconditions=postconditions,
+            postcondition_reader=postcondition_reader,
+        )
 
     def _execute_frame(
         self,
@@ -414,6 +431,8 @@ class AutoPresetRunner:
         *,
         continuation: ToolLoopContinuation | None = None,
         cancellation_token: asyncio.Event | None = None,
+        postconditions: Sequence[Postcondition] | None = None,
+        postcondition_reader: PostconditionReader | None = None,
     ) -> AutoRunOutcome:
         goal, run_id_value = frame.goal, frame.run_id
         run_root, budgets, state = frame.workspace_root, frame.budgets, frame.state
@@ -695,10 +714,25 @@ class AutoPresetRunner:
             # (click/submit без ожидаемого состояния) даёт UNVERIFIED и
             # не перекрывается успешным процессным verifier.
             browser_verification = _browser_postcondition_result(loop_result)
+            # E05-T01: the typed channel joins the same derivation. It
+            # reads real state (never a tool's ok flag); a failed typed
+            # check gives UNVERIFIED, an unproven one UNKNOWN — never a
+            # silent DONE.
+            typed_verification = None
+            if postconditions:
+                typed_verification = VerifierRuntime().verify_postconditions(
+                    postconditions,
+                    postcondition_reader,
+                    browser_facts=collect_browser_state_facts(
+                        [item.result for item in loop_result.tool_calls]
+                    ),
+                )
             canonical = outcome_from_loop_result(
                 loop_result,
                 state_changing=_loop_state_changing(loop_result, self.parent.tool_registry),
-                verification=_canonical_verification(verification, browser_verification),
+                verification=_canonical_verification(
+                    verification, browser_verification, typed=typed_verification
+                ),
             )
             if canonical.terminal_reason is not TerminalReason.COMPLETED:
                 state["error"] = "canonical_outcome_not_completed"
@@ -1196,6 +1230,8 @@ def _loop_state_changing(loop_result: AgentToolLoopResult, registry: ToolRegistr
 def _canonical_verification(
     process_result: VerificationResult | None,
     browser_result: VerificationResult | None,
+    *,
+    typed: Verification | None = None,
 ) -> Verification | None:
     """Скомбинировать процессную и browser верификации для канонического outcome.
 
@@ -1203,12 +1239,14 @@ def _canonical_verification(
     процессный verifier не перекрывает неподтверждённый browser
     postcondition (решение владельца 2026-11-22). FAILED любой
     проверки -> FAILED (UNVERIFIED в деривации, не FAILED_VERIFIER);
-    ERROR без FAILED -> unknown. Без browser-результата поведение
-    прежнее: процессный результат как есть.
+    ERROR без FAILED -> unknown. Без browser-результата и без
+    typed-канала поведение прежнее: процессный результат как есть.
+    С typed-каналом (E05-T01) все три канала комбинируются.
     """
     return combine_verification_results(
         process_result,
         browser_result,
+        typed=typed,
         primary_name="process_verifier",
     )
 

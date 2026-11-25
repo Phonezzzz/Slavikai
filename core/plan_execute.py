@@ -58,6 +58,7 @@ from core.run_outcome import (
     TerminalReason,
     Verification,
     VerificationOutcome,
+    combine_verifications,
     outcome_from_loop_result,
 )
 from core.tool_gateway import ToolGateway
@@ -497,8 +498,25 @@ def _step_output_text(loop_result: AgentToolLoopResult) -> str:
     return " ".join(parts)
 
 
+StepVerificationHook = Callable[[dict[str, JSONValue], AgentToolLoopResult], Verification | None]
+"""Hook that verifies one cleanly finished step (E05-T01, T02 seam).
+
+The hook receives the step and its loop result and returns the typed
+verification for that step (e.g. from ``VerifierRuntime`` over the
+step's bound postconditions), or ``None`` when the step has no typed
+checks. It runs only on the clean-finish path: an error, a failed
+call or a cancelled loop already determines the step outcome, and no
+verification can rescue it. A ``None`` return keeps the legacy
+behaviour (state-changing step without proof is UNVERIFIED, never DONE).
+"""
+
+
 def _step_execution(
-    *, step: dict[str, JSONValue], loop_result: AgentToolLoopResult, state_changing: bool
+    *,
+    step: dict[str, JSONValue],
+    loop_result: AgentToolLoopResult,
+    state_changing: bool,
+    verification: Verification | None = None,
 ) -> PlanStepExecution:
     """Выводит терминальное состояние шага из результата loop.
 
@@ -585,7 +603,9 @@ def _step_execution(
             tool_calls_used=0,
             outcome=outcome,
         )
-    outcome = outcome_from_loop_result(loop_result, state_changing=state_changing)
+    outcome = outcome_from_loop_result(
+        loop_result, state_changing=state_changing, verification=verification
+    )
     if outcome.is_full_done:
         result_text = loop_result.text.strip() or "Шаг выполнен."
         tool_output = _step_tool_output_text(loop_result)
@@ -740,11 +760,18 @@ def _overall_outcome(
                 state_changing=any_state_changing,
             )
     if all(step.outcome.is_full_done for step in steps):
-        verification = (
-            Verification.not_applicable(source="plan_execute")
-            if not any_state_changing
-            else Verification.unknown(source="plan_execute")
-        )
+        if not any_state_changing:
+            verification = Verification.not_applicable(source="plan_execute")
+        else:
+            # E05-T01: a state-changing plan is full DONE only when the
+            # steps' own verification evidence combines to PASSED. The
+            # old code hardcoded UNKNOWN here, dropping the step
+            # evidence — no state-changing plan could ever be full DONE
+            # at the plan level, even with every step confirmed.
+            verification = combine_verifications(
+                [step.outcome.verification for step in steps],
+                source="plan_execute",
+            ) or Verification.unknown(source="plan_execute")
         return RunOutcome(
             phase=RunPhase.TERMINAL,
             terminal_reason=TerminalReason.COMPLETED,
@@ -810,6 +837,7 @@ def _execute_remaining_steps(
     checkpoints: PlanLoopCheckpoints,
     cancellation_token: asyncio.Event | None,
     first_continuation: ToolLoopContinuation | None = None,
+    step_verification: StepVerificationHook | None = None,
 ) -> PlanExecuteResult:
     """Выполняет шаги плана с ``start_index`` через canonical loop.
 
@@ -936,7 +964,13 @@ def _execute_remaining_steps(
                 any_state_changing=state_changing,
                 cancelled=True,
             )
-        executed = _step_execution(step=step, loop_result=loop_result, state_changing=step_changing)
+        verification = step_verification(step, loop_result) if step_verification else None
+        executed = _step_execution(
+            step=step,
+            loop_result=loop_result,
+            state_changing=step_changing,
+            verification=verification,
+        )
         done.append(executed)
         if executed.outcome.terminal_reason in {
             TerminalReason.FAILED,
@@ -972,8 +1006,14 @@ def execute_approved_plan(
     plan_hash_fn: Callable[[dict[str, JSONValue]], str],
     checkpoints: PlanLoopCheckpoints,
     cancellation_token: asyncio.Event | None = None,
+    step_verification: StepVerificationHook | None = None,
 ) -> PlanExecuteResult:
-    """Выполняет утверждённый план как ``intent=execute`` через canonical loop."""
+    """Выполняет утверждённый план как ``intent=execute`` через canonical loop.
+
+    ``step_verification`` (E05-T01, T02 seam): hook, проверяющий чисто
+    завершившийся шаг типовыми postconditions. Без него state-changing
+    шаг без доказательства остаётся UNVERIFIED (не DONE).
+    """
     validated = validate_approved_plan(plan=plan, task=task, plan_hash_fn=plan_hash_fn)
     task_id = task.get("task_id")
     if not isinstance(task_id, str) or not task_id.strip():
@@ -990,6 +1030,7 @@ def execute_approved_plan(
         budget=budget if budget is not None else RunBudget(),
         checkpoints=checkpoints,
         cancellation_token=cancellation_token,
+        step_verification=step_verification,
     )
 
 
@@ -1003,6 +1044,7 @@ def resume_approved_plan(
     plan_hash_fn: Callable[[dict[str, JSONValue]], str],
     checkpoints: PlanLoopCheckpoints,
     cancellation_token: asyncio.Event | None = None,
+    step_verification: StepVerificationHook | None = None,
 ) -> PlanExecuteResult:
     """Продолжает loop-выполнение плана с сохранённого чекпоинта.
 
@@ -1059,4 +1101,5 @@ def resume_approved_plan(
         checkpoints=checkpoints,
         cancellation_token=cancellation_token,
         first_continuation=checkpoint.continuation,
+        step_verification=step_verification,
     )

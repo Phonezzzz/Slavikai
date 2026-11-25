@@ -17,6 +17,14 @@ import psutil
 
 from core.desktop_policy import classify_command
 from core.desktop_security import DesktopPathSecurity
+from core.postconditions import (
+    CheckOutcome,
+    FileContentMatchesParams,
+    Postcondition,
+    PostconditionKind,
+    ProcessRunningParams,
+    evaluate_postcondition,
+)
 from shared.models import JSONValue, ToolRequest, ToolResult
 
 MAX_DESKTOP_READ_BYTES = 1_048_576
@@ -566,6 +574,16 @@ class DesktopVerifyTool:
             path_raw = _string_arg(request, "path")
             if path_raw is None:
                 return ToolResult.failure("path is required")
+            if check == "file_contains":
+                # E05-T01: file_contains is evaluated through the typed
+                # model (same wire format, same failure messages).
+                return self._file_contains(path_raw, request)
+            # path_exists / path_missing stay direct in T01: the model
+            # file_exists kind is regular-file-only (a directory must
+            # fail it), while the legacy path_exists accepts any
+            # existing path; path_missing has no T01 kind at all.
+            # Renaming the checks onto the model kinds is a T02/UI
+            # decision, not a model decision.
             try:
                 path = self.security.require_not_denied(path_raw).canonical
                 exists = path.exists()
@@ -573,14 +591,6 @@ class DesktopVerifyTool:
                     return ToolResult.failure("Verification failed: path does not exist.")
                 if check == "path_missing" and exists:
                     return ToolResult.failure("Verification failed: path still exists.")
-                if check == "file_contains":
-                    expected = _string_arg(request, "expected")
-                    if expected is None or not path.is_file():
-                        return ToolResult.failure("Verification requires expected text and a file.")
-                    if path.stat().st_size > MAX_DESKTOP_READ_BYTES:
-                        return ToolResult.failure("Verification file exceeds read limit.")
-                    if expected not in path.read_text(encoding="utf-8", errors="replace"):
-                        return ToolResult.failure("Verification failed: expected text not found.")
             except (OSError, ValueError, PermissionError) as exc:
                 return ToolResult.failure(f"Verification failed: {exc}")
             return ToolResult.success(
@@ -591,16 +601,17 @@ class DesktopVerifyTool:
             if not isinstance(pid_raw, int) or pid_raw <= 0:
                 return ToolResult.failure("positive integer pid is required")
             expected_raw = request.args.get("expected_create_time")
+            if isinstance(expected_raw, (int, float)) and not isinstance(expected_raw, bool):
+                # E05-T01: with an expected create_time the check goes
+                # through the typed model (same verdicts, same messages).
+                return self._process_running_with_create_time(pid_raw, float(expected_raw))
+            # Bare pid (no create_time) keeps the legacy alive-only
+            # check: the model forbids a bare pid (it cannot rule out
+            # pid reuse), so this form cannot go through the model.
             try:
                 process = psutil.Process(pid_raw)
                 if not process.is_running() or process.status() == psutil.STATUS_ZOMBIE:
                     return ToolResult.failure("Verification failed: process is not running.")
-                if isinstance(expected_raw, (int, float)) and not isinstance(expected_raw, bool):
-                    actual = process.create_time()
-                    if abs(actual - float(expected_raw)) > 0.01:
-                        return ToolResult.failure(
-                            "Verification failed: stale PID create_time does not match."
-                        )
             except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
                 return ToolResult.failure(f"Verification failed: process is not running: {exc}")
             return ToolResult.success(
@@ -614,6 +625,88 @@ class DesktopVerifyTool:
         return ToolResult.failure(
             "check must be path_exists|path_missing|file_contains|process_running"
         )
+
+    def _file_contains(self, path_raw: str, request: ToolRequest) -> ToolResult:
+        """``file_contains`` evaluated through the typed model.
+
+        Wire format and failure messages are unchanged. The reader is
+        imported lazily: ``tools.postcondition_readers`` imports
+        ``tools.desktop_system_tools``, which imports this module —
+        a module-level import here would be a cycle.
+        """
+        from tools.postcondition_readers import DesktopPostconditionReader
+
+        expected = _string_arg(request, "expected")
+        if expected is None:
+            return ToolResult.failure("Verification requires expected text and a file.")
+        try:
+            path = self.security.require_not_denied(path_raw).canonical
+            params = FileContentMatchesParams(path=path_raw, expected=expected)
+            postcondition = Postcondition(
+                kind=PostconditionKind.FILE_CONTENT_MATCHES,
+                params=params,
+                source="tool:desktop_verify",
+            ).with_revision()
+            evaluation = evaluate_postcondition(
+                postcondition,
+                DesktopPostconditionReader(self.security, max_read_bytes=MAX_DESKTOP_READ_BYTES),
+            )
+        except (OSError, ValueError, PermissionError) as exc:
+            return ToolResult.failure(f"Verification failed: {exc}")
+        if evaluation.outcome is CheckOutcome.PASSED:
+            return ToolResult.success(
+                {
+                    "output": "Verification passed: file_contains",
+                    "verified": True,
+                    "path": str(path),
+                }
+            )
+        reason = evaluation.evidence.get("reason")
+        if reason in {"file_missing", "not_regular_file"}:
+            return ToolResult.failure("Verification requires expected text and a file.")
+        if reason == "file_too_large":
+            return ToolResult.failure("Verification file exceeds read limit.")
+        return ToolResult.failure(f"Verification failed: {evaluation.detail}")
+
+    def _process_running_with_create_time(
+        self, pid: int, expected_create_time: float
+    ) -> ToolResult:
+        """``process_running`` with an expected create_time, via the typed model.
+
+        Wire format and failure messages are unchanged (see
+        :meth:`_file_contains` for why the reader import is lazy).
+        """
+        from tools.postcondition_readers import DesktopPostconditionReader
+
+        try:
+            params = ProcessRunningParams(pid=pid, create_time=expected_create_time)
+            postcondition = Postcondition(
+                kind=PostconditionKind.PROCESS_RUNNING,
+                params=params,
+                source="tool:desktop_verify",
+            ).with_revision()
+            evaluation = evaluate_postcondition(
+                postcondition, DesktopPostconditionReader(self.security)
+            )
+        except (OSError, ValueError, PermissionError) as exc:
+            return ToolResult.failure(f"Verification failed: {exc}")
+        if evaluation.outcome is CheckOutcome.PASSED:
+            return ToolResult.success(
+                {
+                    "output": f"Process {pid} is running",
+                    "verified": True,
+                    "pid": pid,
+                    "create_time": evaluation.evidence.get("create_time"),
+                }
+            )
+        reason = evaluation.evidence.get("reason")
+        if reason == "stale_pid":
+            return ToolResult.failure("Verification failed: stale PID create_time does not match.")
+        if reason == "access_denied":
+            return ToolResult.failure(
+                f"Verification failed: process is not running: {evaluation.detail}"
+            )
+        return ToolResult.failure("Verification failed: process is not running.")
 
 
 def _safe_archive_target(destination: Path, member_name: str) -> Path:

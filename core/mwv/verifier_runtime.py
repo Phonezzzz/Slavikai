@@ -17,6 +17,15 @@ from core.mwv.verifier import (
     VerifierRunner,
     sandbox_verification_unavailable,
 )
+from core.postconditions import (
+    CheckOutcome,
+    Postcondition,
+    PostconditionReader,
+    browser_state_params_from_declaration,
+    evaluate_browser_state,
+    evaluate_postcondition,
+)
+from core.run_outcome import Verification, verification_from_evaluations
 from shared.models import JSONValue, ToolResult
 from shared.sandbox_execution import SANDBOX_EXECUTION_MESSAGE, SandboxExecutionReason
 from shared.workspace_binding import WorkspaceUnavailable
@@ -132,51 +141,21 @@ def _browser_state_confirms(args: dict[str, JSONValue], result: ToolResult) -> b
     (``before`` не совпадал с ``expect.after``). Всё остальное —
     неподтверждено (UNVERIFIED в канонической деривации), не failure.
     """
+    # E05-T01: the contract now lives in core.postconditions as the
+    # typed browser_state checker; this function is the thin legacy
+    # wrapper (same verdicts — the E02-T10 tests are the regression
+    # proof). The declaration is parsed to typed params; a malformed
+    # declaration or absent facts is "not confirmed".
     declaration = args.get("browser_state")
     if not isinstance(declaration, dict):
         return False
-    entity_id = declaration.get("entity_id")
-    expect = declaration.get("expect")
-    if not isinstance(entity_id, str) or not entity_id or not isinstance(expect, dict):
+    params = browser_state_params_from_declaration(declaration)
+    if params is None:
         return False
-    kind = expect.get("kind")
-    after = expect.get("after")
-    before_declared = "before" in expect
-    before = expect.get("before")
     facts = result.data.get("browser_state")
     if not isinstance(facts, dict):
         return False
-    if facts.get("entity_id") != entity_id or facts.get("kind") != kind:
-        return False
-    if kind == "text":
-        if not isinstance(after, str):
-            return False
-        if before_declared and not isinstance(before, str):
-            return False
-        if facts.get("after_matches_after") is not True:
-            return False
-        if facts.get("before_matches_after") is not False:
-            return False
-        if before_declared and facts.get("before_matches_expected_before") is not True:
-            return False
-        return True
-    if kind == "count":
-        if not isinstance(after, int) or isinstance(after, bool) or after != 1:
-            return False
-        if before_declared and (not isinstance(before, int) or isinstance(before, bool)):
-            return False
-        before_count = facts.get("before_count")
-        after_count = facts.get("after_count")
-        if not isinstance(before_count, int) or isinstance(before_count, bool):
-            return False
-        if not isinstance(after_count, int) or isinstance(after_count, bool):
-            return False
-        if before_count != 0 or after_count != after:
-            return False
-        if before_declared and before_count != before:
-            return False
-        return True
-    return False
+    return evaluate_browser_state(params, [facts]).outcome is CheckOutcome.PASSED
 
 
 def _desktop_change_is_verified(
@@ -500,6 +479,32 @@ class VerifierRuntime:
             reason=f"Verified {len(successful_changes)} browser postcondition(s).",
             duration_seconds=time.monotonic() - start,
         )
+
+    def verify_postconditions(
+        self,
+        checks: Sequence[Postcondition],
+        reader: PostconditionReader | None,
+        *,
+        browser_facts: Sequence[dict[str, JSONValue]] | None = None,
+    ) -> Verification | None:
+        """Evaluate typed postconditions against real state (E05-T01).
+
+        Each check is evaluated by reading state through ``reader``
+        (or the captured ``browser_facts`` for ``browser_state``);
+        a tool's ``ok`` flag or ``verified`` field never counts. An
+        empty check list yields ``None`` (the typed channel does not
+        apply). The returned ``Verification`` is the typed channel
+        for the N-channel combine — it never overrides the canonical
+        verifier or the browser postcondition channel, it joins them.
+        """
+        if not checks:
+            return None
+        now = time.monotonic()
+        evaluations = [
+            evaluate_postcondition(check, reader, browser_facts=browser_facts, now=now)
+            for check in checks
+        ]
+        return verification_from_evaluations(evaluations)
 
     def run(
         self, task: TaskPacket, context: RunContext, *, cancelled: Callable[[], bool] | None = None

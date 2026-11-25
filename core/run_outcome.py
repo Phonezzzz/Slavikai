@@ -47,10 +47,12 @@ from prose, budget exhaustion, artifact existence, or a single ``ok`` flag.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from core.mwv.models import VerificationResult, VerificationStatus, WorkStatus
+from core.postconditions import CheckOutcome, PostconditionEvaluation, check_name
 from core.tool_loop import AgentToolLoopResult
 
 
@@ -147,10 +149,100 @@ class Verification:
         return cls(outcome=VerificationOutcome.UNKNOWN, source=source)
 
 
+def _combine_outcomes(outcomes: Sequence[VerificationOutcome]) -> VerificationOutcome:
+    """One outcome for several channels: FAILED wins, then UNKNOWN.
+
+    PASSED only when every applicable channel passed; all channels
+    NOT_APPLICABLE stays NOT_APPLICABLE. An empty list is PASSED
+    (no channel objected) — callers never pass an empty list.
+    """
+    if VerificationOutcome.FAILED in outcomes:
+        return VerificationOutcome.FAILED
+    if VerificationOutcome.UNKNOWN in outcomes:
+        return VerificationOutcome.UNKNOWN
+    if outcomes and all(item is VerificationOutcome.NOT_APPLICABLE for item in outcomes):
+        return VerificationOutcome.NOT_APPLICABLE
+    return VerificationOutcome.PASSED
+
+
+def combine_verifications(
+    channels: Sequence[Verification | None],
+    *,
+    source: str = "canonical_verification",
+) -> Verification | None:
+    """Combine N verification channels into one canonical verification.
+
+    Every channel contributes its checks; the outcome follows
+    :func:`_combine_outcomes`. ``None`` channels are skipped; no
+    channel at all yields ``None``. The combined source is always
+    ``canonical_verification`` (or the explicit ``source``) — a
+    single channel does not keep its own source here.
+    """
+    present = [channel for channel in channels if channel is not None]
+    if not present:
+        return None
+    checks = tuple(check for channel in present for check in channel.checks)
+    return Verification(
+        outcome=_combine_outcomes([channel.outcome for channel in present]),
+        checks=checks,
+        source=source,
+    )
+
+
+def map_evaluation_outcome(outcome: CheckOutcome) -> VerificationOutcome:
+    """Map one typed-check outcome onto the canonical gate (E05-T01).
+
+    Only ``PASSED`` passes. ``FAILED`` fails. ``NOT_APPLICABLE``
+    stays not-applicable. Everything else — ``INCONCLUSIVE`` (could
+    not tell), ``STALE`` (criterion changed after binding) and
+    ``BLOCKED`` (no reader) — is ``UNKNOWN``: an unproven check is
+    never a pass and never a fail.
+    """
+    mapping = {
+        CheckOutcome.PASSED: VerificationOutcome.PASSED,
+        CheckOutcome.FAILED: VerificationOutcome.FAILED,
+        CheckOutcome.NOT_APPLICABLE: VerificationOutcome.NOT_APPLICABLE,
+    }
+    return mapping.get(outcome, VerificationOutcome.UNKNOWN)
+
+
+def verification_from_evaluations(
+    evaluations: Sequence[PostconditionEvaluation],
+    *,
+    source: str = "postconditions",
+) -> Verification:
+    """Build the typed channel from evaluated postconditions.
+
+    One check row per evaluation (``<kind>:<identity>``, passed iff
+    the evaluation passed, human detail kept); the outcome follows
+    the mapped outcomes. An empty list yields an UNKNOWN verification
+    (no evidence ran) — callers return ``None`` for empty input
+    instead (see ``VerifierRuntime.verify_postconditions``).
+    """
+    if not evaluations:
+        return Verification.unknown(source=source)
+    checks = tuple(
+        PostconditionCheck(
+            name=check_name(evaluation.postcondition),
+            passed=evaluation.outcome is CheckOutcome.PASSED,
+            detail=evaluation.detail,
+        )
+        for evaluation in evaluations
+    )
+    return Verification(
+        outcome=_combine_outcomes(
+            [map_evaluation_outcome(evaluation.outcome) for evaluation in evaluations]
+        ),
+        checks=checks,
+        source=source,
+    )
+
+
 def combine_verification_results(
     primary: VerificationResult | None,
     browser: VerificationResult | None,
     *,
+    typed: Verification | None = None,
     primary_name: str = "verifier",
     browser_name: str = "browser_postconditions",
 ) -> Verification | None:
@@ -160,35 +252,40 @@ def combine_verification_results(
     основная проверка не перекрывает неподтверждённый browser
     postcondition (E02-T06, семантика B). FAILED любой проверки ->
     FAILED (UNVERIFIED в канонической деривации); ERROR (unknown) без
-    FAILED -> unknown. Без browser-результата основная проверка
-    возвращается как есть.
+    FAILED -> unknown. Без browser-результата и без typed-канала
+    основная проверка возвращается как есть. С typed-каналом (E05-T01)
+    все три канала комбинируются через :func:`combine_verifications`.
     """
-    if browser is None:
+    if typed is None and browser is None:
         if primary is None:
             return None
         return Verification.from_verification_result(primary)
-    checks: list[PostconditionCheck] = []
-    outcomes: list[VerificationOutcome] = []
+    channels: list[Verification] = []
+    if typed is not None:
+        channels.append(typed)
     if primary is not None:
         primary_verification = Verification.from_verification_result(primary)
-        outcomes.append(primary_verification.outcome)
-        checks.extend(
-            PostconditionCheck(name=primary_name, passed=check.passed, detail=check.detail)
-            for check in primary_verification.checks
+        channels.append(
+            replace(
+                primary_verification,
+                checks=tuple(
+                    PostconditionCheck(name=primary_name, passed=check.passed, detail=check.detail)
+                    for check in primary_verification.checks
+                ),
+            )
         )
-    browser_verification = Verification.from_verification_result(browser)
-    outcomes.append(browser_verification.outcome)
-    checks.extend(
-        PostconditionCheck(name=browser_name, passed=check.passed, detail=check.detail)
-        for check in browser_verification.checks
-    )
-    if VerificationOutcome.FAILED in outcomes:
-        outcome = VerificationOutcome.FAILED
-    elif VerificationOutcome.UNKNOWN in outcomes:
-        outcome = VerificationOutcome.UNKNOWN
-    else:
-        outcome = VerificationOutcome.PASSED
-    return Verification(outcome=outcome, checks=tuple(checks), source="canonical_verification")
+    if browser is not None:
+        browser_verification = Verification.from_verification_result(browser)
+        channels.append(
+            replace(
+                browser_verification,
+                checks=tuple(
+                    PostconditionCheck(name=browser_name, passed=check.passed, detail=check.detail)
+                    for check in browser_verification.checks
+                ),
+            )
+        )
+    return combine_verifications(channels)
 
 
 @dataclass(frozen=True)
