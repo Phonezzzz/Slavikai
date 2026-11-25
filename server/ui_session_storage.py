@@ -955,6 +955,14 @@ class SQLiteUISessionStorage:
         )
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
+            # A foreign-key child of a known table (an extra table with
+            # REFERENCES ui_sessions(session_id) and no ON DELETE CASCADE)
+            # blocks dropping the parent while enforcement is on. The
+            # reset discards every row anyway, so enforcement is off for
+            # this connection; it must be set before BEGIN IMMEDIATE, as
+            # the pragma is a no-op inside a transaction. Fresh
+            # connections still enforce foreign keys.
+            conn.execute("PRAGMA foreign_keys=OFF")
             conn.execute("BEGIN IMMEDIATE")
             # Drop every user object, not just the known tables: an
             # unsupported schema can carry an extra table (or a view /

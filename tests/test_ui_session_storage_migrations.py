@@ -457,6 +457,36 @@ def test_destructive_reset_drops_unknown_tables(tmp_path: Path) -> None:
     assert "rogue" not in tables
 
 
+def test_destructive_reset_drops_child_table_with_foreign_key(tmp_path: Path) -> None:
+    """A populated child table referencing ui_sessions must not block the
+    destructive reset: with foreign_keys enforced, dropping the parent
+    table first raises IntegrityError, the transaction rolls back and the
+    start keeps failing even with the reset opt-in."""
+    path = _make_v1_db(tmp_path / "sessions.db", user_version=99, with_messages=True)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE extra_child ("
+            " id TEXT PRIMARY KEY,"
+            " session_id TEXT NOT NULL REFERENCES ui_sessions(session_id)"
+            ")"
+        )
+        conn.execute("INSERT INTO extra_child (id, session_id) VALUES ('c1', 's1')")
+        conn.commit()
+    with pytest.raises(RuntimeError, match="schema version"):
+        SQLiteUISessionStorage(path)
+    store = SQLiteUISessionStorage(path, allow_destructive_reset=True)
+    assert _user_version(path) == EXPECTED_VERSION
+    assert store.load_sessions() == []
+    with sqlite3.connect(path) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+    assert "extra_child" not in tables
+
+
 # --- Test 11: idempotent re-open --------------------------------------------
 
 
