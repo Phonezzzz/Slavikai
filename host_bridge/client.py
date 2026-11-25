@@ -24,6 +24,7 @@ import uuid
 from pathlib import Path
 from typing import Final
 
+from host_bridge.effect import EFFECT_KINDS, validate_effect_shape
 from host_bridge.protocol import (
     CAPABILITY_CAPABILITIES,
     CAPABILITY_DIAG_DISK,
@@ -61,6 +62,32 @@ class BridgeClientError(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def _validate_effect(result: dict[str, object], capability: str) -> None:
+    """Validate the E03-T08 effect block when present (shape + kind
+    pairing with the capability). A malformed effect is a malformed
+    response: the client fails closed instead of handing the caller
+    an effect the journal cannot trust. Read-only capabilities never
+    carry an effect."""
+    effect = result.get("effect")
+    if effect is None:
+        return
+    if not isinstance(effect, dict):
+        raise BridgeClientError("malformed_response", "effect must be an object")
+    problem = validate_effect_shape(effect)
+    if problem is not None:
+        raise BridgeClientError("malformed_response", f"malformed effect: {problem}")
+    expected_kind = EFFECT_KINDS.get(capability)
+    if expected_kind is None:
+        raise BridgeClientError(
+            "malformed_response", f"read-only capability {capability} must not carry an effect"
+        )
+    if effect.get("kind") != expected_kind:
+        raise BridgeClientError(
+            "malformed_response",
+            f"effect kind {effect.get('kind')!r} does not match {capability}",
+        )
 
 
 def call(
@@ -145,6 +172,7 @@ def call(
         result = payload.get("result")
         if not isinstance(result, dict):
             raise BridgeClientError("malformed_response", "bridge result must be a JSON object")
+        _validate_effect(result, capability)
         return result
     error = payload.get("error")
     if isinstance(error, dict):

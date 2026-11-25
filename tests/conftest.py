@@ -97,3 +97,19 @@ def _isolate_http_preferences_store(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(
         http_app, "PreferencesStore", lambda _path: PreferencesStore(tmp_path / "preferences.db")
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_http_bridge_effect_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.bridge_effect_store import BridgeEffectStore
+    from server.http import app as http_app
+
+    counter = 0
+
+    def isolated_store(_path: Path, **kwargs: object) -> BridgeEffectStore:
+        nonlocal counter
+        counter += 1
+        return BridgeEffectStore(tmp_path / "http-runs" / f"bridge-effects-{counter}.db", **kwargs)
+
+    # Default bootstrap dependencies are test-owned; explicit injected stores retain their path.
+    monkeypatch.setattr(http_app, "BridgeEffectStore", isolated_store)

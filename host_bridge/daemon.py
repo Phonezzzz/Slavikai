@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import IO, Any, Final
 
 from host_bridge.diag import HostDiagService
+from host_bridge.effect import EffectEmitter
 from host_bridge.fs import CancelToken, HostFsService
 from host_bridge.process import HostProcessService, ProcessError, build_process_service
 from host_bridge.protocol import (
@@ -166,11 +167,22 @@ class HostBridgeDaemon:
         self._custom_dispatch = dispatch_fn is not None
         self._dispatch_fn: Callable[[BridgeRequest], dict[str, object]] | None = dispatch_fn
         self._capability_deadlines = capability_deadlines
+        # Effect emission (E03-T08): one emitter per daemon, shared
+        # by the FS and process services so both stamp effects from
+        # a single (boot_id, seq) sequence. Injected services are
+        # re-bound to it below (their own default emitter is
+        # replaced); the boot identity rotates in start().
+        self._effect_emitter = EffectEmitter()
         self._fs_service = (
             fs_service
             if fs_service is not None
-            else HostFsService.default(home=Path.home(), socket_dir=socket_path.parent)
+            else HostFsService.default(
+                home=Path.home(),
+                socket_dir=socket_path.parent,
+                effect_emitter=self._effect_emitter,
+            )
         )
+        self._fs_service.bind_effect_emitter(self._effect_emitter)
         self._process_service = (
             process_service
             if process_service is not None
@@ -178,8 +190,10 @@ class HostBridgeDaemon:
                 self._fs_service.registry,
                 self._fs_service,
                 runtime_dir=socket_path.parent,
+                effect_emitter=self._effect_emitter,
             )
         )
+        self._process_service.bind_effect_emitter(self._effect_emitter)
         # Read-only diagnostics (E03-T07): built from the daemon's
         # own services by default; injectable for tests (same
         # pattern as fs_service / process_service).
@@ -218,6 +232,10 @@ class HostBridgeDaemon:
         # Diagnostics start time (E03-T07): service_status reports
         # when this instance started serving.
         self._diag_service.note_started()
+        # Effect boot identity (E03-T08): a (re)start rotates the
+        # boot_id and resets the effect sequence, so a restarted
+        # daemon never re-uses a (boot_id, seq) pair.
+        self._effect_emitter.note_started()
         parent = self._socket_path.parent
         try:
             parent.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
@@ -497,7 +515,15 @@ class HostBridgeDaemon:
                 "profiles": profiles,
             }
         if request.capability in FS_CAPABILITIES:
-            return self._fs_service.handle(request, token)
+            return self._fs_service.handle(
+                request,
+                token,
+                # Envelope attribution (E03-T08): the mutation
+                # handlers stamp it into the effect block; read-only
+                # handlers ignore it. Never used for authorization.
+                principal_id=request.principal_id,
+                run_id=request.run_id,
+            )
         if request.capability in PROCESS_CAPABILITIES:
             if not self._process_service.has_profiles():
                 # No profiles configured: the process API does not

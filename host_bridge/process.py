@@ -56,6 +56,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from host_bridge.effect import (
+    AT_PLACEHOLDER,
+    EFFECT_BUILD_FAILED,
+    LONGEST_STATE,
+    MAX_INT_PLACEHOLDER,
+    MAX_SIGNAL_PLACEHOLDER,
+    STOP_PROJECTION_ENTRIES,
+    EffectEmitter,
+    stop_process_placeholder,
+)
 from host_bridge.fs import (
     CancelToken,
     FsError,
@@ -1832,6 +1842,18 @@ class _Record:
     stderr_tail_sha256: str = ""
     settled: threading.Event = field(default_factory=threading.Event)
     final: bool = False
+    # Confirmed effect of this process's launch (E03-T08): stored
+    # here so a retry with the same request_id re-attaches the
+    # ORIGINAL effect (same (boot_id, seq)) instead of emitting a
+    # second one — the recorder dedupes by emission identity.
+    effect: dict[str, object] | None = None
+    # Pre-spawn effect projection (E03-T08, owner condition 5):
+    # frame-budgeted before the spawn; finalized into ``effect`` by
+    # ``_run_result`` once the record's state is known. Survives on
+    # the record so a retry after a lost response still emits the
+    # effect for the original spawn instead of leaving the journal
+    # with an unresolvable unknown.
+    effect_projection: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -1896,10 +1918,14 @@ class HostProcessService:
         runtime_dir: Path,
         profiles: tuple[ProcessProfile, ...] = (),
         spawner: SystemdRunSpawner | None = None,
+        effect_emitter: EffectEmitter | None = None,
     ) -> None:
         self.fs_service = fs_service
         self.registry = registry
         self.runtime_dir = runtime_dir
+        # Effect emission (E03-T08): the daemon binds its single
+        # emitter here; a standalone service uses its own.
+        self._effect_emitter = effect_emitter if effect_emitter is not None else EffectEmitter()
         self._run_base = runtime_dir / "host-bridge-proc"
         self._run_base.mkdir(mode=0o700, parents=True, exist_ok=True)
         # Scope namespace (E03-T06 rework 1): scopes this daemon
@@ -1940,6 +1966,16 @@ class HostProcessService:
             {"id": p.id, "args": [slot.describe() for slot in p.args]}
             for p in self._profiles.values()
         ]
+
+    def bind_effect_emitter(self, emitter: EffectEmitter) -> None:
+        """Share the daemon's single emitter (E03-T08): one
+        ``(boot_id, seq)`` sequence across both services."""
+        self._effect_emitter = emitter
+
+    @property
+    def effect_emitter(self) -> EffectEmitter:
+        """The emitter this service stamps mutation effects with."""
+        return self._effect_emitter
 
     def has_profiles(self) -> bool:
         return bool(self._profiles)
@@ -2019,7 +2055,9 @@ class HostProcessService:
             if capability == "host.process.poll":
                 return self._poll(params, request_id, token)
             if capability == "host.process.kill":
-                return self._kill(params, request_id, token)
+                return self._kill(
+                    params, request_id, token, principal_id=principal_id, run_id=run_id
+                )
             if capability == "host.process.stop":
                 return self._stop_run(
                     params, request_id, token, principal_id=principal_id, run_id=run_id
@@ -2183,6 +2221,42 @@ class HostProcessService:
             # process's timeout enforcement.
             return self._run_result(existing, wait_settled=True, token=token)
         assert record is not None
+        # E03-T08 (owner condition 5): frame-budget the result +
+        # effect BEFORE the spawn — the spawn is the mutation, so
+        # an overflow must fail here with effect_build_failed,
+        # before any tree exists. The state/started_at are not
+        # known yet, so the projection uses their longest possible
+        # values; _run_result finalizes it with the real ones.
+        # The projection is kept on the record so a retry after a
+        # lost response still emits the effect for the original
+        # spawn (owner condition 2). On a frame overflow the
+        # commit is rolled back: the record never existed.
+        projection = self._effect_emitter.build_projection(
+            kind="process.run",
+            principal_id=principal_id,
+            run_id=run_id,
+            fields={
+                "process_id": record.process_id,
+                "profile_id": profile_id,
+                "state": LONGEST_STATE,
+                "started_at": AT_PLACEHOLDER,
+            },
+        )
+        projected_result: dict[str, object] = {
+            "process_id": record.process_id,
+            "profile_id": profile_id,
+            "state": LONGEST_STATE,
+            "started_at": AT_PLACEHOLDER,
+            "run_id": run_id,
+            "effect": projection,
+        }
+        if not self._effect_emitter.frame_fits(projected_result, request_id):
+            with self._lock:
+                self._records.pop(record.process_id, None)
+                self._by_request_id.pop(request_id, None)
+                self._by_request_id_binding.pop(request_id, None)
+            raise ProcessError(EFFECT_BUILD_FAILED, "effect does not fit the response frame budget")
+        record.effect_projection = projection
         try:
             self._spawn(record, profile, args, token)
         except ProcessError:
@@ -2244,7 +2318,22 @@ class HostProcessService:
             if remaining <= 0:
                 token.check()
             record.settled.wait(timeout=remaining if remaining != float("inf") else None)
-        return {
+        # E03-T08: finalize the pre-spawn projection with the
+        # record's state at answer time, so the effect mirrors the
+        # result it rides on. A record that finalized as
+        # spawn_failed never ran (or its spawn was destroyed before
+        # promotion): no effect — the recorder classifies the
+        # effect-less spawn_failed answer as unknown, fail-closed.
+        if record.effect is None and record.effect_projection is not None:
+            if record.state == "spawn_failed":
+                record.effect_projection = None
+            else:
+                record.effect = self._effect_emitter.finalize(
+                    record.effect_projection,
+                    fields={"state": record.state, "started_at": record.started_at},
+                )
+                record.effect_projection = None
+        result: dict[str, object] = {
             "process_id": record.process_id,
             "profile_id": record.profile_id,
             "state": record.state,
@@ -2253,6 +2342,9 @@ class HostProcessService:
             # additive only, no existing field changes.
             "run_id": record.run_id,
         }
+        if record.effect is not None:
+            result["effect"] = record.effect
+        return result
 
     def _spawn(
         self, record: _Record, profile: ProcessProfile, args: list[str], token: CancelToken
@@ -2695,32 +2787,59 @@ class HostProcessService:
     # -- kill ----------------------------------------------------------------
 
     def _kill(
-        self, params: dict[str, object], request_id: str, token: CancelToken
+        self,
+        params: dict[str, object],
+        request_id: str,
+        token: CancelToken,
+        *,
+        principal_id: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, object]:
         _check_params(params, frozenset({"process_id"}))
         process_id = _req_str(params, "process_id")
         record = self._records.get(process_id)
         if record is None:
             raise ProcessError("process_not_found", f"unknown process {process_id!r}")
-        if record.final:
-            return {
+        projection: dict[str, object] | None = None
+        new_kill = False
+
+        def _answer(state: str, exit_code: object, exit_signal: object) -> dict[str, object]:
+            """Kill result with the effect attached when this call
+            (or an earlier one, via the stored effect) requested
+            the kill. A final record with no stored effect died on
+            its own: no effect — the recorder reads that as
+            no_effect for this call."""
+            result: dict[str, object] = {
                 "process_id": record.process_id,
-                "state": record.state,
-                "exit_code": record.exit_code,
-                "signal": record.exit_signal,
+                "state": state,
+                "exit_code": exit_code,
+                "signal": exit_signal,
             }
+            if new_kill and projection is not None:
+                effect = self._effect_emitter.finalize(
+                    projection,
+                    fields={
+                        "process_id": record.process_id,
+                        "state": state,
+                        "exit_code": exit_code,
+                        "signal": exit_signal,
+                    },
+                )
+                record.effect = effect
+                result["effect"] = effect
+            elif record.effect is not None:
+                result["effect"] = record.effect
+            return result
+
+        if record.final:
+            return _answer(record.state, record.exit_code, record.exit_signal)
         # The tree may already have finished on its own (leader and
         # all descendants gone) without a poll having finalized the
         # record: a kill then is a no-op and the true final state is
         # the natural one, not "killed".
         self._try_finalize(record)
         if record.final:
-            return {
-                "process_id": record.process_id,
-                "state": record.state,
-                "exit_code": record.exit_code,
-                "signal": record.exit_signal,
-            }
+            return _answer(record.state, record.exit_code, record.exit_signal)
         token.check()
         if record.state == "launching":
             # The launch is still committing: wait briefly for it to
@@ -2729,43 +2848,57 @@ class HostProcessService:
             wait_s = 2.0 if remaining == float("inf") else max(0.0, min(remaining, 2.0))
             record.settled.wait(timeout=wait_s)
             if record.final:
-                return {
-                    "process_id": record.process_id,
-                    "state": record.state,
-                    "exit_code": record.exit_code,
-                    "signal": record.exit_signal,
-                }
+                return _answer(record.state, record.exit_code, record.exit_signal)
         # A repeat kill observes the termination already in progress:
         # it must not move the original deadline, must not re-signal
         # the tree, and must not overwrite a "timeout" reason with
         # "killed" — otherwise kills more frequent than the grace
         # period postpone the cgroup SIGKILL indefinitely.
         if not record.kill_requested:
+            # E03-T08 (owner condition 5): frame-budget the result
+            # + effect BEFORE flipping kill_requested — the flip is
+            # the mutation, so an overflow fails here with
+            # effect_build_failed, before the tree is signalled.
+            # The state/exit_code/signal are not known yet, so the
+            # projection uses their longest possible values.
+            projection = self._effect_emitter.build_projection(
+                kind="process.kill",
+                principal_id=principal_id,
+                run_id=run_id,
+                fields={
+                    "process_id": record.process_id,
+                    "state": LONGEST_STATE,
+                    "exit_code": MAX_INT_PLACEHOLDER,
+                    "signal": MAX_SIGNAL_PLACEHOLDER,
+                },
+            )
+            projected_result: dict[str, object] = {
+                "process_id": record.process_id,
+                "state": LONGEST_STATE,
+                "exit_code": MAX_INT_PLACEHOLDER,
+                "signal": MAX_SIGNAL_PLACEHOLDER,
+                "effect": projection,
+            }
+            if not self._effect_emitter.frame_fits(projected_result, request_id):
+                raise ProcessError(
+                    EFFECT_BUILD_FAILED, "effect does not fit the response frame budget"
+                )
             record.kill_requested = True
             record.kill_reason = "killed"
             record.state = "killing"
             record.kill_deadline = time.monotonic() + KILL_GRACE_S
+            new_kill = True
             if record.handle is not None:
                 self._spawner.signal_tree(record.handle, signal.SIGTERM)
         deadline = time.monotonic() + min(token.remaining_s, 4.0)
         while time.monotonic() < deadline:
             if self._try_finalize(record):
-                return {
-                    "process_id": record.process_id,
-                    "state": record.state,
-                    "exit_code": record.exit_code,
-                    "signal": record.exit_signal,
-                }
+                return _answer(record.state, record.exit_code, record.exit_signal)
             if time.monotonic() >= record.kill_deadline:
                 if record.handle is not None:
                     self._spawner.kill_all(record.handle)
             time.sleep(0.05)
-        return {
-            "process_id": record.process_id,
-            "state": "killing",
-            "exit_code": None,
-            "signal": None,
-        }
+        return _answer("killing", None, None)
 
     # -- stop (E03-T06) ------------------------------------------------------
 
@@ -2802,6 +2935,38 @@ class HostProcessService:
                 "invalid_params", "params.run_id must be a string of 1..256 characters"
             )
         pair = (principal_id, target_run_id)
+        # E03-T08 (owner condition 1, verified against the code):
+        # ``_stop_run`` sets ``_stopped_runs[pair] = now``
+        # UNCONDITIONALLY — a repeat STOP re-sets the mark timestamp
+        # and so extends the mark's TTL/admission effect. The mark
+        # update IS a mutation, so every successful STOP emits a
+        # fresh effect (``mark_set: true``); the daemon, not the
+        # recorder, decides whether a new mutation happened.
+        # E03-T08 (owner condition 5): the mark assignment is the
+        # mutation, so the result + effect are frame-budgeted BEFORE
+        # it. The projection uses STOP_PROJECTION_ENTRIES placeholder
+        # entries, which bounds any target count the mark-time
+        # re-read can produce (at most ~36 records can exist in the
+        # daemon: 32 finished + 4 live).
+        projection = self._effect_emitter.build_projection(
+            kind="process.stop",
+            principal_id=principal_id,
+            run_id=target_run_id,
+            fields={
+                "run_id": target_run_id,
+                "processes": [stop_process_placeholder() for _ in range(STOP_PROJECTION_ENTRIES)],
+                "all_final": False,
+                "mark_set": True,
+            },
+        )
+        projected_result: dict[str, object] = {
+            "run_id": target_run_id,
+            "processes": [stop_process_placeholder() for _ in range(STOP_PROJECTION_ENTRIES)],
+            "all_final": False,
+            "effect": projection,
+        }
+        if not self._effect_emitter.frame_fits(projected_result, request_id):
+            raise ProcessError(EFFECT_BUILD_FAILED, "effect does not fit the response frame budget")
         now = time.monotonic()
         with self._lock:
             self._stopped_runs[pair] = now
@@ -2887,19 +3052,33 @@ class HostProcessService:
             if all(record.final for record in targets):
                 break
             time.sleep(0.05)
-        return {
+        # E03-T08: the STOP succeeded (the mark was set and the
+        # targets signalled): assign the effect its real
+        # (boot_id, seq) with the real process entries now.
+        processes = [
+            {
+                "process_id": record.process_id,
+                "state": record.state,
+                "exit_code": record.exit_code,
+                "signal": record.exit_signal,
+            }
+            for record in targets
+        ]
+        stop_result: dict[str, object] = {
             "run_id": target_run_id,
-            "processes": [
-                {
-                    "process_id": record.process_id,
-                    "state": record.state,
-                    "exit_code": record.exit_code,
-                    "signal": record.exit_signal,
-                }
-                for record in targets
-            ],
+            "processes": processes,
             "all_final": all(record.final for record in targets),
         }
+        stop_result["effect"] = self._effect_emitter.finalize(
+            projection,
+            fields={
+                "run_id": target_run_id,
+                "processes": processes,
+                "all_final": stop_result["all_final"],
+                "mark_set": True,
+            },
+        )
+        return stop_result
 
     # -- reaper / finalization ------------------------------------------------
 
@@ -3197,11 +3376,17 @@ def build_process_service(
     *,
     runtime_dir: Path,
     spawner: SystemdRunSpawner | None = None,
+    effect_emitter: EffectEmitter | None = None,
 ) -> HostProcessService:
     """Build the process service from the same registry as the FS roots."""
     profiles = load_profiles(registry)
     return HostProcessService(
-        fs_service, registry, runtime_dir=runtime_dir, profiles=profiles, spawner=spawner
+        fs_service,
+        registry,
+        runtime_dir=runtime_dir,
+        profiles=profiles,
+        spawner=spawner,
+        effect_emitter=effect_emitter,
     )
 
 

@@ -10,6 +10,7 @@ def register_routes(app: web.Application) -> None:
         chatgpt_plan,
         decision,
         desktop,
+        effects,
         embeddings,
         events,
         health,
@@ -51,6 +52,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/ui/", workspace.handle_ui_index)
     app.router.add_get("/ui/workspace", workspace.handle_workspace_index)
     app.router.add_get("/ui/api/status", workflow.handle_ui_status)
+    app.router.add_get("/ui/api/bridge/effects", effects.handle_bridge_effects)
     app.router.add_get("/ui/api/trace/{trace_id}", slavik.handle_ui_trace)
     app.router.add_get("/ui/api/tool-calls/{trace_id}", slavik.handle_ui_tool_calls)
     app.router.add_post("/ui/api/feedback", slavik.handle_ui_feedback)

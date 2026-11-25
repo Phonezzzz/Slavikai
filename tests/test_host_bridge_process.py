@@ -2341,9 +2341,23 @@ def test_stop_preserves_partial_state(service: HostProcessService, spawner: Fake
 
 def test_stop_unknown_run_is_empty_success(service: HostProcessService) -> None:
     """Schema §8 test 3: stop for a run that never existed is a
-    successful empty answer, never an error."""
+    successful empty answer, never an error.
+
+    E03-T08: even an empty STOP emits an effect — the mark
+    timestamp update is itself a mutation (the mark is set
+    unconditionally, so a repeat STOP is a new effect, not a
+    duplicate)."""
     result = _stop(service, "run-never-existed", principal_id="p1")
+    effect = result.pop("effect")
     assert result == {"run_id": "run-never-existed", "processes": [], "all_final": True}
+    assert effect["kind"] == "process.stop"
+    assert effect["run_id"] == "run-never-existed"
+    assert effect["processes"] == []
+    assert effect["all_final"] is True
+    assert effect["mark_set"] is True
+    assert isinstance(effect["seq"], int) and effect["seq"] >= 1
+    assert isinstance(effect["boot_id"], str) and effect["boot_id"]
+    assert isinstance(effect["at"], str) and effect["at"]
 
 
 def test_stop_lists_final_without_rekill(service: HostProcessService, spawner: FakeSpawner) -> None:

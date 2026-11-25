@@ -22,6 +22,7 @@ from config.http_server_config import (
     resolve_http_server_config,
 )
 from config.model_store import load_model_configs
+from core.bridge_effect_store import BridgeEffectStore
 from core.desktop_policy import DesktopPolicyStore
 from core.desktop_runtime import DesktopRunCoordinator
 from core.managed_workspace import (
@@ -124,6 +125,7 @@ def create_app(
     max_request_bytes: int | None = None,
     ui_storage: UISessionStorage | None = None,
     task_run_store: TaskRunStore | None = None,
+    bridge_effect_store: BridgeEffectStore | None = None,
     auth_config: HttpAuthConfig | None = None,
     cloudflare_access_verifier: CloudflareAccessVerifier | None = None,
     desktop_policy_store: DesktopPolicyStore | None = None,
@@ -288,6 +290,12 @@ def create_app(
     app["idempotency_store"] = IdempotencyStore()
     app["task_run_store"] = task_run_store or TaskRunStore(
         api.PROJECT_ROOT / ".run" / "task_runs.db"
+    )
+    # Effect journal (E03-T08): separate SQLite file, own
+    # user_version from 1 — no migration-number collision with
+    # TaskRunStore/ui_storage (C-F1).
+    app["bridge_effect_store"] = bridge_effect_store or BridgeEffectStore(
+        api.PROJECT_ROOT / ".run" / "bridge_effects.db"
     )
     app["chat_cancellation_registry"] = ChatCancellationRegistry()
     app["plan_cancellation_registry"] = PlanCancellationRegistry()

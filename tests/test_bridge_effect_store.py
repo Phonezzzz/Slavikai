@@ -1,0 +1,396 @@
+"""Bridge effect journal store (E03-T08, rev. 2 + owner conditions).
+
+Tests are written against the schema (rev. 1 §6.2 as updated by
+rev. 2): identity, trichotomy persistence, retention, gap
+detection, bounded persistence. The recorder tests cover the
+classification; these cover the store's own guarantees.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+import threading
+import time
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+from core.bridge_effect_store import BridgeEffectStore
+
+_OWNER = "owner"
+_BOOT = "b" * 32
+
+
+def _effect(*, boot_id: str = _BOOT, seq: int, kind: str = "fs.write") -> dict[str, object]:
+    return {
+        "seq": seq,
+        "boot_id": boot_id,
+        "kind": kind,
+        "at": "2026-11-25T00:00:00+00:00",
+        "principal_id": _OWNER,
+        "run_id": None,
+        "root_id": "work",
+        "path": "a.txt",
+        "size": 1,
+        "bytes_written": 1,
+        "committed": True,
+        "content_sha256": "0" * 64,
+    }
+
+
+def _record(
+    store: BridgeEffectStore,
+    *,
+    request_id: str,
+    capability: str = "host.fs.write",
+    outcome: str = "effect",
+    effect: dict[str, object] | None = None,
+    error_code: str | None = None,
+    unknown_reason: str | None = None,
+    principal_id: str | None = _OWNER,
+    run_id: str | None = None,
+    recorded_at: str | None = None,
+) -> dict[str, object]:
+    effect_json = json.dumps(effect, sort_keys=True) if effect is not None else None
+    return store.record_call(
+        capability=capability,
+        request_id=request_id,
+        principal_id=principal_id,
+        run_id=run_id,
+        params_json=json.dumps({"root_id": "work", "path": "a.txt"}, sort_keys=True),
+        effect_json=effect_json,
+        daemon_boot_id=effect["boot_id"] if isinstance(effect, dict) else None,
+        daemon_seq=effect["seq"] if isinstance(effect, dict) else None,
+        outcome=outcome,
+        error_code=error_code,
+        unknown_reason=unknown_reason,
+        recorded_at=recorded_at,
+    )
+
+
+def _observation(*, subject: str = "a.txt", state: str = "exists") -> dict[str, object]:
+    return {"subject": subject, "observed_at": "2026-11-25T00:00:00+00:00", "state": state}
+
+
+def _attach(
+    store: BridgeEffectStore, effect_seq: int, *, source: str = "poll-loop", **payload: object
+) -> int:
+    observation = _observation(**payload) if payload else _observation()
+    observation_json = json.dumps(observation, sort_keys=True)
+    return store.attach_observation(
+        effect_seq=effect_seq,
+        source=source,
+        source_ref=None,
+        observation_json=observation_json,
+        observation_sha256=hashlib.sha256(observation_json.encode()).hexdigest(),
+    )
+
+
+# --- schema ------------------------------------------------------------------
+
+
+def test_schema_created_v1(tmp_path: Path) -> None:
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
+    assert tables == {"effect_meta", "effect_records", "effect_observations"}
+
+
+def test_unknown_schema_fails_closed(tmp_path: Path) -> None:
+    path = tmp_path / "effects.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA user_version = 99")
+        conn.execute("CREATE TABLE unrelated (id INTEGER)")
+    with pytest.raises(RuntimeError):
+        BridgeEffectStore(path)
+
+
+def test_occupied_file_without_version_fails_closed(tmp_path: Path) -> None:
+    path = tmp_path / "effects.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE unrelated (id INTEGER)")
+    with pytest.raises(RuntimeError):
+        BridgeEffectStore(path)
+
+
+# --- identity and dedupe (owner condition 1) ---------------------------------
+
+
+def test_record_effect_and_read_back(tmp_path: Path) -> None:
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    stored = _record(store, request_id="req-1", effect=_effect(seq=1))
+    assert stored["seq"] == 1
+    assert stored["outcome"] == "effect"
+    assert stored["duplicate"] is False
+    record = store.get_record(1)
+    assert record is not None
+    assert record["daemon_boot_id"] == _BOOT
+    assert record["daemon_seq"] == 1
+    assert record["outcome"] == "effect"
+    assert record["effect"] == _effect(seq=1)
+    assert record["resolved_by_seq"] is None
+    assert record["observations"] == []
+
+
+def test_emission_identity_dedupe(tmp_path: Path) -> None:
+    """The same (boot_id, daemon_seq) twice is one row, not two —
+    a duplicate delivery is an idempotent no-op."""
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    first = _record(store, request_id="req-1", effect=_effect(seq=1))
+    second = _record(store, request_id="req-1", effect=_effect(seq=1))
+    assert first["seq"] == second["seq"] == 1
+    assert second["duplicate"] is True
+    assert store.count() == 1
+
+
+def test_subject_is_not_a_dedupe_key(tmp_path: Path) -> None:
+    """Owner condition 1: two effects with the same subject
+    (same process/run) but different daemon seqs are two rows.
+    The subject is correlation only."""
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    first = _record(store, request_id="req-1", effect=_effect(seq=1))
+    second = _record(store, request_id="req-2", effect=_effect(seq=2))
+    assert first["seq"] != second["seq"]
+    assert store.count() == 2
+
+
+def test_different_boots_may_reuse_seq(tmp_path: Path) -> None:
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    first = _record(store, request_id="req-1", effect=_effect(boot_id="a" * 32, seq=1))
+    second = _record(store, request_id="req-2", effect=_effect(boot_id="b" * 32, seq=1))
+    assert first["seq"] != second["seq"]
+    assert store.count() == 2
+
+
+# --- unknown resolution (owner condition 2) -----------------------------------
+
+
+def test_confirmed_effect_resolves_unknown(tmp_path: Path) -> None:
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    unknown = _record(store, request_id="req-1", outcome="unknown", unknown_reason="timeout")
+    assert unknown["outcome"] == "unknown"
+    effect = _record(store, request_id="req-1", effect=_effect(seq=7))
+    assert effect["resolved_unknown_seqs"] == [unknown["seq"]]
+    attempt = store.get_record(int(unknown["seq"]))
+    assert attempt is not None
+    assert attempt["outcome"] == "unknown"  # history is not rewritten
+    assert attempt["resolved_by_seq"] == effect["seq"]
+    assert attempt["resolved_at"] is not None
+    # The resolved unknown no longer classifies as unknown in a
+    # filtered listing.
+    page = store.list_effects(principal_id=_OWNER, outcome="unknown")
+    assert [row["seq"] for row in page["records"]] == []
+
+
+def test_no_effect_does_not_resolve_unknown(tmp_path: Path) -> None:
+    """A no_effect retry proves nothing about the first attempt
+    (patch_mismatch after a successful apply, run_stopped after a
+    concurrent STOP), so it must NOT resolve the unknown."""
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    unknown = _record(store, request_id="req-1", outcome="unknown", unknown_reason="timeout")
+    no_effect = _record(store, request_id="req-1", outcome="no_effect", error_code="patch_mismatch")
+    assert no_effect["resolved_unknown_seqs"] == []
+    attempt = store.get_record(int(unknown["seq"]))
+    assert attempt is not None
+    assert attempt["resolved_by_seq"] is None
+
+
+def test_effect_record_immutable_except_resolution(tmp_path: Path) -> None:
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    stored = _record(store, request_id="req-1", effect=_effect(seq=1))
+    with sqlite3.connect(store.path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "UPDATE effect_records SET outcome = 'unknown' WHERE seq = ?",
+                (stored["seq"],),
+            )
+    # The resolution update itself is the one permitted mutation.
+    unknown = _record(store, request_id="req-2", outcome="unknown", unknown_reason="timeout")
+    effect = _record(store, request_id="req-2", effect=_effect(seq=2))
+    attempt = store.get_record(int(unknown["seq"]))
+    assert attempt is not None
+    assert attempt["resolved_by_seq"] == effect["seq"]
+
+
+# --- retention and observation bounds (owner condition 3) ---------------------
+
+
+def test_retention_prunes_oldest_with_cascade(tmp_path: Path) -> None:
+    store = BridgeEffectStore(tmp_path / "effects.db", effect_cap=3)
+    first = _record(store, request_id="req-1", effect=_effect(seq=1))
+    _attach(store, int(first["seq"]))
+    _record(store, request_id="req-2", effect=_effect(seq=2))
+    _record(store, request_id="req-3", effect=_effect(seq=3))
+    _record(store, request_id="req-4", effect=_effect(seq=4))
+    assert store.count() == 3
+    assert store.get_record(int(first["seq"])) is None
+    # The pruned record's observations are gone in the same
+    # transaction (no orphaned observation rows).
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT count(*) FROM effect_observations").fetchone()[0] == 0
+
+
+def test_per_effect_observation_cap_evicts_oldest(tmp_path: Path) -> None:
+    store = BridgeEffectStore(tmp_path / "effects.db", per_effect_observation_cap=2)
+    effect = _record(store, request_id="req-1", effect=_effect(seq=1))
+    seq = int(effect["seq"])
+    first = _attach(store, seq, state="one")
+    _attach(store, seq, state="two")
+    _attach(store, seq, state="three")
+    record = store.get_record(seq)
+    assert record is not None
+    observations = record["observations"]
+    assert [obs["observation"]["state"] for obs in observations] == ["two", "three"]
+    assert first not in [obs["id"] for obs in observations]
+
+
+def test_global_observation_cap_evicts_oldest(tmp_path: Path) -> None:
+    store = BridgeEffectStore(tmp_path / "effects.db", observation_cap=2)
+    first = _record(store, request_id="req-1", effect=_effect(seq=1))
+    second = _record(store, request_id="req-2", effect=_effect(seq=2))
+    _attach(store, int(first["seq"]), state="one")
+    _attach(store, int(second["seq"]), state="two")
+    _attach(store, int(second["seq"]), state="three")
+    first_record = store.get_record(int(first["seq"]))
+    assert first_record is not None
+    assert first_record["observations"] == []
+    second_record = store.get_record(int(second["seq"]))
+    assert second_record is not None
+    assert [obs["observation"]["state"] for obs in second_record["observations"]] == [
+        "two",
+        "three",
+    ]
+
+
+def test_observation_duplicate_is_idempotent(tmp_path: Path) -> None:
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    effect = _record(store, request_id="req-1", effect=_effect(seq=1))
+    seq = int(effect["seq"])
+    first = _attach(store, seq)
+    second = _attach(store, seq)
+    assert first == second
+    record = store.get_record(seq)
+    assert record is not None
+    assert len(record["observations"]) == 1
+
+
+def test_observation_for_unknown_effect_is_rejected(tmp_path: Path) -> None:
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    with pytest.raises(ValueError):
+        _attach(store, 999)
+
+
+# --- gap detection (owner condition 7) ----------------------------------------
+
+
+def _old_time(seconds_ago: int) -> str:
+    return (datetime.now(UTC) - timedelta(seconds=seconds_ago)).isoformat()
+
+
+def test_gap_detected_and_closed_by_late_delivery(tmp_path: Path) -> None:
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    _record(store, request_id="r1", effect=_effect(seq=1), recorded_at=_old_time(300))
+    _record(store, request_id="r2", effect=_effect(seq=2), recorded_at=_old_time(300))
+    _record(store, request_id="r4", effect=_effect(seq=4), recorded_at=_old_time(300))
+    page = store.list_effects(principal_id=_OWNER, include_gaps=True)
+    assert page["gaps"] == [
+        {"daemon_boot_id": _BOOT, "missing_from": 3, "missing_to": 3, "suspected": True}
+    ]
+    # A late delivery of seq 3 closes the hole at read time.
+    _record(store, request_id="r3", effect=_effect(seq=3), recorded_at=_old_time(300))
+    page = store.list_effects(principal_id=_OWNER, include_gaps=True)
+    assert page["gaps"] == []
+
+
+def test_gap_within_grace_window_is_not_suspected(tmp_path: Path) -> None:
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    _record(store, request_id="r1", effect=_effect(seq=1), recorded_at=_old_time(300))
+    _record(store, request_id="r3", effect=_effect(seq=3), recorded_at=_old_time(10))
+    page = store.list_effects(principal_id=_OWNER, include_gaps=True)
+    assert page["gaps"] == [
+        {"daemon_boot_id": _BOOT, "missing_from": 2, "missing_to": 2, "suspected": False}
+    ]
+
+
+def test_retention_floor_is_not_a_gap(tmp_path: Path) -> None:
+    """Seqs pruned by retention (below the floor) are not gaps:
+    the floor is min retained seq - 1, and only holes above it
+    are reported."""
+    store = BridgeEffectStore(tmp_path / "effects.db", effect_cap=2)
+    _record(store, request_id="r1", effect=_effect(seq=1), recorded_at=_old_time(300))
+    _record(store, request_id="r2", effect=_effect(seq=2), recorded_at=_old_time(300))
+    _record(store, request_id="r3", effect=_effect(seq=3), recorded_at=_old_time(300))
+    # seq 1 was pruned; the floor is 1. No hole is reported for it.
+    page = store.list_effects(principal_id=_OWNER, include_gaps=True)
+    assert page["gaps"] == []
+
+
+# --- bounded persistence (owner condition 4) ----------------------------------
+
+
+def test_busy_timeout_is_bounded(tmp_path: Path) -> None:
+    """A write lock held by another connection fails after the
+    bounded timeout + retries — it never waits forever."""
+    store = BridgeEffectStore(tmp_path / "effects.db", busy_timeout_ms=100, max_retries=1)
+    lock = sqlite3.connect(store.path)
+    lock.execute("BEGIN IMMEDIATE")
+    lock.execute("INSERT INTO effect_meta (key, value) VALUES ('lock-holder', 1)")
+    started = time.monotonic()
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            _record(store, request_id="req-1", effect=_effect(seq=1))
+    finally:
+        lock.rollback()
+        lock.close()
+    elapsed = time.monotonic() - started
+    assert elapsed < 5.0  # bounded: 100 ms timeout x 2 attempts + backoff
+
+
+def test_concurrent_writes_serialize(tmp_path: Path) -> None:
+    store = BridgeEffectStore(tmp_path / "effects.db")
+
+    def _write(n: int) -> None:
+        _record(store, request_id=f"req-{n}", effect=_effect(seq=n))
+
+    threads = [threading.Thread(target=_write, args=(n,)) for n in range(1, 6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10.0)
+    assert store.count() == 5
+
+
+# --- listing -------------------------------------------------------------------
+
+
+def test_list_filters_scoping_and_pagination(tmp_path: Path) -> None:
+    store = BridgeEffectStore(tmp_path / "effects.db")
+    _record(store, request_id="r1", effect=_effect(seq=1), run_id="run-A")
+    _record(store, request_id="r2", effect=_effect(seq=2), run_id="run-B")
+    _record(store, request_id="r3", outcome="no_effect", error_code="invalid_params")
+    _record(store, request_id="r4", effect=_effect(seq=3), principal_id="someone-else")
+    page = store.list_effects(principal_id=_OWNER)
+    assert [row["seq"] for row in page["records"]] == [1, 2, 3]
+    assert page["next_cursor"] is None
+    page = store.list_effects(principal_id=_OWNER, run_id="run-A")
+    assert [row["seq"] for row in page["records"]] == [1]
+    page = store.list_effects(principal_id=_OWNER, outcome="no_effect")
+    assert [row["seq"] for row in page["records"]] == [3]
+    page = store.list_effects(principal_id=_OWNER, limit=2)
+    assert [row["seq"] for row in page["records"]] == [1, 2]
+    assert page["next_cursor"] == 2
+    page = store.list_effects(principal_id=_OWNER, cursor=2, limit=2)
+    assert [row["seq"] for row in page["records"]] == [3]
+    assert page["next_cursor"] is None
+    # The other principal sees only their own records.
+    page = store.list_effects(principal_id="someone-else")
+    assert [row["seq"] for row in page["records"]] == [4]

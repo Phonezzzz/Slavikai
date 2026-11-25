@@ -73,6 +73,7 @@ from __future__ import annotations
 import bisect
 import ctypes
 import errno
+import hashlib
 import json
 import os
 import re
@@ -88,6 +89,7 @@ from typing import Final
 from urllib.parse import quote
 
 from core.desktop_security import DesktopPathSecurity
+from host_bridge.effect import EFFECT_BUILD_FAILED, EffectEmitter
 from host_bridge.protocol import (
     CAPABILITY_FS_DELETE,
     CAPABILITY_FS_LIST,
@@ -152,6 +154,36 @@ def _staging_name() -> str:
 
 _NAME_MAX_BYTES: Final[int] = 255
 _TRASHINFO_SUFFIX: Final[str] = ".trashinfo"
+# Longest possible trash entry name (NAME_MAX minus the .trashinfo
+# twin): the delete effect projection uses this placeholder, so the
+# pre-publish frame check holds for whichever candidate name the
+# trash loop finally picks (E03-T08, condition 5).
+_MAX_TRASH_NAME_CHARS: Final[int] = _NAME_MAX_BYTES - len(_TRASHINFO_SUFFIX)
+# Chunk size for hashing a staging file (bounded: at most
+# MAX_WRITE_BYTES, read in bounded blocks, never loaded whole).
+_SHA256_CHUNK_BYTES: Final[int] = 256 * 1024
+
+
+def _sha256_bytes(data: bytes) -> str:
+    """SHA-256 hex digest of in-hand bytes (patch effect hash)."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def _sha256_file_fd(fd: int, size: int) -> str:
+    """SHA-256 hex digest of ``size`` bytes read from ``fd`` at
+    offset 0, in bounded chunks (write-commit effect hash: the
+    digest covers exactly the bytes the publish will expose)."""
+    digest = hashlib.sha256()
+    remaining = size
+    offset = 0
+    while remaining > 0:
+        chunk = os.pread(fd, min(_SHA256_CHUNK_BYTES, remaining), offset)
+        if not chunk:
+            break
+        digest.update(chunk)
+        offset += len(chunk)
+        remaining -= len(chunk)
+    return digest.hexdigest()
 
 
 def _trash_candidate(name: str, attempt: int) -> str:
@@ -653,6 +685,7 @@ class HostFsService:
         mount_bindings_fn: Callable[[], list[tuple[Path, Path]]] = read_mount_bindings,
         commit_hook: Callable[[], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        effect_emitter: EffectEmitter | None = None,
     ) -> None:
         self._registry = registry
         self._security = security or DesktopPathSecurity(home=registry.home)
@@ -660,6 +693,9 @@ class HostFsService:
         self._mount_bindings_fn = mount_bindings_fn
         self._commit_hook = commit_hook
         self._clock = clock
+        # Effect emission (E03-T08): the daemon binds its single
+        # emitter here; a standalone service uses its own.
+        self._effect_emitter = effect_emitter if effect_emitter is not None else EffectEmitter()
         self._sessions: dict[str, _WriteSession] = {}
         self._sessions_lock = threading.Lock()
         # (st_dev, st_ino) of every staging file this process has
@@ -672,7 +708,8 @@ class HostFsService:
         self._checkout_cache: dict[Path, bool] = {}
         self._builtin_excluded = self._compute_builtin_exclusions()
         self._handlers: dict[
-            str, Callable[[dict[str, object], str, CancelToken], dict[str, object]]
+            str,
+            Callable[..., dict[str, object]],
         ] = {
             CAPABILITY_FS_STAT: self._stat,
             CAPABILITY_FS_LIST: self._list,
@@ -684,24 +721,62 @@ class HostFsService:
             CAPABILITY_FS_SEARCH: self._search,
         }
 
+    def bind_effect_emitter(self, emitter: EffectEmitter) -> None:
+        """Share the daemon's single emitter (E03-T08): one
+        ``(boot_id, seq)`` sequence across both services."""
+        self._effect_emitter = emitter
+
     @classmethod
-    def default(cls, *, home: Path | None = None, socket_dir: Path | None = None) -> HostFsService:
+    def default(
+        cls,
+        *,
+        home: Path | None = None,
+        socket_dir: Path | None = None,
+        effect_emitter: EffectEmitter | None = None,
+    ) -> HostFsService:
         """Service with only the built-in workspace root (no config read)."""
-        return cls(default_registry(home=home, socket_dir=socket_dir))
+        return cls(
+            default_registry(home=home, socket_dir=socket_dir),
+            effect_emitter=effect_emitter,
+        )
 
     @property
     def registry(self) -> RootsRegistry:
         return self._registry
 
+    @property
+    def effect_emitter(self) -> EffectEmitter:
+        """The emitter this service stamps mutation effects with."""
+        return self._effect_emitter
+
     def roots_description(self) -> list[dict[str, object]]:
         return self._registry.describe()
 
-    def handle(self, request: BridgeRequest, token: CancelToken) -> dict[str, object]:
+    def handle(
+        self,
+        request: BridgeRequest,
+        token: CancelToken,
+        *,
+        principal_id: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, object]:
         handler = self._handlers.get(request.capability)
         if handler is None:
             raise UnknownCapabilityError(request.capability, request_id=request.request_id)
         try:
-            return handler(request.params, request.request_id, token)
+            # Envelope attribution (E03-T08): the mutation handlers
+            # stamp it into the effect block; read-only handlers
+            # ignore it. It is never used for authorization. The
+            # request itself carries the envelope; the kwargs are
+            # an override for callers that build requests without
+            # attribution.
+            return handler(
+                request.params,
+                request.request_id,
+                token,
+                principal_id=principal_id if principal_id is not None else request.principal_id,
+                run_id=run_id if run_id is not None else request.run_id,
+            )
         except FsError as exc:
             if exc.request_id is None:
                 exc.request_id = request.request_id
@@ -974,7 +1049,13 @@ class HostFsService:
     # --- host.fs.stat ---
 
     def _stat(
-        self, params: dict[str, object], request_id: str, token: CancelToken
+        self,
+        params: dict[str, object],
+        request_id: str,
+        token: CancelToken,
+        *,
+        principal_id: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, object]:
         _check_params(params, frozenset({"root_id", "path"}))
         target = self._resolve(
@@ -1011,7 +1092,13 @@ class HostFsService:
     # --- host.fs.list ---
 
     def _list(
-        self, params: dict[str, object], request_id: str, token: CancelToken
+        self,
+        params: dict[str, object],
+        request_id: str,
+        token: CancelToken,
+        *,
+        principal_id: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, object]:
         _check_params(params, frozenset({"root_id", "path", "limit", "cursor"}))
         target = self._resolve(
@@ -1099,7 +1186,13 @@ class HostFsService:
     # --- host.fs.read ---
 
     def _read(
-        self, params: dict[str, object], request_id: str, token: CancelToken
+        self,
+        params: dict[str, object],
+        request_id: str,
+        token: CancelToken,
+        *,
+        principal_id: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, object]:
         _check_params(params, frozenset({"root_id", "path", "offset", "length"}))
         target = self._resolve(
@@ -1390,7 +1483,13 @@ class HostFsService:
         self._forget_staging(*identity)
 
     def _write(
-        self, params: dict[str, object], request_id: str, token: CancelToken
+        self,
+        params: dict[str, object],
+        request_id: str,
+        token: CancelToken,
+        *,
+        principal_id: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, object]:
         _check_params(
             params,
@@ -1590,8 +1689,53 @@ class HostFsService:
                 tfd = self._open_staging(fd, session, os.O_RDONLY)
                 try:
                     os.fsync(tfd)
+                    # E03-T08: the effect hash covers exactly the bytes
+                    # the publish will expose; read them now, from the
+                    # identity-verified staging fd, before the publish.
+                    # A hashing failure is an effect_build_failed
+                    # (T-8.1): the file stays unpublished.
+                    try:
+                        content_sha256 = _sha256_file_fd(tfd, session.size)
+                    except OSError as exc:
+                        raise FsError(
+                            EFFECT_BUILD_FAILED,
+                            f"cannot hash the staged content: {exc}",
+                        ) from exc
                 finally:
                     os.close(tfd)
+                # E03-T08 (owner condition 5): serialize the result +
+                # effect and check the frame budget BEFORE any publish
+                # syscall. An overflow fails here with
+                # effect_build_failed, before the mutation — never as
+                # a new post-commit failure. The projection consumes
+                # no sequence number: a failed commit leaves no hole
+                # in the daemon sequence.
+                projection = self._effect_emitter.build_projection(
+                    kind="fs.write",
+                    principal_id=principal_id,
+                    run_id=run_id,
+                    fields={
+                        "root_id": target.root.id,
+                        "path": target.display,
+                        "size": session.size,
+                        "bytes_written": len(data),
+                        "committed": True,
+                        "content_sha256": content_sha256,
+                    },
+                )
+                committed_result: dict[str, object] = {
+                    "root_id": target.root.id,
+                    "path": target.display,
+                    "size": session.size,
+                    "bytes_written": len(data),
+                    "committed": True,
+                    "effect": projection,
+                }
+                if not self._effect_emitter.frame_fits(committed_result, request_id):
+                    raise FsError(
+                        EFFECT_BUILD_FAILED,
+                        "effect does not fit the response frame budget",
+                    )
                 if self._commit_hook is not None:
                     self._commit_hook()
                 # The publish syscalls address the staging file by name;
@@ -1642,20 +1786,24 @@ class HostFsService:
                 else:
                     with self._sessions_lock:
                         self._staging_identities.discard((session.temp_dev, session.temp_ino))
-                return {
-                    "root_id": target.root.id,
-                    "path": target.display,
-                    "size": session.size,
-                    "bytes_written": len(data),
-                    "committed": True,
-                }
+                # The publish succeeded: assign the effect its real
+                # (boot_id, seq) now — the projection above was only a
+                # frame-budget placeholder.
+                committed_result["effect"] = self._effect_emitter.finalize(projection)
+                return committed_result
             finally:
                 os.close(fd)
 
     # --- host.fs.patch ---
 
     def _patch(
-        self, params: dict[str, object], request_id: str, token: CancelToken
+        self,
+        params: dict[str, object],
+        request_id: str,
+        token: CancelToken,
+        *,
+        principal_id: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, object]:
         _check_params(params, frozenset({"root_id", "path", "patch", "dry_run"}))
         target = self._resolve(
@@ -1705,6 +1853,48 @@ class HostFsService:
                     "dry_run": True,
                     "size": len(updated.encode("utf-8")),
                 }
+            # E03-T08: the effect hash covers the bytes the publish
+            # will expose; they are in hand here, before any staging
+            # file exists. Frame-budget the result + effect BEFORE
+            # the publish (owner condition 5): an overflow fails
+            # here with effect_build_failed, before the mutation.
+            updated_bytes = updated.encode("utf-8")
+            try:
+                content_sha256 = _sha256_bytes(updated_bytes)
+            except Exception as exc:
+                # A hashing failure is an effect_build_failed
+                # (T-8.1): the file stays unpatched. hashlib on
+                # in-hand bytes cannot fail in practice; the seam
+                # exists so a fault-injected hash failure is typed.
+                raise FsError(
+                    EFFECT_BUILD_FAILED,
+                    f"cannot hash the patched content: {exc}",
+                ) from exc
+            projection = self._effect_emitter.build_projection(
+                kind="fs.patch",
+                principal_id=principal_id,
+                run_id=run_id,
+                fields={
+                    "root_id": target.root.id,
+                    "path": target.display,
+                    "size": len(updated_bytes),
+                    "applied": True,
+                    "content_sha256": content_sha256,
+                },
+            )
+            patched_result: dict[str, object] = {
+                "root_id": target.root.id,
+                "path": target.display,
+                "applied": True,
+                "dry_run": False,
+                "size": len(updated_bytes),
+                "effect": projection,
+            }
+            if not self._effect_emitter.frame_fits(patched_result, request_id):
+                raise FsError(
+                    EFFECT_BUILD_FAILED,
+                    "effect does not fit the response frame budget",
+                )
             temp_name = _staging_name()
             tfd = os.open(
                 temp_name,
@@ -1718,7 +1908,7 @@ class HostFsService:
                     tst = os.fstat(tfd)
                     temp_identity = (tst.st_dev, tst.st_ino)
                     self._register_staging(*temp_identity)
-                    _write_all(tfd, updated.encode("utf-8"))
+                    _write_all(tfd, updated_bytes)
                     # Preserve the original file's permission bits: the
                     # publish replaces the inode, so without this an
                     # executable 0755 file would silently become 0600.
@@ -1762,13 +1952,11 @@ class HostFsService:
             self._forget_staging(*temp_identity)
         finally:
             os.close(pfd)
-        return {
-            "root_id": target.root.id,
-            "path": target.display,
-            "applied": True,
-            "dry_run": False,
-            "size": len(updated.encode("utf-8")),
-        }
+        # The publish succeeded: assign the effect its real
+        # (boot_id, seq) now — the projection above was only a
+        # frame-budget placeholder.
+        patched_result["effect"] = self._effect_emitter.finalize(projection)
+        return patched_result
 
     # --- subtree checks for move / recursive delete ---
 
@@ -1854,7 +2042,13 @@ class HostFsService:
     # --- host.fs.move (single rename) ---
 
     def _move(
-        self, params: dict[str, object], request_id: str, token: CancelToken
+        self,
+        params: dict[str, object],
+        request_id: str,
+        token: CancelToken,
+        *,
+        principal_id: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, object]:
         _check_params(
             params,
@@ -1886,6 +2080,34 @@ class HostFsService:
             dfd, dname = self._open_parent(dest, create=True, token=token)
             try:
                 token.check()
+                # E03-T08 (owner condition 5): every value the effect
+                # carries is known before the rename — frame-budget
+                # the result + effect here, before the publish.
+                projection = self._effect_emitter.build_projection(
+                    kind="fs.move",
+                    principal_id=principal_id,
+                    run_id=run_id,
+                    fields={
+                        "root_id": source.root.id,
+                        "path": source.display,
+                        "dest_root_id": dest.root.id,
+                        "dest_path": dest.display,
+                        "moved": True,
+                    },
+                )
+                moved_result: dict[str, object] = {
+                    "root_id": source.root.id,
+                    "path": source.display,
+                    "dest_root_id": dest.root.id,
+                    "dest_path": dest.display,
+                    "moved": True,
+                    "effect": projection,
+                }
+                if not self._effect_emitter.frame_fits(moved_result, request_id):
+                    raise FsError(
+                        EFFECT_BUILD_FAILED,
+                        "effect does not fit the response frame budget",
+                    )
                 try:
                     if overwrite:
                         os.rename(sname, dname, src_dir_fd=sfd, dst_dir_fd=dfd)
@@ -1905,13 +2127,10 @@ class HostFsService:
                 os.close(dfd)
         finally:
             os.close(sfd)
-        return {
-            "root_id": source.root.id,
-            "path": source.display,
-            "dest_root_id": dest.root.id,
-            "dest_path": dest.display,
-            "moved": True,
-        }
+        # The publish succeeded: assign the effect its real
+        # (boot_id, seq) now.
+        moved_result["effect"] = self._effect_emitter.finalize(projection)
+        return moved_result
 
     # --- host.fs.delete (trash only) ---
 
@@ -1995,7 +2214,13 @@ class HostFsService:
         raise FsError("trash_unavailable", "no trash available on the source mount")
 
     def _delete(
-        self, params: dict[str, object], request_id: str, token: CancelToken
+        self,
+        params: dict[str, object],
+        request_id: str,
+        token: CancelToken,
+        *,
+        principal_id: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, object]:
         _check_params(params, frozenset({"root_id", "path", "recursive"}))
         target = self._resolve(
@@ -2014,6 +2239,35 @@ class HostFsService:
                 self._check_subtree(target, token)
             files_dir, info_dir = self._trash_dirs(target.lexical, st.st_dev)
             token.check()
+            # E03-T08 (owner condition 5): the trash name the loop
+            # finally picks is unknown here, so the projection uses
+            # the longest possible trash name (_MAX_TRASH_NAME_CHARS)
+            # — the frame check then holds for any candidate, and it
+            # runs before any .trashinfo is written, so an overflow
+            # fails with effect_build_failed before the mutation.
+            projection = self._effect_emitter.build_projection(
+                kind="fs.delete",
+                principal_id=principal_id,
+                run_id=run_id,
+                fields={
+                    "root_id": target.root.id,
+                    "path": target.display,
+                    "trash_name": "x" * _MAX_TRASH_NAME_CHARS,
+                    "recoverable": True,
+                },
+            )
+            deleted_result: dict[str, object] = {
+                "root_id": target.root.id,
+                "path": target.display,
+                "trash_name": "x" * _MAX_TRASH_NAME_CHARS,
+                "recoverable": True,
+                "effect": projection,
+            }
+            if not self._effect_emitter.frame_fits(deleted_result, request_id):
+                raise FsError(
+                    EFFECT_BUILD_FAILED,
+                    "effect does not fit the response frame budget",
+                )
             # Exclusive .trashinfo first; on failure the metadata is
             # removed again and the source stays untouched.
             info_fd = os.open(str(info_dir), _DIR_OPEN_FLAGS)
@@ -2099,17 +2353,27 @@ class HostFsService:
                 os.close(files_fd)
         finally:
             os.close(pfd)
-        return {
-            "root_id": target.root.id,
-            "path": target.display,
-            "trash_name": trash_name,
-            "recoverable": True,
-        }
+        # The publish succeeded: assign the effect its real
+        # (boot_id, seq) and the real trash name now — the
+        # projection above used the longest possible name only for
+        # the frame-budget check, and the real name is never longer.
+        deleted_result["trash_name"] = trash_name
+        deleted_result["effect"] = self._effect_emitter.finalize(
+            projection,
+            fields={"trash_name": trash_name},
+        )
+        return deleted_result
 
     # --- host.fs.search (name-only, v1) ---
 
     def _search(
-        self, params: dict[str, object], request_id: str, token: CancelToken
+        self,
+        params: dict[str, object],
+        request_id: str,
+        token: CancelToken,
+        *,
+        principal_id: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, object]:
         _check_params(
             params,
