@@ -1855,6 +1855,17 @@ class _Record:
     # the client rejected both as malformed_response (kind
     # mismatch against the capability).
     kill_effect: dict[str, object] | None = None
+    # Pre-kill effect projection (E03-T08, owner condition 5,
+    # Codex round 6, finding 2): frame-budgeted before the
+    # kill_requested flip; finalized into ``kill_effect`` by
+    # ``_answer`` once the kill's outcome is known. Survives on
+    # the record so a retry after a lost response (e.g. the
+    # signal send raising TimeoutExpired) still emits the effect
+    # for the original kill instead of leaving the journal with
+    # an unresolvable unknown. Cleared on finalize, and dropped
+    # when the record finalizes as spawn_failed (the process never
+    # ran — same discipline as ``effect_projection``).
+    kill_projection: dict[str, object] | None = None
     # Pre-spawn effect projection (E03-T08, owner condition 5):
     # frame-budgeted before the spawn; finalized into ``effect`` by
     # ``_run_result`` once the record's state is known. Survives on
@@ -2834,33 +2845,62 @@ class HostProcessService:
 
         def _answer(state: str, exit_code: object, exit_signal: object) -> dict[str, object]:
             """Kill result with the kill effect attached when this
-            call (or an earlier one, via the stored kill effect)
-            requested the kill. A final record with no stored kill
-            effect died on its own (or was never kill-requested):
-            no effect — the recorder reads that as no_effect for
-            this call. The launch effect is never returned here:
-            it lives in ``record.effect`` and only ``_run_result``
-            answers with it (Codex round 1, finding 1)."""
+            call (or an earlier one, via the stored kill effect or
+            the stored kill projection) requested the kill. A final
+            record with no stored kill effect died on its own (or
+            was never kill-requested): no effect — the recorder
+            reads that as no_effect for this call. The launch
+            effect is never returned here: it lives in
+            ``record.effect`` and only ``_run_result`` answers
+            with it (Codex round 1, finding 1)."""
             result: dict[str, object] = {
                 "process_id": record.process_id,
                 "state": state,
                 "exit_code": exit_code,
                 "signal": exit_signal,
             }
-            if new_kill and projection is not None:
-                effect = self._effect_emitter.finalize(
-                    projection,
-                    fields={
-                        "process_id": record.process_id,
-                        "state": state,
-                        "exit_code": exit_code,
-                        "signal": exit_signal,
-                    },
-                )
-                record.kill_effect = effect
-                result["effect"] = effect
-            elif record.kill_effect is not None:
-                result["effect"] = record.kill_effect
+            # E03-T08 (Codex round 6, finding 2): finalize the kill
+            # effect exactly once, under the lock (the run
+            # finalization pattern, round 3): a first kill that died
+            # in signal_tree leaves its projection on the record;
+            # the retry finalizes THAT projection, so the journal
+            # gets the confirmed effect for the original kill
+            # instead of an unresolvable unknown. The stored
+            # projection is cleared on finalize — a later retry
+            # re-attaches the stored effect, never a second one.
+            # The lock also keeps two concurrent repeat kills from
+            # finalizing the same stored projection twice (the
+            # in-place finalize would consume two daemon seqs and
+            # rewrite the first answer's seq).
+            with self._lock:
+                if new_kill and projection is not None:
+                    effect = self._effect_emitter.finalize(
+                        projection,
+                        fields={
+                            "process_id": record.process_id,
+                            "state": state,
+                            "exit_code": exit_code,
+                            "signal": exit_signal,
+                        },
+                    )
+                    record.kill_effect = effect
+                    record.kill_projection = None
+                    result["effect"] = effect
+                elif record.kill_effect is not None:
+                    result["effect"] = record.kill_effect
+                elif record.kill_projection is not None:
+                    effect = self._effect_emitter.finalize(
+                        record.kill_projection,
+                        fields={
+                            "process_id": record.process_id,
+                            "state": state,
+                            "exit_code": exit_code,
+                            "signal": exit_signal,
+                        },
+                    )
+                    record.kill_effect = effect
+                    record.kill_projection = None
+                    result["effect"] = effect
             return result
 
         if record.final:
@@ -2915,6 +2955,13 @@ class HostProcessService:
                 raise ProcessError(
                     EFFECT_BUILD_FAILED, "effect does not fit the response frame budget"
                 )
+            # E03-T08 (Codex round 6, finding 2): keep the
+            # projection on the record BEFORE the flip and the
+            # signal — signal_tree() may raise TimeoutExpired
+            # after sending SIGTERM, and then this local variable
+            # is lost with the call. The stored projection lets a
+            # retry finalize the original kill effect in _answer.
+            record.kill_projection = projection
             record.kill_requested = True
             record.kill_reason = "killed"
             record.state = "killing"
@@ -3240,10 +3287,15 @@ class HostProcessService:
             # confirmed mutation). Drop any effect an earlier retry
             # finalized while the launch was still in flight, and
             # the projection with it. Other final states keep the
-            # effect: the process did run.
+            # effect: the process did run. The same discipline
+            # applies to an unfinalized kill projection (Codex
+            # round 6, finding 2): a kill effect for a process
+            # that never ran would be a confirmed mutation that
+            # never happened.
             if state == "spawn_failed":
                 record.effect = None
                 record.effect_projection = None
+                record.kill_projection = None
 
     def _reap_loop(self) -> None:
         while not self._stop.wait(0.2):

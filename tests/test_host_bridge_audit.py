@@ -656,6 +656,37 @@ def test_move_carries_effect(bridge: Path) -> None:
     _assert_no_forbidden_effect_keys(effect, kind="fs.move")
 
 
+def test_move_frame_budget_fails_before_mkdir(bridge: Path, home: Path) -> None:
+    """Codex round 6, finding 1 (condition 5): the move result +
+    effect is frame-budgeted BEFORE _open_parent(dest,
+    create=True) creates the destination parents. Source and dest
+    use 29 components with 99 \\x01 each (JSON-escaped to \\u0001):
+    the request fits the frame (~34 730 bytes) but the result +
+    effect does not. The call must fail with effect_build_failed
+    and the destination parents must not exist. Before the fix the
+    parents were created, stayed on disk, and the journal read
+    no_effect for a real mutation."""
+    work = home / "Project" / "work"
+    src_parts = ["a" + "\x01" * 99] * 29
+    dst_parts = ["b" + "\x01" * 99] * 29
+    src_file = work.joinpath(*src_parts)
+    src_file.parent.mkdir(parents=True)
+    src_file.write_text("move me", encoding="utf-8")
+    with pytest.raises(BridgeClientError) as exc_info:
+        _call(
+            bridge,
+            "host.fs.move",
+            params={
+                "root_id": "work",
+                "path": "/".join(src_parts),
+                "dest_path": "/".join(dst_parts),
+            },
+        )
+    assert exc_info.value.code == EFFECT_BUILD_FAILED
+    assert not (work / dst_parts[0]).exists()  # red before the fix: parents created
+    assert src_file.exists()
+
+
 def test_delete_carries_effect(bridge: Path, tmp_path: Path) -> None:
     _write_commit(bridge, content="delete me", path="gone.txt")
     result = _call(
@@ -1192,6 +1223,101 @@ def test_kill_final_record_with_run_effect_returns_no_effect(
     assert "effect" not in result
 
 
+class _SignalTimeoutSpawner(FakeSpawner):
+    """Spawner whose signal_tree sends the signal and then raises
+    TimeoutExpired — the systemd kill landed but the call failed
+    (Codex round 6, finding 2)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_next_signal = False
+
+    def signal_tree(self, handle: SpawnHandle, sig: int, *, timeout_s: float = 5.0) -> None:
+        super().signal_tree(handle, sig, timeout_s=timeout_s)
+        if self.fail_next_signal:
+            self.fail_next_signal = False
+            raise subprocess.TimeoutExpired(cmd=["systemctl", "kill"], timeout=timeout_s)
+
+
+def test_kill_signal_timeout_keeps_projection_for_retry(
+    fs_service: HostFsService, registry: RootsRegistry, tmp_path: Path
+) -> None:
+    """Codex round 6, finding 2: signal_tree() raises
+    TimeoutExpired after sending SIGTERM. kill_requested is already
+    set, but the projection is only a local variable and _answer()
+    is never called — the retry must finalize the STORED projection
+    so the journal gets the confirmed kill effect (resolving the
+    unknown from the failed first attempt) instead of a no_effect
+    answer. Before the fix the retry returned state='killed' with
+    no effect block."""
+    spawner = _SignalTimeoutSpawner()
+    svc = HostProcessService(
+        fs_service,
+        registry,
+        runtime_dir=tmp_path / "run-kill-timeout",
+        profiles=load_profiles(registry),
+        spawner=spawner,  # type: ignore[arg-type]
+    )
+    svc._probe = ProbeResult(available=True, checks={}, reason="unit-test")
+    try:
+        run = svc.handle(
+            "host.process.run",
+            {"profile_id": "sleep", "args": ["5"]},
+            "run-kill-timeout",
+            _token(),
+            principal_id=_OWNER,
+            run_id="run-A",
+        )
+        assert run["state"] == "running"
+        process_id = run["process_id"]
+        assert isinstance(process_id, str)
+        record = svc._records[process_id]
+        spawner.fail_next_signal = True
+        with pytest.raises(subprocess.TimeoutExpired):
+            svc.handle(
+                "host.process.kill",
+                {"process_id": process_id},
+                "kill-1",
+                _token(),
+                principal_id=_OWNER,
+                run_id="run-A",
+            )
+        # The signal landed (the sleep is dead) but the projection
+        # survived on the record for the retry.
+        assert record.kill_requested is True
+        assert getattr(record, "kill_projection", None) is not None  # red: no such slot
+        assert record.kill_effect is None
+        # Cleanup completes: the cgroup is empty now.
+        for unit in spawner.units.values():
+            unit["procs"] = []
+        retry = svc.handle(
+            "host.process.kill",
+            {"process_id": process_id},
+            "kill-1",
+            _token(),
+            principal_id=_OWNER,
+            run_id="run-A",
+        )
+        assert retry["state"] == "killed"
+        effect = _assert_effect_shape(retry.get("effect"), kind="process.kill")
+        assert effect["process_id"] == process_id
+        assert effect["state"] == "killed"
+        _assert_no_forbidden_effect_keys(effect, kind="process.kill")
+        # A third kill re-attaches the SAME effect, never a second one.
+        third = svc.handle(
+            "host.process.kill",
+            {"process_id": process_id},
+            "kill-2",
+            _token(),
+            principal_id=_OWNER,
+            run_id="run-A",
+        )
+        assert third["state"] == "killed"
+        assert third.get("effect") == effect
+    finally:
+        svc.shutdown()
+
+
 class _BlockingSpawner:
     """Spawner whose spawn() blocks until released, then fails.
 
@@ -1354,6 +1480,42 @@ def test_finalize_spawn_failed_clears_effect(proc_service: HostProcessService) -
     proc_service._finalize(ran, "exited")
     assert ran.effect is not None
     assert ran.effect["kind"] == "process.run"
+
+
+def test_finalize_spawn_failed_clears_kill_projection(proc_service: HostProcessService) -> None:
+    """Codex round 6, finding 2 (companion): finalizing a record
+    as spawn_failed must drop an unfinalized kill projection — the
+    process never ran, so a later kill must not finalize a kill
+    effect for it (the run side drops effect_projection the same
+    way, round 2 finding 1). A kill of the spawn_failed record
+    then answers with no effect block."""
+    record = _Record(
+        process_id=uuid.uuid4().hex,
+        profile_id="true",
+        state="launching",
+        run_id="run-1",
+        principal_id=_OWNER,
+        started_mono=time.monotonic(),
+    )
+    record.kill_projection = {
+        "seq": 1,
+        "boot_id": "b" * 32,
+        "kind": "process.kill",
+        "at": datetime.now(UTC).isoformat(),
+        "principal_id": _OWNER,
+        "run_id": "run-1",
+        "process_id": record.process_id,
+        "state": "killed",
+    }
+    proc_service._records[record.process_id] = record
+    proc_service._finalize(record, "spawn_failed")
+    assert record.state == "spawn_failed"
+    assert getattr(record, "kill_projection", None) is None  # red: projection survives
+    result = proc_service.handle(
+        "host.process.kill", {"process_id": record.process_id}, "kill-spawn-failed", _token()
+    )
+    assert result["state"] == "spawn_failed"
+    assert "effect" not in result
 
 
 def test_client_rejects_malformed_effect() -> None:

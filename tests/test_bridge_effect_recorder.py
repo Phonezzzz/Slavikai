@@ -412,6 +412,41 @@ def test_retry_with_confirmed_effect_resolves_unknown(recorder: BridgeEffectReco
     assert attempt["resolved_by_seq"] == effect.seq
 
 
+def test_kill_retry_effect_resolves_unknown(recorder: BridgeEffectRecorder) -> None:
+    """Codex round 6, finding 2: the first kill raised
+    TimeoutExpired after the signal landed (the client records a
+    transport failure → unknown). The retry of the same request_id
+    returns the confirmed kill effect → the unknown resolves to
+    the effect, not to a second unknown."""
+    unknown = recorder.record_transport_failure(
+        capability="host.process.kill",
+        request_id="kill-1",
+        principal_id=_OWNER,
+        run_id="run-A",
+        params={"process_id": "p1"},
+        reason="timeout",
+    )
+    assert unknown.outcome == "unknown"
+    effect = recorder.record_success(
+        capability="host.process.kill",
+        request_id="kill-1",
+        principal_id=_OWNER,
+        run_id="run-A",
+        params={"process_id": "p1"},
+        result={
+            "process_id": "p1",
+            "state": "killed",
+            "exit_code": None,
+            "signal": None,
+            "effect": _effect(
+                seq=7, kind="process.kill", process_id="p1", state="killed", run_id="run-A"
+            ),
+        },
+    )
+    assert effect.outcome == "effect"
+    assert effect.resolved_unknown_seqs == [unknown.seq]
+
+
 def test_duplicate_effect_delivery_is_idempotent(recorder: BridgeEffectRecorder) -> None:
     first = recorder.record_success(
         capability="host.fs.write",

@@ -2457,37 +2457,43 @@ class HostFsService:
             sst = os.stat(sname, dir_fd=sfd, follow_symlinks=False)
             if stat_mod.S_ISDIR(sst.st_mode):
                 self._check_subtree(source, token, dest=dest)
-            dfd, dname = self._open_parent(dest, create=True, token=token)
-            try:
-                token.check()
-                # E03-T08 (owner condition 5): every value the effect
-                # carries is known before the rename — frame-budget
-                # the result + effect here, before the publish.
-                projection = self._effect_emitter.build_projection(
-                    kind="fs.move",
-                    principal_id=principal_id,
-                    run_id=run_id,
-                    fields={
-                        "root_id": source.root.id,
-                        "path": source.display,
-                        "dest_root_id": dest.root.id,
-                        "dest_path": dest.display,
-                        "moved": True,
-                    },
-                )
-                moved_result: dict[str, object] = {
+            # E03-T08 (owner condition 5, Codex round 6, finding 1):
+            # frame-budget the result + effect BEFORE creating the
+            # destination parents — _open_parent(dest, create=True)
+            # is a mutation, so an overflow must fail here with
+            # effect_build_failed while the destination tree is
+            # still untouched (otherwise the parents stay on disk
+            # and the journal reads no_effect for a real mutation).
+            # Every value the effect carries is known already:
+            # root ids and displays come from _resolve.
+            projection = self._effect_emitter.build_projection(
+                kind="fs.move",
+                principal_id=principal_id,
+                run_id=run_id,
+                fields={
                     "root_id": source.root.id,
                     "path": source.display,
                     "dest_root_id": dest.root.id,
                     "dest_path": dest.display,
                     "moved": True,
-                    "effect": projection,
-                }
-                if not self._effect_emitter.frame_fits(moved_result, request_id):
-                    raise FsError(
-                        EFFECT_BUILD_FAILED,
-                        "effect does not fit the response frame budget",
-                    )
+                },
+            )
+            moved_result: dict[str, object] = {
+                "root_id": source.root.id,
+                "path": source.display,
+                "dest_root_id": dest.root.id,
+                "dest_path": dest.display,
+                "moved": True,
+                "effect": projection,
+            }
+            if not self._effect_emitter.frame_fits(moved_result, request_id):
+                raise FsError(
+                    EFFECT_BUILD_FAILED,
+                    "effect does not fit the response frame budget",
+                )
+            dfd, dname = self._open_parent(dest, create=True, token=token)
+            try:
+                token.check()
                 try:
                     if overwrite:
                         os.rename(sname, dname, src_dir_fd=sfd, dst_dir_fd=dfd)
