@@ -1491,6 +1491,100 @@ def test_kill_in_flight_after_spawn_failed_finalize_carries_no_effect(
         svc.shutdown()
 
 
+def test_two_concurrent_first_kills_finalize_one_effect(
+    fs_service: HostFsService, registry: RootsRegistry, tmp_path: Path
+) -> None:
+    """Codex round 7 (companion): the check-and-flip for the first
+    kill is not atomic, so two concurrent first kills can both
+    build a projection — but after the round-7 fix only the STORED
+    projection is ever finalized, so the pair consumes exactly one
+    daemon seq: the first _answer finalizes whichever projection
+    is stored, the second re-attaches it. Before the fix each call
+    finalized its own local projection (two seqs for one kill)."""
+    spawner = FakeSpawner()
+    svc = HostProcessService(
+        fs_service,
+        registry,
+        runtime_dir=tmp_path / "run-kill-double-first",
+        profiles=load_profiles(registry),
+        spawner=spawner,  # type: ignore[arg-type]
+    )
+    svc._probe = ProbeResult(available=True, checks={}, reason="unit-test")
+    try:
+        run = svc.handle(
+            "host.process.run",
+            {"profile_id": "sleep", "args": ["5"]},
+            "run-kill-double-first",
+            _token(),
+            principal_id=_OWNER,
+            run_id="run-A",
+        )
+        assert run["state"] == "running"
+        process_id = run["process_id"]
+        assert isinstance(process_id, str)
+        assert svc._effect_emitter._seq == 1  # the run effect only
+        # Slow the projection build so both kills pass the
+        # kill_requested check before either flips it.
+        emitter = svc._effect_emitter
+        orig_build = emitter.build_projection
+        entered = threading.Event()
+        both_entered = threading.Event()
+        release = threading.Event()
+        calls: list[int] = []
+
+        def _slow_build(*args: object, **kwargs: object) -> dict[str, object]:
+            calls.append(1)
+            if len(calls) == 2:
+                both_entered.set()
+            else:
+                entered.set()
+            assert release.wait(timeout=10)
+            return orig_build(*args, **kwargs)  # type: ignore[arg-type]
+
+        emitter.build_projection = _slow_build  # type: ignore[method-assign]
+        outcome: dict[str, object] = {}
+        errors: dict[str, Exception] = {}
+
+        def _kill(name: str) -> None:
+            try:
+                outcome[name] = svc.handle(
+                    "host.process.kill",
+                    {"process_id": process_id},
+                    "kill-1",
+                    _token(deadline_s=30),
+                    principal_id=_OWNER,
+                    run_id="run-A",
+                )
+            except Exception as exc:  # noqa: BLE001 - recorded for the assertions below
+                errors[name] = exc
+
+        first = threading.Thread(target=_kill, args=("first",), daemon=True)
+        first.start()
+        assert entered.wait(timeout=5)
+        second = threading.Thread(target=_kill, args=("second",), daemon=True)
+        second.start()
+        assert both_entered.wait(timeout=5)
+        for unit in spawner.units.values():
+            unit["procs"] = []
+        release.set()
+        first.join(timeout=10)
+        second.join(timeout=10)
+        assert not first.is_alive() and not second.is_alive()
+        assert not errors
+        first_answer = outcome["first"]
+        second_answer = outcome["second"]
+        assert isinstance(first_answer, dict) and isinstance(second_answer, dict)
+        assert first_answer["state"] == "killed"
+        assert second_answer["state"] == "killed"
+        first_effect = _assert_effect_shape(first_answer.get("effect"), kind="process.kill")
+        second_effect = _assert_effect_shape(second_answer.get("effect"), kind="process.kill")
+        assert first_effect["seq"] == second_effect["seq"]
+        assert first_effect is second_effect
+        assert svc._effect_emitter._seq == 2  # red on the round-6 code: 3
+    finally:
+        svc.shutdown()
+
+
 class _BlockingSpawner:
     """Spawner whose spawn() blocks until released, then fails.
 
