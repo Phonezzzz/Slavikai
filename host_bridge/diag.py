@@ -17,10 +17,11 @@ Degradation instead of errors (schema §4.9): an unavailable source
 degrades its field to ``null`` while the request still answers
 ``ok: true``. Diagnostic sources are deadline-bounded (owner
 clarification 7): ``systemctl`` gets a subprocess timeout and
-``disk_usage`` runs under a shared budget, so a hung source can
-never push the handler past the per-request deadline — the daemon's
-deadline backstop (``request_timeout``) is the last resort, not the
-plan.
+``disk_usage`` runs under a shared budget with at most one
+in-flight probe per root (rework round 1: a hung probe is reused,
+not re-spawned), so a hung source can never push the handler past
+the per-request deadline — the daemon's deadline backstop
+(``request_timeout``) is the last resort, not the plan.
 """
 
 from __future__ import annotations
@@ -185,6 +186,60 @@ def _iso_now() -> str:
     return datetime.now().astimezone().isoformat()
 
 
+class _DiskProbe:
+    """One in-flight ``disk_usage`` probe for one root (rework
+    round 1, finding 1: ADR-0013 §7 bounded availability).
+
+    A probe stuck in ``statvfs`` (NFS/FUSE) cannot be killed — a
+    Python thread has no terminate — so the service keeps at most
+    one probe per root and reuses it across calls instead of
+    spawning a new thread per timed-out request. The thread is a
+    daemon thread running a read-only syscall; its result is
+    stored under the service lock before the done event is set, so
+    a reader that observes ``done`` sees the result.
+    """
+
+    def __init__(
+        self,
+        root: Root,
+        fn: Callable[[Path], tuple[int, int, int]],
+        lock: threading.Lock,
+    ) -> None:
+        self.root = root
+        self._fn = fn
+        self._lock = lock
+        self._result: tuple[int, int, int] | None = None
+        self._done = threading.Event()
+        self.thread = threading.Thread(
+            target=self._run, name=f"host-diag-disk-probe:{root.id}", daemon=True
+        )
+
+    def start(self) -> None:
+        self.thread.start()
+
+    @property
+    def done(self) -> bool:
+        return self._done.is_set()
+
+    def result(self) -> tuple[int, int, int] | None:
+        with self._lock:
+            return self._result
+
+    def _run(self) -> None:
+        try:
+            value = self._fn(self.root.path)
+        except Exception:
+            # Any probe failure degrades the root to null (same
+            # contract as OSError). Catching broadly also keeps a
+            # failing probe from wedging its registry entry
+            # in-flight forever: without ``done`` the root would
+            # answer null on every later call and never re-probe.
+            value = None
+        with self._lock:
+            self._result = value
+        self._done.set()
+
+
 class HostDiagService:
     """Read-only diagnostics for the Owner Host Bridge (E03-T07).
 
@@ -219,6 +274,11 @@ class HostDiagService:
         )
         self._systemctl_fn = systemctl_fn if systemctl_fn is not None else _run_systemctl_show
         self._disk_usage_fn = disk_usage_fn if disk_usage_fn is not None else shutil.disk_usage
+        # In-flight disk probes, one per root id (rework round 1,
+        # finding 1): a probe stuck in ``statvfs`` is reused by the
+        # next call instead of spawning another thread.
+        self._probe_lock = threading.Lock()
+        self._probes: dict[str, _DiskProbe] = {}
 
     def note_started(self) -> None:
         """Record the daemon's start time (called by ``start()``)."""
@@ -262,7 +322,7 @@ class HostDiagService:
             if capability == "host.diag.disk":
                 _check_params(params, frozenset({"root_id"}))
                 root_id = _str_param(params, "root_id", required=False)
-                return self.disk(root_id=root_id, token=token)
+                return self.disk(root_id=root_id, request_id=request_id, token=token)
             if capability == "host.diag.host":
                 _check_params(params, frozenset())
                 return self.host()
@@ -367,7 +427,11 @@ class HostDiagService:
     # -- disk ----------------------------------------------------------------
 
     def disk(
-        self, *, root_id: str | None = None, token: CancelToken | None = None
+        self,
+        *,
+        root_id: str | None = None,
+        request_id: str = "",
+        token: CancelToken | None = None,
     ) -> dict[str, object]:
         """Per-root disk usage (owner clarification 4: no
         ``total == used + free`` requirement — reserved blocks make
@@ -380,7 +444,17 @@ class HostDiagService:
         and the request stays ok. ``statvfs`` is not assumed
         instant (owner clarification 7): every root is probed
         concurrently under one shared budget of
-        ``min(remaining request deadline, 2 s)``.
+        ``min(remaining request deadline, 2 s)``, with at most one
+        in-flight probe per root (rework round 1, finding 1).
+
+        Frame budget (rework round 1, finding 2): the loader puts
+        no limit on the number of roots, so the answer is trimmed
+        from the end — registry-order prefix survives, same pattern
+        as ``process_list`` — until the serialized frame fits;
+        ``count`` keeps the total number of roots and ``truncated``
+        marks the trimming, so the daemon backstop
+        (``internal_error`` on an over-limit frame) never fires for
+        disk.
         """
         registry = self._fs_service.registry
         if root_id is not None:
@@ -415,7 +489,15 @@ class HostDiagService:
                         "free_bytes": free,
                     }
                 )
-        return {"disks": disks}
+        result: dict[str, object] = {
+            "disks": disks,
+            "count": len(disks),
+            "truncated": False,
+        }
+        while disks and not self._frame_fits(result, request_id):
+            disks.pop()
+            result["truncated"] = True
+        return result
 
     def _disk_usage_all(
         self, roots: list[Root], budget_s: float
@@ -424,28 +506,36 @@ class HostDiagService:
 
         Returns ``{root_id: (total, used, free) | None}``; ``None``
         means the probe failed or the budget ran out before it
-        finished. A worker thread stuck in ``statvfs`` past the
-        budget is abandoned (daemon thread, read-only syscall —
-        harmless); the handler never waits for it.
+        finished. At most one probe thread exists per root (rework
+        round 1, finding 1, ADR-0013 §7 bounded availability): a
+        probe stuck in ``statvfs`` (NFS/FUSE) past the budget is
+        not abandoned and re-spawned — the next call reuses the
+        in-flight probe, the root degrades to null until the probe
+        completes, and the call after that serves the probe's fresh
+        numbers. A completed probe is removed from the registry, so
+        the next call probes the root anew.
         """
-        results: dict[str, tuple[int, int, int] | None] = {}
-
-        def work(root: Root) -> None:
-            try:
-                total, used, free = self._disk_usage_fn(root.path)
-            except OSError:
-                results[root.id] = None
-            else:
-                results[root.id] = (total, used, free)
-
-        threads = [threading.Thread(target=work, args=(root,), daemon=True) for root in roots]
-        for thread in threads:
-            thread.start()
-        deadline = time.monotonic() + budget_s
-        for thread in threads:
-            thread.join(max(0.0, deadline - time.monotonic()))
+        probes: list[_DiskProbe] = []
         for root in roots:
-            results.setdefault(root.id, None)
+            with self._probe_lock:
+                probe = self._probes.get(root.id)
+                if probe is None:
+                    probe = _DiskProbe(root, self._disk_usage_fn, self._probe_lock)
+                    self._probes[root.id] = probe
+                    probe.start()
+            probes.append(probe)
+        deadline = time.monotonic() + budget_s
+        for probe in probes:
+            probe.thread.join(max(0.0, deadline - time.monotonic()))
+        results: dict[str, tuple[int, int, int] | None] = {}
+        for root, probe in zip(roots, probes, strict=True):
+            if probe.done:
+                results[root.id] = probe.result()
+                with self._probe_lock:
+                    if self._probes.get(root.id) is probe:
+                        del self._probes[root.id]
+            else:
+                results[root.id] = None
         return results
 
     # -- host ----------------------------------------------------------------

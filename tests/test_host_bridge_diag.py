@@ -483,9 +483,128 @@ def test_disk_deadline_bounds_slow_roots(
     assert by_id["work"]["total_bytes"] == 1000
 
 
+def test_disk_hanging_root_does_not_accumulate_probe_threads(tmp_path: Path) -> None:
+    """Codex rework round 1, finding 1 (ADR-0013 §7 bounded
+    availability): a root whose ``disk_usage`` hangs past the shared
+    budget must not spawn a new probe thread on every ``disk`` call —
+    one in-flight probe per root, reused until it completes, and the
+    call degrades that root to null meanwhile. Six timed-out calls
+    used to leave six live threads on the same root."""
+    hung_id = f"hung-{uuid.uuid4().hex[:8]}"
+    home = tmp_path / "home-hung"
+    hung_path = home / hung_id
+    fast_path = home / "fast"
+    hung_path.mkdir(parents=True)
+    fast_path.mkdir(parents=True)
+    registry = RootsRegistry(
+        roots=(
+            Root(id=hung_id, path=hung_path.resolve(), mode="ro"),
+            Root(id="fast", path=fast_path.resolve(), mode="ro"),
+        ),
+        write_excluded=(),
+        home=home.resolve(),
+        config_path=home / "host-bridge.json",
+        socket_dir=None,
+    )
+    fs = HostFsService(registry, trash_root=tmp_path / "Trash")
+    calls: dict[str, int] = {}
+    calls_lock = threading.Lock()
+    release = threading.Event()
+
+    def hanging_usage(path: Path) -> tuple[int, int, int]:
+        with calls_lock:
+            calls[path.name] = calls.get(path.name, 0) + 1
+        if path.name == hung_id:
+            release.wait()  # stuck in statvfs (NFS/FUSE) until released
+        return (1000, 400, 600)
+
+    svc = HostDiagService(
+        fs_service=fs,
+        process_service=HostProcessService(fs, registry, runtime_dir=tmp_path / "run", profiles=()),
+        daemon_pid=os.getpid(),
+        disk_usage_fn=hanging_usage,
+    )
+    try:
+        for _ in range(6):
+            result = svc.handle("host.diag.disk", {}, "test-req", _token(0.35))
+            by_id = {d["root_id"]: d for d in result["disks"]}
+            assert by_id[hung_id]["total_bytes"] is None  # degraded while the probe hangs
+            assert by_id["fast"]["total_bytes"] == 1000
+        with calls_lock:
+            hung_calls = calls.get(hung_id, 0)
+        assert hung_calls == 1  # one probe, reused — not one thread per timed-out call
+        live = [t for t in threading.enumerate() if t.name == f"host-diag-disk-probe:{hung_id}"]
+        assert len(live) == 1
+        assert len(svc._probes) == 1  # the single in-flight probe, same object across calls
+        assert svc._probes[hung_id].thread in live
+    finally:
+        release.set()
+    # Once the stuck probe completes, the next call serves its fresh numbers.
+    result = svc.handle("host.diag.disk", {}, "test-req", _token())
+    by_id = {d["root_id"]: d for d in result["disks"]}
+    assert by_id[hung_id] == {
+        "root_id": hung_id,
+        "total_bytes": 1000,
+        "used_bytes": 400,
+        "free_bytes": 600,
+    }
+
+
 def test_disk_many_roots_fit_frame(tmp_path: Path) -> None:
-    """Owner clarification 5: 64 roots — the maximum the config
-    allows in practice — still fit one frame with no trimming."""
+    """Codex rework round 1, finding 2: the config loader puts no
+    limit on the number of roots, so 400 roots must still fit one
+    frame — entries drop from the end (registry-order prefix
+    survives, same pattern as process_list), ``count`` keeps the
+    total and ``truncated`` marks the trimming. The old version of
+    this test assumed 64 was the maximum the config allows; it is
+    not — only the root_id length is capped (64 chars). Worst case
+    here uses max-length ids and 16-digit byte counts (a PB-scale
+    filesystem): with real disk sizes the frame size depends on the
+    machine, so the seam pins the worst case deterministically."""
+    home = tmp_path / "home400"
+    roots = tuple(
+        Root(id=f"r{i:03d}-" + "x" * 59, path=(home / f"r{i:03d}").resolve(), mode="ro")
+        for i in range(400)
+    )
+    for root in roots:
+        root.path.mkdir(parents=True)
+    registry = RootsRegistry(
+        roots=roots,
+        write_excluded=(),
+        home=home.resolve(),
+        config_path=home / "host-bridge.json",
+        socket_dir=None,
+    )
+    fs = HostFsService(registry, trash_root=tmp_path / "Trash")
+    svc = HostDiagService(
+        fs_service=fs,
+        process_service=HostProcessService(
+            fs,
+            registry,
+            runtime_dir=tmp_path / "run",
+            profiles=(),
+        ),
+        daemon_pid=os.getpid(),
+        disk_usage_fn=lambda path: (10**15, 6 * 10**14, 4 * 10**14),
+    )
+    result = svc.handle("host.diag.disk", {}, "test-req", _token())
+    assert result["count"] == 400
+    assert result["truncated"] is True
+    assert len(result["disks"]) < 400
+    assert len(encode_success(result, "test-req")) - 1 <= MAX_FRAME_BYTES
+    # Registry-order prefix survives; every kept entry is correct.
+    kept = [d["root_id"] for d in result["disks"]]
+    assert kept == [f"r{i:03d}-" + "x" * 59 for i in range(len(kept))]
+    for entry in result["disks"]:
+        assert entry["total_bytes"] == 10**15
+        assert entry["used_bytes"] == 6 * 10**14
+        assert entry["free_bytes"] == 4 * 10**14
+
+
+def test_disk_roots_fit_frame_without_trimming(tmp_path: Path) -> None:
+    """64 roots still fit one frame with no trimming (the old
+    test_disk_many_roots_fit_frame case, kept as the no-trimming
+    boundary)."""
     home = tmp_path / "home64"
     roots = tuple(
         Root(id=f"r{i:02d}", path=(home / f"r{i:02d}").resolve(), mode="ro") for i in range(64)
@@ -511,6 +630,8 @@ def test_disk_many_roots_fit_frame(tmp_path: Path) -> None:
         daemon_pid=os.getpid(),
     )
     result = svc.handle("host.diag.disk", {}, "test-req", _token())
+    assert result["count"] == 64
+    assert result["truncated"] is False
     assert len(result["disks"]) == 64
     assert len(encode_success(result, "test-req")) - 1 <= MAX_FRAME_BYTES
 
