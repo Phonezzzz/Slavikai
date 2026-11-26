@@ -44,11 +44,12 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Literal, Protocol
 
 from core.approval_policy import ApprovalRequest, ApprovalRequired
+from core.postconditions import Postcondition
 from core.run_contract import RunBudget
 from core.run_outcome import (
     Disposition,
@@ -335,6 +336,23 @@ def validate_approved_plan(
             raise PlanExecutionBindingError(
                 f"plan.steps[{index}].inputs.tool_args должен быть объектом."
             )
+        # E05-T02: expected_postconditions — часть утверждённого
+        # содержимого шага. Невалидная запись — сломанный критерий
+        # приёмки, а не молча отброшенное поле: шаг отклоняется до
+        # любого эффекта, как любая другая ошибка структуры.
+        expected_raw = item.get("expected_postconditions")
+        if expected_raw is not None:
+            if not isinstance(expected_raw, list):
+                raise PlanExecutionBindingError(
+                    f"plan.steps[{index}].expected_postconditions должен быть списком."
+                )
+            for entry in expected_raw:
+                try:
+                    Postcondition.from_json(entry)
+                except ValueError as exc:
+                    raise PlanExecutionBindingError(
+                        f"plan.steps[{index}].expected_postconditions invalid: {exc}"
+                    ) from exc
         steps.append(item)
     return ValidatedPlan(
         plan_id=plan_id,
@@ -517,6 +535,7 @@ def _step_execution(
     loop_result: AgentToolLoopResult,
     state_changing: bool,
     verification: Verification | None = None,
+    binding_notes: Sequence[str] = (),
 ) -> PlanStepExecution:
     """Выводит терминальное состояние шага из результата loop.
 
@@ -525,6 +544,10 @@ def _step_execution(
     Отмена (cancelled) здесь не отображается: её обрабатывает
     ``_cancelled_step_execution`` в executor — частичный шаг сохраняется
     как failed с фактическим числом вызовов, а общий исход — CANCELLED.
+
+    ``binding_notes`` — записи binder'а (E05-T02: например, какие
+    suggestions вытеснены expected-условиями); дописываются в текст
+    результата шага, чтобы вытеснение было видно, а не молча терялось.
     """
     step_id = str(step.get("step_id"))
     description = str(step.get("description"))
@@ -613,6 +636,8 @@ def _step_execution(
             # Данные read-only вызова (например, текст прочитанного файла)
             # — часть результата шага: краткий ответ модели их не заменяет.
             result_text += f" Сохранённый вывод: {tool_output}"
+        if binding_notes:
+            result_text += " " + " ".join(binding_notes)
         return PlanStepExecution(
             step_id=step_id,
             description=description,
@@ -629,6 +654,8 @@ def _step_execution(
         # (текст модели, результаты вызовов) сохраняется отдельно от
         # статуса UNVERIFIED.
         result_text += f" Сохранённый вывод: {preserved}"
+    if binding_notes:
+        result_text += " " + " ".join(binding_notes)
     return PlanStepExecution(
         step_id=step_id,
         description=description,
@@ -989,11 +1016,20 @@ def _execute_remaining_steps(
                 cancelled=True,
             )
         verification = step_verification(step, loop_result) if step_verification else None
+        # E05-T02: hook, построенный make_step_verification_hook, помнит
+        # записи о вытесненных suggestions; plain-функции (T01) их не
+        # несут — getattr с дефолтом, без изменения протокола hook'а.
+        binding_notes: Sequence[str] = ()
+        if step_verification is not None:
+            notes = getattr(step_verification, "last_binding_notes", ())
+            if isinstance(notes, (list, tuple)):
+                binding_notes = tuple(str(note) for note in notes)
         executed = _step_execution(
             step=step,
             loop_result=loop_result,
             state_changing=step_changing,
             verification=verification,
+            binding_notes=binding_notes,
         )
         done.append(executed)
         if executed.outcome.terminal_reason in {

@@ -13,6 +13,7 @@ from typing import Protocol, TypeVar
 from core.approval_policy import ApprovalRequired
 from core.mwv.models import VerificationResult, VerificationStatus
 from core.mwv.verifier_runtime import VerifierRuntime, desktop_last_state_change_succeeded
+from core.postcondition_binding import bind_run_postconditions
 from core.postconditions import (
     Postcondition,
     PostconditionReader,
@@ -173,6 +174,12 @@ class DesktopRuntime:
         self._state_lock = threading.RLock()
         self._paused: ToolLoopContinuation | None = None
         self._paused_gateway: ToolGateway | None = None
+        # E05-T02: bound expected postconditions + reader of the paused
+        # run. Resume re-verifies from current state (Q10) — the
+        # suggestions are re-derived from the resumed loop result, so
+        # only the caller-passed bar travels here, never evaluations.
+        self._paused_postconditions: Sequence[Postcondition] | None = None
+        self._paused_postcondition_reader: PostconditionReader | None = None
         self._timer: threading.Timer | None = None
         self._lease_held = False
         self._closed = False
@@ -195,23 +202,29 @@ class DesktopRuntime:
         against real state after the loop and joined into the canonical
         derivation as a third channel. ``postcondition_reader`` supplies
         the state reads; without it, reader-dependent checks evaluate
-        to BLOCKED (never a pass). Resume re-derives without typed
-        checks in T01 — T02 carries bound postconditions through the
-        continuation. A cancelled loop skips typed checks entirely:
-        no reader runs after the cancellation, and the cancelled
-        outcome keeps verification unknown.
+        to BLOCKED (never a pass). E05-T02 binds the caller-passed
+        conditions here and carries them through the pause (resume
+        re-verifies from current state); the binder additionally
+        derives suggestions from the loop's own tool calls, so a run
+        with no declared bar still gets its write verified. A
+        cancelled loop skips typed checks entirely: no reader runs
+        after the cancellation, and the cancelled outcome keeps
+        verification unknown.
         """
         conversation = tuple(
             LLMMessage(role=message.role, content=message.content)
             for message in messages
             if message.role in {"user", "assistant"}
         )
+        bound_postconditions = (
+            tuple(pc.with_revision() for pc in postconditions) if postconditions else None
+        )
         return self._on_owner(
             lambda: self._run(
                 goal,
                 messages=conversation,
                 cancellation_token=cancellation_token,
-                postconditions=postconditions,
+                postconditions=bound_postconditions,
                 postcondition_reader=postcondition_reader,
             )
         )
@@ -288,6 +301,10 @@ class DesktopRuntime:
             resumed = self._resumable(continuation, user_auth)
             self._paused = None
             self._paused_gateway = None
+            paused_postconditions = self._paused_postconditions
+            paused_reader = self._paused_postcondition_reader
+            self._paused_postconditions = None
+            self._paused_postcondition_reader = None
             self._cancel_timer()
             self._user_auth_deadline = None
             self._user_auth_expired = False
@@ -296,6 +313,8 @@ class DesktopRuntime:
                     goal,
                     cancellation_token=cancellation_token,
                     continuation=resumed,
+                    postconditions=paused_postconditions,
+                    postcondition_reader=paused_reader,
                 )
             finally:
                 if self._paused is None:
@@ -400,6 +419,8 @@ class DesktopRuntime:
                 return
             self._paused = None
             self._paused_gateway = None
+            self._paused_postconditions = None
+            self._paused_postcondition_reader = None
             self._cancel_timer()
             try:
                 if gateway is not None:
@@ -555,6 +576,11 @@ class DesktopRuntime:
             else:
                 self._paused = exc.continuation
                 self._paused_gateway = gateway
+                # E05-T02: the bound expected conditions travel with
+                # the pause; resume re-verifies from current state
+                # (Q10) — evaluations themselves are never carried.
+                self._paused_postconditions = postconditions
+                self._paused_postcondition_reader = postcondition_reader
                 if isinstance(exc, UserAuthRequired):
                     self._pause_for_user_auth(exc)
                 else:
@@ -586,16 +612,26 @@ class DesktopRuntime:
         # would spawn fresh work (systemctl, canonical check) after
         # the cancellation and delay lease release; the cancelled
         # outcome keeps verification unknown (see
-        # outcome_from_loop_result).
+        # outcome_from_loop_result). E05-T02 feeds the channel from
+        # the binding: the caller-passed expected conditions plus the
+        # suggestions derived from the loop's own tool calls — a run
+        # with no declared bar still gets its write verified.
         typed_verification = None
-        if postconditions and not loop_result.cancelled:
-            typed_verification = self.verifier.verify_postconditions(
-                postconditions,
-                postcondition_reader,
-                browser_facts=collect_browser_state_facts(
-                    [result for _, _, result in observations]
-                ),
+        if not loop_result.cancelled:
+            bound = bind_run_postconditions(
+                expected=postconditions,
+                loop_result=loop_result,
+                get_capability=self.parent.tool_registry.get_capability,
+                reader=postcondition_reader,
             )
+            if bound:
+                typed_verification = self.verifier.verify_postconditions(
+                    bound,
+                    postcondition_reader,
+                    browser_facts=collect_browser_state_facts(
+                        [result for _, _, result in observations]
+                    ),
+                )
         canonical_outcome = self._derive_canonical_outcome(
             loop_result,
             combine_verification_results(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -12,10 +13,12 @@ from core.plan_execute import (
     PlanLoopApprovalPending,
     PlanLoopCheckpoints,
     PlanLoopContinuationUnavailable,
+    StepVerificationHook,
     execute_approved_plan,
     resume_approved_plan,
     validate_approved_plan,
 )
+from core.postcondition_binding import make_step_verification_hook
 from core.postconditions import FileExistsParams, Postcondition, PostconditionKind
 from core.run_contract import build_run_spec
 from core.run_outcome import PostconditionCheck, TerminalReason, Verification, VerificationOutcome
@@ -625,6 +628,243 @@ def test_failed_step_verification_is_preserved_in_plan_outcome() -> None:
     assert result.outcome.terminal_reason is TerminalReason.COMPLETED
     assert result.outcome.verification.outcome is VerificationOutcome.FAILED
     assert "file_exists:x.txt" in [check.name for check in result.outcome.verification.checks]
+
+
+# ---------------------------------------------------------------------------
+# E05-T02: the real binding hook (suggested + expected).
+# ---------------------------------------------------------------------------
+
+
+def _t02_hook(agent: FakePlanAgent, tmp_path: Path) -> StepVerificationHook:
+    security = DesktopPathSecurity(
+        home=tmp_path,
+        policy_store_path=tmp_path / ".run" / "desktop_approvals.json",
+    )
+    return make_step_verification_hook(
+        reader=DesktopPostconditionReader(security),
+        get_capability=agent.tool_registry.get_capability,
+    )
+
+
+def test_write_step_with_t02_hook_suggested_checks_is_full_done(tmp_path) -> None:
+    # E05-T02 acceptance: the plan declares NO bar at all, yet the
+    # step is full DONE — the binder suggests file_exists +
+    # file_content_matches(exact) from the write call itself, and the
+    # typed checker verifies them against real state.
+    target = tmp_path / "x.txt"
+    write_calls: list = []
+
+    def workspace_write(request):
+        write_calls.append(request)
+        target.write_text("written", encoding="utf-8")
+        return ToolResult.success({"output": "ok", "path": str(target)})
+
+    brain = ScriptedBrain([("workspace_write", {"path": str(target), "content": "written"})])
+    agent = FakePlanAgent(
+        brain=brain,
+        tools=[("workspace_write", workspace_write, "write", [])],
+    )
+    agent.set_session_context("s1", {"FS_DELETE_OVERWRITE", "FS_OUTSIDE_WORKSPACE"})
+    plan, task = _approved_plan(
+        [_step("step-1", "workspace_write", {"path": str(target), "content": "written"})]
+    )
+
+    result = execute_approved_plan(
+        agent=agent,
+        plan=plan,
+        task=task,
+        session_id="s1",
+        plan_hash_fn=plan_hash_payload,
+        checkpoints=PlanLoopCheckpoints(),
+        step_verification=_t02_hook(agent, tmp_path),
+    )
+
+    assert len(write_calls) == 1
+    assert target.exists()
+    assert result.steps[0].status == "done"
+    assert result.outcome.is_full_done is True
+    assert result.outcome.terminal_reason is TerminalReason.COMPLETED
+    assert result.outcome.verification.outcome is VerificationOutcome.PASSED
+    assert {check.name.split(":")[0] for check in result.outcome.verification.checks} == {
+        "file_exists",
+        "file_content_matches",
+    }
+
+
+def test_write_step_with_t02_hook_suggested_check_fails_when_file_missing(tmp_path) -> None:
+    # Negative twin: the tool reports success but the file is not on
+    # disk — the suggested check evaluates FAILED, and the step is
+    # status done with outcome NOT full done (never a silent DONE
+    # from the tool's ok flag).
+    target = tmp_path / "x.txt"
+    write_calls: list = []
+
+    def workspace_write(request):
+        write_calls.append(request)
+        return ToolResult.success({"output": "ok", "path": str(target)})
+
+    brain = ScriptedBrain([("workspace_write", {"path": str(target), "content": "written"})])
+    agent = FakePlanAgent(
+        brain=brain,
+        tools=[("workspace_write", workspace_write, "write", [])],
+    )
+    agent.set_session_context("s1", {"FS_DELETE_OVERWRITE", "FS_OUTSIDE_WORKSPACE"})
+    plan, task = _approved_plan(
+        [_step("step-1", "workspace_write", {"path": str(target), "content": "written"})]
+    )
+
+    result = execute_approved_plan(
+        agent=agent,
+        plan=plan,
+        task=task,
+        session_id="s1",
+        plan_hash_fn=plan_hash_payload,
+        checkpoints=PlanLoopCheckpoints(),
+        step_verification=_t02_hook(agent, tmp_path),
+    )
+
+    assert len(write_calls) == 1
+    assert not target.exists()
+    assert result.steps[0].status == "done"
+    assert result.steps[0].outcome.verification.outcome is VerificationOutcome.FAILED
+    assert result.outcome.is_full_done is False
+    assert result.outcome.terminal_reason is TerminalReason.COMPLETED
+    assert result.outcome.verification.outcome is VerificationOutcome.FAILED
+
+
+def test_write_step_with_t02_hook_expected_wins_and_note_in_result(tmp_path) -> None:
+    # The step declares file_exists; the binder suggests the same
+    # check plus file_content_matches. Expected wins per subject, the
+    # superseded suggestion is recorded in the step result text.
+    target = tmp_path / "x.txt"
+    write_calls: list = []
+
+    def workspace_write(request):
+        write_calls.append(request)
+        target.write_text("written", encoding="utf-8")
+        return ToolResult.success({"output": "ok", "path": str(target)})
+
+    brain = ScriptedBrain([("workspace_write", {"path": str(target), "content": "written"})])
+    agent = FakePlanAgent(
+        brain=brain,
+        tools=[("workspace_write", workspace_write, "write", [])],
+    )
+    agent.set_session_context("s1", {"FS_DELETE_OVERWRITE", "FS_OUTSIDE_WORKSPACE"})
+    step = _step("step-1", "workspace_write", {"path": str(target), "content": "written"})
+    step["expected_postconditions"] = [
+        Postcondition(
+            kind=PostconditionKind.FILE_EXISTS,
+            params=FileExistsParams(path=str(target)),
+            source="test",
+        )
+        .with_revision()
+        .to_json()
+    ]
+    plan, task = _approved_plan([step])
+
+    result = execute_approved_plan(
+        agent=agent,
+        plan=plan,
+        task=task,
+        session_id="s1",
+        plan_hash_fn=plan_hash_payload,
+        checkpoints=PlanLoopCheckpoints(),
+        step_verification=_t02_hook(agent, tmp_path),
+    )
+
+    assert result.outcome.is_full_done is True
+    assert result.outcome.verification.outcome is VerificationOutcome.PASSED
+    assert (
+        f"suggestion superseded by expected: file_exists:{target} "
+        f"(expected file_exists:{target})" in result.steps[0].result
+    )
+
+
+def test_resume_with_t02_hook_reverifies_from_current_state(tmp_path) -> None:
+    # Q10: the write runs only AFTER the resume (approval pause
+    # first). The hook is passed to both execute and resume; the
+    # resumed step re-binds from its full loop result and re-verifies
+    # from current state — no evaluation is carried across the pause.
+    target = tmp_path / "x.txt"
+    write_calls: list = []
+
+    def workspace_write(request):
+        write_calls.append(request)
+        target.write_text("written", encoding="utf-8")
+        return ToolResult.success({"output": "ok", "path": str(target)})
+
+    brain = ScriptedBrain([("workspace_write", {"path": str(target), "content": "written"})])
+    agent = FakePlanAgent(
+        brain=brain,
+        tools=[("workspace_write", workspace_write, "write", ["destructive"])],
+    )
+    plan, task = _approved_plan(
+        [_step("step-1", "workspace_write", {"path": str(target), "content": "written"})]
+    )
+    checkpoints = PlanLoopCheckpoints()
+    hook = _t02_hook(agent, tmp_path)
+    agent.set_session_context("s1", set())
+
+    with pytest.raises(PlanLoopApprovalPending) as excinfo:
+        execute_approved_plan(
+            agent=agent,
+            plan=plan,
+            task=task,
+            session_id="s1",
+            plan_hash_fn=plan_hash_payload,
+            checkpoints=checkpoints,
+            step_verification=hook,
+        )
+    assert write_calls == []
+    assert len(checkpoints) == 1
+    checkpoint = excinfo.value.checkpoint
+
+    agent.set_session_context("s1", {"FS_DELETE_OVERWRITE", "FS_OUTSIDE_WORKSPACE"})
+    taken = checkpoints.take(checkpoint.checkpoint_id)
+    assert taken is checkpoint
+    result = resume_approved_plan(
+        agent=agent,
+        checkpoint=checkpoint,
+        plan=plan,
+        task=task,
+        plan_hash_fn=plan_hash_payload,
+        checkpoints=checkpoints,
+        step_verification=hook,
+    )
+
+    assert len(write_calls) == 1
+    assert target.exists()
+    assert result.outcome.is_full_done is True
+    assert result.outcome.verification.outcome is VerificationOutcome.PASSED
+    assert len(checkpoints) == 0
+
+
+def test_validate_approved_plan_rejects_invalid_expected_postconditions() -> None:
+    step = _step("step-1", "workspace_write", {"path": "x.txt", "content": "written"})
+    step["expected_postconditions"] = [{"kind": "not_a_kind", "params": {}}]
+    plan, _task = _approved_plan([step])
+    with pytest.raises(PlanExecutionBindingError):
+        validate_approved_plan(plan=plan, task=_task, plan_hash_fn=plan_hash_payload)
+
+    step2 = _step("step-1", "workspace_write", {"path": "x.txt", "content": "written"})
+    step2["expected_postconditions"] = "not-a-list"
+    plan2, _task2 = _approved_plan([step2])
+    with pytest.raises(PlanExecutionBindingError):
+        validate_approved_plan(plan=plan2, task=_task2, plan_hash_fn=plan_hash_payload)
+
+    # A valid expected condition passes validation.
+    step3 = _step("step-1", "workspace_write", {"path": "x.txt", "content": "written"})
+    step3["expected_postconditions"] = [
+        Postcondition(
+            kind=PostconditionKind.FILE_EXISTS,
+            params=FileExistsParams(path="x.txt"),
+            source="test",
+        )
+        .with_revision()
+        .to_json()
+    ]
+    plan3, _task3 = _approved_plan([step3])
+    validate_approved_plan(plan=plan3, task=_task3, plan_hash_fn=plan_hash_payload)
 
 
 def test_cancelled_plan_returns_cancelled_outcome() -> None:

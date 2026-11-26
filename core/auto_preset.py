@@ -66,6 +66,7 @@ from core.mwv.verifier_runtime import (
     is_repo_workspace,
 )
 from core.mwv.verifier_summary import extract_verifier_excerpt
+from core.postcondition_binding import bind_run_postconditions
 from core.postconditions import (
     Postcondition,
     PostconditionReader,
@@ -198,6 +199,14 @@ class _RunFrame:
     # безопасным чтением (symlink, FIFO, нерегулярный файл, переполнение
     # лимита): явный ERROR при verify, а не молчаливое None.
     verifier_criterion_rejected: bool = False
+    # E05-T02: bound expected postconditions (caller-passed, trusted
+    # server code) + the reader to evaluate them with. The frame is
+    # the carrier across resume: on resume the bound list is
+    # re-verified from current state, never carried as evaluations
+    # (Q10). Suggestions are re-derived from the resumed loop result
+    # at evaluation time, so only the expected bar travels here.
+    bound_postconditions: tuple[Postcondition, ...] = ()
+    postcondition_reader: PostconditionReader | None = None
 
 
 @dataclass
@@ -339,9 +348,12 @@ class AutoPresetRunner:
     ) -> AutoRunOutcome:
         # E05-T01: ``postconditions`` are typed effect checks evaluated
         # against real state after the loop and joined into the
-        # canonical derivation as a third channel. Resume re-derives
-        # without typed checks in T01 — T02 carries bound
-        # postconditions through the frame/continuation.
+        # canonical derivation as a third channel. E05-T02 binds the
+        # caller-passed conditions here and carries them through the
+        # frame (resume re-verifies from current state, Q10); the
+        # binder additionally derives suggestions from the loop's own
+        # tool calls, so a run with no declared bar still gets its
+        # write verified.
         if capture_binding is not None and (
             capture_binding.run.scope.principal_id != self.parent.user_id
             or capture_binding.run.scope.session_id != self.parent.session_id
@@ -399,6 +411,9 @@ class AutoPresetRunner:
             ),
         }
         self._set_state(state)
+        bound_postconditions = (
+            tuple(pc.with_revision() for pc in postconditions) if postconditions else ()
+        )
         frame = _RunFrame(
             run_id_value,
             goal,
@@ -417,12 +432,12 @@ class AutoPresetRunner:
             verifier_criterion_sha256=criterion_sha256,
             repo_verification_required=repo_verification_required,
             verifier_criterion_rejected=criterion.status == "rejected",
+            bound_postconditions=bound_postconditions,
+            postcondition_reader=postcondition_reader,
         )
         return self._execute_frame(
             frame,
             cancellation_token=cancellation_token,
-            postconditions=postconditions,
-            postcondition_reader=postcondition_reader,
         )
 
     def _execute_frame(
@@ -437,6 +452,16 @@ class AutoPresetRunner:
         goal, run_id_value = frame.goal, frame.run_id
         run_root, budgets, state = frame.workspace_root, frame.budgets, frame.state
         started_monotonic, skill_resolution = frame.started_monotonic, frame.skill_resolution
+        # E05-T02: explicit postconditions bind into the frame (the
+        # carrier across resume); otherwise the frame's stored bar is
+        # used. Either way the frame — never a local — owns the bar
+        # from here on, so a pause keeps it for the resumed frame.
+        if postconditions is not None:
+            frame.bound_postconditions = tuple(pc.with_revision() for pc in postconditions)
+        if postcondition_reader is not None:
+            frame.postcondition_reader = postcondition_reader
+        expected_postconditions = frame.bound_postconditions
+        bound_reader = frame.postcondition_reader
         try:
             brain = frame.brain
             capability = brain.native_tool_capability()
@@ -717,16 +742,27 @@ class AutoPresetRunner:
             # E05-T01: the typed channel joins the same derivation. It
             # reads real state (never a tool's ok flag); a failed typed
             # check gives UNVERIFIED, an unproven one UNKNOWN — never a
-            # silent DONE.
+            # silent DONE. E05-T02 feeds it from the binding: the
+            # frame's expected conditions plus the suggestions derived
+            # from the loop's own tool calls — a run with no declared
+            # bar still gets its write verified. A cancelled loop runs
+            # no typed checks (same rule as the desktop run).
             typed_verification = None
-            if postconditions:
-                typed_verification = VerifierRuntime().verify_postconditions(
-                    postconditions,
-                    postcondition_reader,
-                    browser_facts=collect_browser_state_facts(
-                        [item.result for item in loop_result.tool_calls]
-                    ),
+            if not loop_result.cancelled:
+                bound = bind_run_postconditions(
+                    expected=expected_postconditions,
+                    loop_result=loop_result,
+                    get_capability=self.parent.tool_registry.get_capability,
+                    reader=bound_reader,
                 )
+                if bound:
+                    typed_verification = VerifierRuntime().verify_postconditions(
+                        bound,
+                        bound_reader,
+                        browser_facts=collect_browser_state_facts(
+                            [item.result for item in loop_result.tool_calls]
+                        ),
+                    )
             canonical = outcome_from_loop_result(
                 loop_result,
                 state_changing=_loop_state_changing(loop_result, self.parent.tool_registry),

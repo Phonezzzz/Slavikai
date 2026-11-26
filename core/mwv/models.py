@@ -4,9 +4,12 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Final, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from shared.models import JSONValue
+
+if TYPE_CHECKING:
+    from core.postconditions import Postcondition
 
 
 class WorkStatus(StrEnum):
@@ -62,6 +65,10 @@ class TaskStepContract:
     inputs: dict[str, JSONValue] = field(default_factory=dict)
     expected_outputs: list[str] = field(default_factory=list)
     acceptance_checks: list[str] = field(default_factory=list)
+    # E05-T02: typed acceptance bar, declared before the effect and
+    # frozen by plan approval. Runtime import would be a cycle
+    # (core.postconditions imports this module), hence TYPE_CHECKING.
+    expected_postconditions: list[Postcondition] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -148,6 +155,28 @@ class RetryDecision:
     llm_hint: str | None = None
 
 
+def _task_packet_step_hash_payload(step: TaskStepContract) -> dict[str, JSONValue]:
+    """One step's hashed fields.
+
+    ``expected_postconditions`` (E05-T02) is part of the approved
+    content and binds to the packet hash — but only when present:
+    a packet without it must hash exactly as before the field
+    existed (same Q12 rule as the plan hash).
+    """
+    payload: dict[str, JSONValue] = {
+        "step_id": step.step_id,
+        "title": step.title,
+        "description": step.description,
+        "allowed_tool_kinds": list(step.allowed_tool_kinds),
+        "inputs": dict(step.inputs),
+        "expected_outputs": list(step.expected_outputs),
+        "acceptance_checks": list(step.acceptance_checks),
+    }
+    if step.expected_postconditions:
+        payload["expected_postconditions"] = [pc.to_json() for pc in step.expected_postconditions]
+    return payload
+
+
 def task_packet_hash_payload(packet: TaskPacket) -> str:
     payload: dict[str, JSONValue] = {
         "task_id": packet.task_id,
@@ -158,18 +187,7 @@ def task_packet_hash_payload(packet: TaskPacket) -> str:
         "messages": [
             {"role": message.role, "content": message.content} for message in packet.messages
         ],
-        "steps": [
-            {
-                "step_id": step.step_id,
-                "title": step.title,
-                "description": step.description,
-                "allowed_tool_kinds": list(step.allowed_tool_kinds),
-                "inputs": dict(step.inputs),
-                "expected_outputs": list(step.expected_outputs),
-                "acceptance_checks": list(step.acceptance_checks),
-            }
-            for step in packet.steps
-        ],
+        "steps": [_task_packet_step_hash_payload(step) for step in packet.steps],
         "constraints": list(packet.constraints),
         "policy": dict(packet.policy),
         "scope": dict(packet.scope),
