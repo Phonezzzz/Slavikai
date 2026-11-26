@@ -85,11 +85,19 @@ def _plan_binding_error(
             code="invalid_plan_precondition",
         )
     if plan is not None and any(payload[key] != plan.get(key) for key in keys):
+        details: dict[str, JSONValue] | None = None
+        plan_revision = plan.get("plan_revision")
+        if isinstance(plan_revision, int) and revision != plan_revision:
+            details = {
+                "expected_revision": plan_revision,
+                "actual_revision": revision,
+            }
         return error_response(
             status=409,
             message="План изменился. Проверьте актуальную версию перед действием.",
             error_type="invalid_request_error",
             code="plan_binding_mismatch",
+            details=details,
         )
     return None
 
@@ -313,7 +321,8 @@ async def handle_ui_plan_edit(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="mode_not_plan",
         )
-    current_plan = _normalize_plan_payload(workflow.get("active_plan"))
+    raw_plan = workflow.get("active_plan")
+    current_plan = _normalize_plan_payload(raw_plan)
     if current_plan is None:
         return error_response(
             status=404,
@@ -337,26 +346,9 @@ async def handle_ui_plan_edit(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_json",
         )
-    revision_raw = payload.get("plan_revision")
-    if not isinstance(revision_raw, int) or revision_raw <= 0:
-        return error_response(
-            status=400,
-            message="plan_revision обязателен и должен быть положительным int.",
-            error_type="invalid_request_error",
-            code="invalid_request_error",
-        )
-    current_revision = _plan_revision_value(current_plan)
-    if revision_raw != current_revision:
-        return error_response(
-            status=409,
-            message="plan_revision mismatch.",
-            error_type="invalid_request_error",
-            code="plan_revision_mismatch",
-            details={
-                "expected_revision": current_revision,
-                "actual_revision": revision_raw,
-            },
-        )
+    binding_error = _plan_binding_error(payload, current_plan)
+    if binding_error is not None:
+        return binding_error
     operation_raw = payload.get("operation")
     if not isinstance(operation_raw, dict):
         return error_response(
@@ -375,21 +367,49 @@ async def handle_ui_plan_edit(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
-    await hub.set_session_workflow(
-        session_id,
-        mode="plan",
-        active_plan=updated_plan,
-        active_task=None,
+    assert isinstance(raw_plan, dict)
+    committed, reason = await hub.edit_plan_if_current(
+        session_id, expected_plan=deepcopy(raw_plan), updated_plan=updated_plan
     )
-    await hub.set_session_decision(session_id, None)
-    updated = await hub.get_session_workflow(session_id)
+    if committed is None:
+        if reason == "not_draft":
+            return error_response(
+                status=409,
+                message="План должен быть в статусе draft.",
+                error_type="invalid_request_error",
+                code="plan_not_draft",
+            )
+        if reason == "task_running":
+            return error_response(
+                status=409,
+                message="План уже выполняется.",
+                error_type="invalid_request_error",
+                code="task_already_running",
+            )
+        if reason == "mode_mismatch":
+            return error_response(
+                status=409,
+                message="Plan edit доступен только в plan-режиме.",
+                error_type="invalid_request_error",
+                code="mode_not_plan",
+            )
+        return error_response(
+            status=409,
+            message="План изменился. Проверьте актуальную версию перед действием.",
+            error_type="invalid_request_error",
+            code="plan_binding_mismatch",
+            details={
+                "expected_revision": _plan_revision_value(current_plan),
+                "actual_revision": payload.get("plan_revision"),
+            },
+        )
     response = json_response(
         {
             "ok": True,
             "session_id": session_id,
-            "mode": _normalize_mode_value(updated.get("mode"), default="plan"),
-            "active_plan": _normalize_plan_payload(updated.get("active_plan")),
-            "active_task": _normalize_task_payload(updated.get("active_task")),
+            "mode": _normalize_mode_value(committed.get("mode"), default="plan"),
+            "active_plan": _normalize_plan_payload(committed.get("active_plan")),
+            "active_task": _normalize_task_payload(committed.get("active_task")),
         }
     )
     response.headers[UI_SESSION_HEADER] = session_id
@@ -442,6 +462,13 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
     )
     actual_revision = _plan_revision_value(plan)
     idempotency_key = normalize_idempotency_key(request.headers.get("Idempotency-Key"))
+    if idempotency_key is None:
+        return error_response(
+            status=400,
+            message="Idempotency-Key обязателен для plan/execute.",
+            error_type="invalid_request_error",
+            code="idempotency_key_required",
+        )
     if mode == "act" and active_task is not None and active_task.get("status") == "running":
         if idempotency_key is not None:
             running_act_fingerprint = fingerprint_json_payload(

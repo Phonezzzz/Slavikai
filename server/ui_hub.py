@@ -1439,6 +1439,66 @@ class UIHub:
             logging.getLogger(__name__).exception("Committed plan approval delivery failed")
         return payload
 
+    async def edit_plan_if_current(
+        self,
+        session_id: str,
+        *,
+        expected_plan: dict[str, JSONValue],
+        updated_plan: dict[str, JSONValue],
+    ) -> tuple[dict[str, JSONValue] | None, str | None]:
+        # Atomic plan edit (PLAN-01/02): check+write under ONE lock
+        # acquisition. Returns (committed_workflow_payload, None) on success
+        # or (None, reason) with reason in {"plan_changed", "not_draft",
+        # "task_running", "mode_mismatch"}. The response is built from the
+        # returned payload; no re-read is needed (R6). Residual: the runner's
+        # terminal write is still unconditional (R5, follow-up PLAN-04).
+        async with self._lock:
+            previous = self._sessions.get(session_id)
+            if previous is None:
+                return None, "plan_changed"
+            if previous.mode != "plan":
+                return None, "mode_mismatch"
+            if previous.active_plan != expected_plan:
+                return None, "plan_changed"
+            current_plan = previous.active_plan if isinstance(previous.active_plan, dict) else None
+            if current_plan is None or current_plan.get("status") != "draft":
+                return None, "not_draft"
+            current_task = previous.active_task if isinstance(previous.active_task, dict) else None
+            if current_task is not None and current_task.get("status") == "running":
+                return None, "task_running"
+            next_state = replace(
+                previous,
+                active_plan=self._normalize_optional_object(updated_plan),
+                active_task=None,
+                decision_packet=None,
+                updated_at=_utc_iso_now(),
+            )
+            self._sessions[session_id] = next_state
+            try:
+                await self._persist_session_locked(session_id)
+            except Exception:
+                self._sessions[session_id] = previous
+                raise
+            self._prune_sessions_locked(keep_session_id=session_id)
+            payload: dict[str, JSONValue] = {
+                "session_id": session_id,
+                "mode": next_state.mode,
+                "active_plan": next_state.active_plan,
+                "active_task": next_state.active_task,
+                "auto_state": next_state.auto_state,
+            }
+            event = self._build_event("session.workflow", payload)
+            subscribers = list(next_state.subscribers.values())
+            try:
+                self._append_event_record_locked(next_state, event)
+            except Exception:  # noqa: BLE001
+                logging.getLogger(__name__).exception("Committed plan edit buffering failed")
+        try:
+            self._publish_to_subscribers(subscribers, event)
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).exception("Committed plan edit delivery failed")
+        return payload, None
+
     async def set_session_workflow(
         self,
         session_id: str,

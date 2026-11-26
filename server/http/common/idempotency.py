@@ -26,6 +26,16 @@ class _IdempotencyEntry:
 
 
 class IdempotencyStore:
+    """In-memory idempotency for one step attempt (90 s window).
+
+    A key identifies one attempt of one step (plan or act call), not the
+    whole plan->act flow: the fingerprint includes `mode`, so the two steps
+    need two different keys (the UI mints a fresh UUID per call). Records
+    do not survive a server restart and are not persisted anywhere; a retry
+    after restart with the same key starts a new run. Durable storage is a
+    follow-up (PLAN-03 full).
+    """
+
     def __init__(self, *, window_seconds: int = DEFAULT_IDEMPOTENCY_WINDOW_SECONDS) -> None:
         self._window_seconds = (
             window_seconds if window_seconds > 0 else DEFAULT_IDEMPOTENCY_WINDOW_SECONDS
