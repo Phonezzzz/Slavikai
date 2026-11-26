@@ -1356,6 +1356,8 @@ T07→T08→T09 — НЕ жёсткая последовательность: T0
 никто); acceptance-тесты SEQ после T06 (требуют стабильного lifecycle; PR #203
 MERGED, main 658a638). Merge unit-file допустим раньше T07/T08.
 
+**Открытый gap (E03-T09, вердикт директоров 26.11.2026, ACCEPT WITH CONDITIONS).** Исходный acceptance тикета — daemon физически не способен обратиться к запрещённым roots (OS-level filesystem isolation) — НЕ выполнен ограниченным hardening-профилем и НЕ достижим через unit-файл user-сервиса на этом хосте (mount-изоляция не применяется для user-сервисов; любая mount-настройка ломает enforcement probe). Профиль T09 (9 проверенных настроек, exposure 6.7 MEDIUM) реализован, но filesystem-граница остаётся в коде демона (RootsRegistry + `fs.py`). Gap остаётся открытым архитектурным требованием и переносится в acceptance T11; отдельного тикета isolated FS view в каноне нет — эта запись и есть его фиксация. System service не означает root daemon: альтернативные deployment models — отдельный архитектурный вопрос.
+
 #### E03-T10 — optional desktop observation/control split
 
 **ЧТО.** Вынести GUI observation и GUI control в две capabilities.
