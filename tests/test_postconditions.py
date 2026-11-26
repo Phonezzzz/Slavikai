@@ -37,6 +37,7 @@ from core.postconditions import (
     BrowserStateParams,
     CheckOutcome,
     CustomCommandParams,
+    FileAbsentParams,
     FileContentMatchesParams,
     FileExistsParams,
     FileInfo,
@@ -151,6 +152,7 @@ def test_postcondition_json_round_trip_all_kinds() -> None:
     cases = [
         PostconditionKind.FILE_EXISTS,
         PostconditionKind.FILE_CONTENT_MATCHES,
+        PostconditionKind.FILE_ABSENT,
         PostconditionKind.PROCESS_RUNNING,
         PostconditionKind.PROCESS_EXIT,
         PostconditionKind.SERVICE_STATE,
@@ -162,6 +164,7 @@ def test_postcondition_json_round_trip_all_kinds() -> None:
         PostconditionKind.FILE_CONTENT_MATCHES: FileContentMatchesParams(
             path="/tmp/x.txt", expected="hi"
         ),
+        PostconditionKind.FILE_ABSENT: FileAbsentParams(path="/tmp/gone.txt"),
         PostconditionKind.PROCESS_RUNNING: ProcessRunningParams(pid=123, create_time=1000.0),
         PostconditionKind.PROCESS_EXIT: ProcessExitParams(
             process_id="proc-1", expected_exit_code=0
@@ -337,6 +340,41 @@ def test_file_exists_symlink_escaping_root_is_unknown(tmp_path: Path) -> None:
     escape.symlink_to(Path("/proc/version"))
     reader = DesktopPostconditionReader(_security(tmp_path))
     pc = _bound(PostconditionKind.FILE_EXISTS, FileExistsParams(path=str(escape)))
+    evaluation = evaluate_postcondition(pc, reader, now=1.0)
+    assert evaluation.outcome is CheckOutcome.INCONCLUSIVE
+    assert evaluation.evidence["reason"] == "path_denied"
+
+
+def test_file_absent_missing_passes(tmp_path: Path) -> None:
+    # E05-T02: the new kind — absence is the bar (rename/move source).
+    reader = DesktopPostconditionReader(_security(tmp_path))
+    pc = _bound(PostconditionKind.FILE_ABSENT, FileAbsentParams(path=str(tmp_path / "gone.txt")))
+    evaluation = evaluate_postcondition(pc, reader, now=1.0)
+    assert evaluation.outcome is CheckOutcome.PASSED
+    assert evaluation.evidence["reason"] == "ok"
+
+
+def test_file_absent_present_file_and_directory_fail(tmp_path: Path) -> None:
+    # Any present path fails — a directory left behind is as much a
+    # failed move as a file.
+    target = tmp_path / "still.txt"
+    target.write_text("x", encoding="utf-8")
+    reader = DesktopPostconditionReader(_security(tmp_path))
+    file_pc = _bound(PostconditionKind.FILE_ABSENT, FileAbsentParams(path=str(target)))
+    evaluation = evaluate_postcondition(file_pc, reader, now=1.0)
+    assert evaluation.outcome is CheckOutcome.FAILED
+    assert evaluation.evidence["reason"] == "present"
+    dir_pc = _bound(PostconditionKind.FILE_ABSENT, FileAbsentParams(path=str(tmp_path)))
+    assert evaluate_postcondition(dir_pc, reader, now=1.0).outcome is CheckOutcome.FAILED
+
+
+def test_file_absent_denied_is_unknown(tmp_path: Path) -> None:
+    # A path the reader cannot describe is INCONCLUSIVE, never a
+    # pass: "cannot tell" must not look like "absent".
+    escape = tmp_path / "escape"
+    escape.symlink_to(Path("/proc/version"))
+    reader = DesktopPostconditionReader(_security(tmp_path))
+    pc = _bound(PostconditionKind.FILE_ABSENT, FileAbsentParams(path=str(escape)))
     evaluation = evaluate_postcondition(pc, reader, now=1.0)
     assert evaluation.outcome is CheckOutcome.INCONCLUSIVE
     assert evaluation.evidence["reason"] == "path_denied"
@@ -974,6 +1012,11 @@ def _all_passing_checks(tmp_path: Path) -> list[Postcondition]:
             PostconditionKind.FILE_CONTENT_MATCHES,
             FileContentMatchesParams(path=str(target), expected="hell"),
         ),
+        # E05-T02: the new kind — the file must be absent.
+        _bound(
+            PostconditionKind.FILE_ABSENT,
+            FileAbsentParams(path=str(tmp_path / "gone.txt")),
+        ),
         _bound(PostconditionKind.PROCESS_RUNNING, ProcessRunningParams(process_id="proc-1")),
         _bound(
             PostconditionKind.PROCESS_EXIT,
@@ -1016,7 +1059,7 @@ def test_verify_postconditions_all_passed(tmp_path: Path) -> None:
     )
     assert verification is not None
     assert verification.outcome is VerificationOutcome.PASSED
-    assert len(verification.checks) == 7
+    assert len(verification.checks) == 8
     assert {check.name.split(":")[0] for check in verification.checks} == {
         kind.value for kind in PostconditionKind
     }

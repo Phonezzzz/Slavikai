@@ -13,6 +13,7 @@ where no real verifier ran.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -1102,3 +1103,153 @@ def test_auto_file_budget_survives_approval_and_blocks_publication(tmp_path, mon
     assert agent.last_auto_state["execution_metrics"]["files_touched"] == (
         2 if case == "retry" else None
     )
+
+
+# ---------------------------------------------------------------------------
+# E05-T02: the binding feeds the typed channel of auto runs.
+# ---------------------------------------------------------------------------
+
+
+def _t02_auto_agent(tmp_path, monkeypatch, brain):
+    """Preset agent with a real writing tool + a network tool that pauses."""
+    from core.approval_policy import ApprovalContext
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(auto_preset.AUTO_MAX_TOOL_CALLS_ENV, "100")
+    agent = _PresetAgent()
+    agent._brain = brain
+    target = tmp_path / "result.txt"
+
+    def write_file(request):
+        path = Path(str(request.args["path"]))
+        path.write_text(str(request.args["content"]), encoding="utf-8")
+        return ToolResult.success({"output": "ok", "path": str(path)})
+
+    agent.tool_registry.register(
+        "desktop_file_write",
+        write_file,
+        capability="write",
+        description="test writer",
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "required": ["path", "content"],
+        },
+    )
+    agent.tool_registry.register(
+        "network",
+        lambda request: ToolResult.success({"output": "observed"}),
+        capability="read",
+        risk_classes=["network"],
+    )
+    gateway = ToolGateway(
+        agent.tool_registry,
+        # The write itself is pre-approved (it is the effect under
+        # test); only the network call pauses the run — that is the
+        # Q10 pause mechanism, not the write.
+        approval_context=ApprovalContext(
+            True, agent.user_id, {"FS_DELETE_OVERWRITE", "FS_OUTSIDE_WORKSPACE"}
+        ),
+    )
+    agent._build_tool_gateway = lambda current=gateway, budget=None: current
+    return agent, target
+
+
+def test_auto_run_with_t02_suggested_checks_is_completed(tmp_path, monkeypatch):
+    # Acceptance: no declared bar — the binder suggests file_exists +
+    # file_content_matches(exact) from the write call, the typed
+    # channel verifies them, and the canonical outcome is COMPLETED.
+    from core.desktop_security import DesktopPathSecurity
+    from core.run_outcome import VerificationOutcome
+    from tests.test_tool_call_cap import BatchBrain
+    from tools.postcondition_readers import DesktopPostconditionReader
+
+    target = tmp_path / "result.txt"
+    brain = BatchBrain(
+        [
+            [
+                ToolCall(
+                    id="write-1",
+                    name="desktop_file_write",
+                    arguments={"path": str(target), "content": "written"},
+                )
+            ]
+        ]
+    )
+    agent, _ = _t02_auto_agent(tmp_path, monkeypatch, brain)
+    security = DesktopPathSecurity(
+        home=tmp_path,
+        policy_store_path=tmp_path / ".run" / "desktop_approvals.json",
+    )
+    outcome = auto_preset.AutoPresetRunner(agent, workspace_root=tmp_path).run(
+        "write the file",
+        postcondition_reader=DesktopPostconditionReader(security),
+    )
+
+    assert target.read_text(encoding="utf-8") == "written"
+    assert outcome.status == AutoRunStatus.COMPLETED
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.verification.outcome is VerificationOutcome.PASSED
+    names = {check.name.split(":")[0] for check in outcome.canonical_outcome.verification.checks}
+    assert {"file_exists", "file_content_matches"} <= names
+
+
+def test_auto_resume_carries_bound_postconditions(tmp_path, monkeypatch):
+    # Q10: the network call pauses the run before the write; the
+    # expected file_exists bar travels in the frame. On resume the
+    # write runs, the bound list is re-verified from current state
+    # (never carried as an evaluation), and the run completes with
+    # the expected check present exactly once.
+    from core.approval_policy import ApprovalRequired as _ApprovalRequired
+    from core.desktop_security import DesktopPathSecurity
+    from core.postconditions import FileExistsParams, Postcondition, PostconditionKind
+    from core.run_outcome import VerificationOutcome
+    from tests.test_tool_call_cap import BatchBrain, calls
+    from tools.postcondition_readers import DesktopPostconditionReader
+
+    target = tmp_path / "result.txt"
+    brain = BatchBrain(
+        [
+            calls("network"),
+            [
+                ToolCall(
+                    id="write-1",
+                    name="desktop_file_write",
+                    arguments={"path": str(target), "content": "written"},
+                )
+            ],
+        ]
+    )
+    agent, _ = _t02_auto_agent(tmp_path, monkeypatch, brain)
+    security = DesktopPathSecurity(
+        home=tmp_path,
+        policy_store_path=tmp_path / ".run" / "desktop_approvals.json",
+    )
+    reader = DesktopPostconditionReader(security)
+    expected = Postcondition(
+        kind=PostconditionKind.FILE_EXISTS,
+        params=FileExistsParams(path=str(target)),
+        source="test",
+    ).with_revision()
+    preset = auto_preset.AutoPresetRunner(agent, workspace_root=tmp_path)
+    with pytest.raises(_ApprovalRequired):
+        preset.run(
+            "write the file",
+            postconditions=[expected],
+            postcondition_reader=reader,
+        )
+    assert not target.exists()
+    assert agent.last_auto_state["status"] == AutoRunStatus.WAITING_APPROVAL.value
+
+    outcome = preset.resume(agent.last_auto_state["run_id"])
+
+    assert target.read_text(encoding="utf-8") == "written"
+    assert outcome.status == AutoRunStatus.COMPLETED
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.verification.outcome is VerificationOutcome.PASSED
+    names = [check.name for check in outcome.canonical_outcome.verification.checks]
+    assert names.count(f"file_exists:{target}") == 1
+    assert f"file_content_matches:{target}" in names

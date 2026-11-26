@@ -3,6 +3,14 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
+from core.approval_policy import ApprovalContext, ApprovalRequired
+from core.desktop_policy import (
+    DesktopApprovalRule,
+    DesktopApprovalScope,
+    DesktopPolicyRuntime,
+)
 from core.desktop_runtime import (
     DESKTOP_SYSTEM_PROMPT,
     DesktopExecutionControl,
@@ -13,6 +21,8 @@ from core.desktop_security import DesktopPathSecurity
 from core.mwv.models import VerificationResult, VerificationStatus
 from core.mwv.verifier_runtime import VerifierRuntime
 from core.postconditions import (
+    FileContentMatchesParams,
+    FileExistsParams,
     FileInfo,
     Postcondition,
     PostconditionKind,
@@ -31,6 +41,7 @@ from tools.desktop_tools import (
     DesktopFileTransferTool,
     DesktopVerifyTool,
 )
+from tools.postcondition_readers import DesktopPostconditionReader
 from tools.tool_registry import ToolRegistry
 
 
@@ -719,3 +730,232 @@ def test_real_host_filesystem_workflow_runs_through_desktop_loop(tmp_path: Path)
         "desktop_file_transfer",
         "desktop_verify",
     ]
+
+
+# ---------------------------------------------------------------------------
+# E05-T02: the binding feeds the typed channel of direct runs.
+# ---------------------------------------------------------------------------
+
+
+def _t02_security(tmp_path: Path) -> DesktopPathSecurity:
+    return DesktopPathSecurity(
+        home=tmp_path,
+        policy_store_path=tmp_path / ".run" / "desktop_approvals.json",
+    )
+
+
+def test_desktop_run_with_t02_suggested_checks_join_verification(tmp_path: Path) -> None:
+    # Acceptance: no declared bar — the binder suggests file_exists +
+    # file_content_matches(exact) from the write call, and the typed
+    # channel verifies them against real state next to the legacy
+    # desktop_verify observation.
+    path = tmp_path / "result.txt"
+    brain = ScriptedBrain(
+        [
+            LLMResult(
+                text="write",
+                tool_calls=[
+                    ToolCall(
+                        id="write-1",
+                        name="desktop_file_write",
+                        arguments={"path": str(path), "content": "done"},
+                    )
+                ],
+            ),
+            LLMResult(
+                text="verify",
+                tool_calls=[
+                    ToolCall(
+                        id="verify-1",
+                        name="desktop_verify",
+                        arguments={
+                            "check": "file_contains",
+                            "path": str(path),
+                            "expected": "done",
+                        },
+                    )
+                ],
+            ),
+            LLMResult(text="completed"),
+        ]
+    )
+    parent = DesktopParent(brain, _desktop_registry(tmp_path))
+    outcome = DesktopRuntime(parent).run(
+        "Create and verify a file",
+        postcondition_reader=DesktopPostconditionReader(_t02_security(tmp_path)),
+    )
+
+    assert outcome.verification.status == VerificationStatus.PASSED
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.verification.outcome is VerificationOutcome.PASSED
+    names = {check.name.split(":")[0] for check in outcome.canonical_outcome.verification.checks}
+    assert {"file_exists", "file_content_matches"} <= names
+
+
+def test_desktop_run_with_t02_expected_postcondition_is_evaluated(tmp_path: Path) -> None:
+    # The caller-passed bar is evaluated by the typed channel: the
+    # step declares file_content_matches(exact), the binder would
+    # suggest the identical check — expected wins per subject, so the
+    # canonical verification carries exactly one such check, passed,
+    # from the expected condition.
+    path = tmp_path / "result.txt"
+    brain = ScriptedBrain(
+        [
+            LLMResult(
+                text="write",
+                tool_calls=[
+                    ToolCall(
+                        id="write-1",
+                        name="desktop_file_write",
+                        arguments={"path": str(path), "content": "done"},
+                    )
+                ],
+            ),
+            LLMResult(
+                text="verify",
+                tool_calls=[
+                    ToolCall(
+                        id="verify-1",
+                        name="desktop_verify",
+                        arguments={
+                            "check": "file_contains",
+                            "path": str(path),
+                            "expected": "done",
+                        },
+                    )
+                ],
+            ),
+            LLMResult(text="completed"),
+        ]
+    )
+    parent = DesktopParent(brain, _desktop_registry(tmp_path))
+    pc = Postcondition(
+        kind=PostconditionKind.FILE_CONTENT_MATCHES,
+        params=FileContentMatchesParams(path=str(path), expected="done", match="exact"),
+        source="test",
+    ).with_revision()
+    outcome = DesktopRuntime(parent).run(
+        "Create and verify a file",
+        postconditions=[pc],
+        postcondition_reader=DesktopPostconditionReader(_t02_security(tmp_path)),
+    )
+
+    assert path.read_text(encoding="utf-8") == "done"
+    assert outcome.verification.status == VerificationStatus.PASSED
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.verification.outcome is VerificationOutcome.PASSED
+    names = [check.name for check in outcome.canonical_outcome.verification.checks]
+    assert names.count(f"file_content_matches:{path}") == 1
+    assert f"file_exists:{path}" in names
+
+
+class _ApprovableDesktopParent(DesktopParent):
+    """DesktopParent whose desktop policy the test can flip.
+
+    The gateway is built with a real desktop ApprovalContext
+    (policy + security). The write uses overwrite=True, so the
+    desktop policy asks for approval until the test installs an
+    allow rule — the real approve-then-resume flow.
+    """
+
+    def __init__(self, brain: Brain, registry: ToolRegistry, security: DesktopPathSecurity) -> None:
+        super().__init__(brain, registry)
+        self.policy = DesktopPolicyRuntime()
+        self.security = security
+
+    def _build_tool_gateway(self, *, budget=None) -> ToolGateway:
+        del budget
+        return ToolGateway(
+            self.tool_registry,
+            pre_call=lambda request: self.gateway_requests.append(request),
+            run_policy=RunPolicy(mode="desktop", execution_target="desktop"),
+            approval_context=ApprovalContext(
+                safe_mode=True,
+                session_id="s1",
+                approved_categories=set(),
+                execution_target="desktop",
+                desktop_policy=self.policy,
+                desktop_security=self.security,
+            ),
+        )
+
+
+def test_desktop_run_resume_carries_bound_postconditions(tmp_path: Path) -> None:
+    # Q10: the overwrite write asks for approval first; the run
+    # pauses with the bound expected condition stored. After the
+    # test installs an allow rule (the approval), resume re-verifies
+    # from current state — the resumed run is fully verified, with
+    # the expected check present exactly once (expected wins per
+    # subject over the identical suggestion).
+    path = tmp_path / "result.txt"
+    path.write_text("old", encoding="utf-8")
+    brain = ScriptedBrain(
+        [
+            LLMResult(
+                text="write",
+                tool_calls=[
+                    ToolCall(
+                        id="write-1",
+                        name="desktop_file_write",
+                        arguments={"path": str(path), "content": "done", "overwrite": True},
+                    )
+                ],
+            ),
+            LLMResult(
+                text="verify",
+                tool_calls=[
+                    ToolCall(
+                        id="verify-1",
+                        name="desktop_verify",
+                        arguments={
+                            "check": "file_contains",
+                            "path": str(path),
+                            "expected": "done",
+                        },
+                    )
+                ],
+            ),
+            LLMResult(text="completed"),
+        ]
+    )
+    security = _t02_security(tmp_path)
+    parent = _ApprovableDesktopParent(brain, _desktop_registry(tmp_path), security)
+    pc = Postcondition(
+        kind=PostconditionKind.FILE_EXISTS,
+        params=FileExistsParams(path=str(path)),
+        source="test",
+    ).with_revision()
+    runtime = DesktopRuntime(parent)
+
+    with pytest.raises(ApprovalRequired) as excinfo:
+        runtime.run(
+            "Create and verify a file",
+            postconditions=[pc],
+            postcondition_reader=DesktopPostconditionReader(security),
+        )
+    assert path.read_text(encoding="utf-8") == "old"
+    assert excinfo.value.continuation is not None
+
+    parent.policy = DesktopPolicyRuntime(
+        [
+            DesktopApprovalRule.create(
+                effect="allow",
+                source="once",
+                scope=DesktopApprovalScope(
+                    tool="desktop_file_write",
+                    action="write",
+                    target_pattern=str(path),
+                    risk_class="overwrite",
+                ),
+            )
+        ]
+    )
+    outcome = runtime.resume("Create and verify a file", excinfo.value.continuation)
+
+    assert path.read_text(encoding="utf-8") == "done"
+    assert outcome.verification.status == VerificationStatus.PASSED
+    assert outcome.canonical_outcome is not None
+    assert outcome.canonical_outcome.verification.outcome is VerificationOutcome.PASSED
+    names = [check.name for check in outcome.canonical_outcome.verification.checks]
+    assert names.count(f"file_exists:{path}") == 1
+    assert f"file_content_matches:{path}" in names

@@ -88,10 +88,11 @@ class CheckOutcome(StrEnum):
 
 
 class PostconditionKind(StrEnum):
-    """The seven typed postcondition kinds (E05-T01)."""
+    """The eight typed postcondition kinds (E05-T01, E05-T02)."""
 
     FILE_EXISTS = "file_exists"
     FILE_CONTENT_MATCHES = "file_content_matches"
+    FILE_ABSENT = "file_absent"
     PROCESS_RUNNING = "process_running"
     PROCESS_EXIT = "process_exit"
     SERVICE_STATE = "service_state"
@@ -216,6 +217,32 @@ class FileContentMatchesParams:
             expected=expected,
             match=match,
         )
+
+
+@dataclass(frozen=True)
+class FileAbsentParams:
+    """``file_absent``: the path must not exist (E05-T02, Q1).
+
+    The exact negation of ``file_exists`` as a check, not an
+    "expected-fail" inversion: PASSED when absent, FAILED when
+    present (any type — a directory at the path is present, not
+    absent), INCONCLUSIVE on a denied path.
+    """
+
+    path: str
+
+    def __post_init__(self) -> None:
+        _require_str(self.path, field_name="path")
+
+    def to_json(self) -> dict[str, JSONValue]:
+        return {"path": self.path}
+
+    @classmethod
+    def from_json(cls, data: dict[str, object]) -> FileAbsentParams:
+        _reject_unknown_keys(data, allowed={"path"}, where="file_absent params")
+        if "path" not in data:
+            raise ValueError("file_absent params require 'path'")
+        return cls(path=_require_str(data["path"], field_name="path"))
 
 
 @dataclass(frozen=True)
@@ -485,6 +512,7 @@ class CustomCommandParams:
 PostconditionParams = (
     FileExistsParams
     | FileContentMatchesParams
+    | FileAbsentParams
     | ProcessRunningParams
     | ProcessExitParams
     | ServiceStateParams
@@ -495,6 +523,7 @@ PostconditionParams = (
 _KIND_PARAMS: Final[dict[PostconditionKind, type[PostconditionParams]]] = {
     PostconditionKind.FILE_EXISTS: FileExistsParams,
     PostconditionKind.FILE_CONTENT_MATCHES: FileContentMatchesParams,
+    PostconditionKind.FILE_ABSENT: FileAbsentParams,
     PostconditionKind.PROCESS_RUNNING: ProcessRunningParams,
     PostconditionKind.PROCESS_EXIT: ProcessExitParams,
     PostconditionKind.SERVICE_STATE: ServiceStateParams,
@@ -691,7 +720,7 @@ class PostconditionEvaluation:
 def check_identity(postcondition: Postcondition) -> str:
     """Stable identity of the checked subject (used in check names)."""
     params = postcondition.params
-    if isinstance(params, (FileExistsParams, FileContentMatchesParams)):
+    if isinstance(params, (FileExistsParams, FileContentMatchesParams, FileAbsentParams)):
         return params.path
     if isinstance(params, ProcessRunningParams):
         return params.process_id if params.process_id is not None else f"pid:{params.pid}"
@@ -772,6 +801,8 @@ def evaluate_postcondition(
         return evaluate_file_exists(params, reader, postcondition=postcondition, now=at)
     if isinstance(params, FileContentMatchesParams):
         return evaluate_file_content_matches(params, reader, postcondition=postcondition, now=at)
+    if isinstance(params, FileAbsentParams):
+        return evaluate_file_absent(params, reader, postcondition=postcondition, now=at)
     if isinstance(params, ProcessRunningParams):
         return evaluate_process_running(params, reader, postcondition=postcondition, now=at)
     if isinstance(params, ProcessExitParams):
@@ -994,6 +1025,65 @@ def evaluate_file_content_matches(
         now=now,
         reason="content_mismatch",
         evidence={"path": params.path, "match": params.match},
+    )
+
+
+def evaluate_file_absent(
+    params: FileAbsentParams,
+    reader: PostconditionReader | None,
+    *,
+    postcondition: Postcondition,
+    now: float,
+) -> PostconditionEvaluation:
+    """The path must not exist (E05-T02, Q1).
+
+    PASSED when absent, FAILED when present (any type — a
+    directory at the path is present, not absent), INCONCLUSIVE
+    on a denied or unreadable path.
+    """
+    checker = "desktop_verify"
+    if reader is None:
+        return _blocked(postcondition, now=now, checker=checker)
+    try:
+        info = reader.describe_file(params.path)
+    except PathDeniedError as exc:
+        return _evaluation(
+            postcondition,
+            CheckOutcome.INCONCLUSIVE,
+            detail=f"path denied: {exc}",
+            checker=checker,
+            now=now,
+            reason="path_denied",
+            evidence={"path": params.path},
+        )
+    except OSError as exc:
+        return _evaluation(
+            postcondition,
+            CheckOutcome.INCONCLUSIVE,
+            detail=f"could not stat file: {exc}",
+            checker=checker,
+            now=now,
+            reason="read_error",
+            evidence={"path": params.path},
+        )
+    if info.exists:
+        return _evaluation(
+            postcondition,
+            CheckOutcome.FAILED,
+            detail=f"file is present: {params.path}",
+            checker=checker,
+            now=now,
+            reason="present",
+            evidence={"path": params.path},
+        )
+    return _evaluation(
+        postcondition,
+        CheckOutcome.PASSED,
+        detail=f"file is absent: {params.path}",
+        checker=checker,
+        now=now,
+        reason="ok",
+        evidence={"path": params.path},
     )
 
 

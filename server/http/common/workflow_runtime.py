@@ -23,9 +23,12 @@ from core.plan_execute import (
     PlanLoopApprovalPending,
     PlanLoopCheckpoints,
     PlanLoopContinuationUnavailable,
+    StepVerificationHook,
     execute_approved_plan,
     resume_approved_plan,
 )
+from core.postcondition_binding import make_step_verification_hook
+from core.postconditions import Postcondition
 from core.run_contract import RunBudget
 from core.run_outcome import TerminalReason
 from core.tool_gateway import ToolGateway
@@ -37,6 +40,7 @@ from server.http.common.plan_cancellation import PlanCancellationRegistry
 from server.http.common.ui_settings import _resolve_provider_api_key
 from server.http.common.workflow_state import plan_hash_payload
 from shared.models import JSONValue
+from tools.postcondition_readers import DesktopPostconditionReader
 from tools.tool_registry import ToolRegistry
 
 WorkflowRuntimeState = tuple[
@@ -148,6 +152,26 @@ def get_plan_loop_checkpoints(app: web.Application) -> PlanLoopCheckpoints:
         store = PlanLoopCheckpoints()
         app["plan_loop_checkpoints"] = store
     return store
+
+
+def _plan_step_verification_hook(agent: object) -> StepVerificationHook | None:
+    """Build the E05-T02 step hook for a plan run, or ``None`` without a reader.
+
+    The reader comes from the agent's desktop security layer (set
+    unconditionally in ``Agent.__init__``). A run whose agent has no
+    such attribute (test fakes, legacy paths) keeps hook ``None`` —
+    the T01 legacy behaviour: a state-changing step without proof is
+    UNVERIFIED, never DONE. Explicit, not silent.
+    """
+    security = getattr(agent, "desktop_security", None)
+    if security is None:
+        return None
+    registry = getattr(agent, "tool_registry", None)
+    get_capability = registry.get_capability if registry is not None else None
+    return make_step_verification_hook(
+        reader=DesktopPostconditionReader(security),
+        get_capability=get_capability,
+    )
 
 
 def _plan_loop_terminal_error(result: PlanExecuteResult) -> str | None:
@@ -403,6 +427,23 @@ def compile_plan_to_task_packet(
             if isinstance(acceptance_checks_raw, list)
             else []
         )
+        # E05-T02: expected_postconditions — typed acceptance bar from
+        # the approved plan. Bound here (with_revision) from the
+        # approved content; the executor re-binds idempotently.
+        expected_raw = item.get("expected_postconditions")
+        expected_postconditions: list[Postcondition] = []
+        if expected_raw is not None:
+            if not isinstance(expected_raw, list):
+                raise ValueError(
+                    f"plan.steps[{index - 1}].expected_postconditions должен быть списком."
+                )
+            for entry in expected_raw:
+                try:
+                    expected_postconditions.append(Postcondition.from_json(entry).with_revision())
+                except ValueError as exc:
+                    raise ValueError(
+                        f"plan.steps[{index - 1}].expected_postconditions invalid: {exc}"
+                    ) from exc
         task_steps.append(
             TaskStepContract(
                 step_id=step_id_raw.strip(),
@@ -412,6 +453,7 @@ def compile_plan_to_task_packet(
                 inputs={str(key): value for key, value in inputs_raw.items()},
                 expected_outputs=expected_outputs,
                 acceptance_checks=acceptance_checks,
+                expected_postconditions=expected_postconditions,
             )
         )
 
@@ -444,6 +486,26 @@ def compile_plan_to_task_packet(
     return with_task_packet_hash(packet)
 
 
+def _serialize_task_step_contract(step: TaskStepContract) -> dict[str, JSONValue]:
+    """One contract step as stored payload.
+
+    ``expected_postconditions`` (E05-T02) is stored only when present,
+    so payloads compiled before T02 stay byte-identical.
+    """
+    payload: dict[str, JSONValue] = {
+        "step_id": step.step_id,
+        "title": step.title,
+        "description": step.description,
+        "allowed_tool_kinds": list(step.allowed_tool_kinds),
+        "inputs": dict(step.inputs),
+        "expected_outputs": list(step.expected_outputs),
+        "acceptance_checks": list(step.acceptance_checks),
+    }
+    if step.expected_postconditions:
+        payload["expected_postconditions"] = [pc.to_json() for pc in step.expected_postconditions]
+    return payload
+
+
 def serialize_task_packet_payload(packet: TaskPacket) -> dict[str, JSONValue]:
     return {
         "task_id": packet.task_id,
@@ -455,18 +517,7 @@ def serialize_task_packet_payload(packet: TaskPacket) -> dict[str, JSONValue]:
         "messages": [
             {"role": message.role, "content": message.content} for message in packet.messages
         ],
-        "steps": [
-            {
-                "step_id": step.step_id,
-                "title": step.title,
-                "description": step.description,
-                "allowed_tool_kinds": list(step.allowed_tool_kinds),
-                "inputs": dict(step.inputs),
-                "expected_outputs": list(step.expected_outputs),
-                "acceptance_checks": list(step.acceptance_checks),
-            }
-            for step in packet.steps
-        ],
+        "steps": [_serialize_task_step_contract(step) for step in packet.steps],
         "constraints": list(packet.constraints),
         "policy": dict(packet.policy),
         "scope": dict(packet.scope),
@@ -475,6 +526,26 @@ def serialize_task_packet_payload(packet: TaskPacket) -> dict[str, JSONValue]:
         "verifier": dict(packet.verifier),
         "context": dict(packet.context),
     }
+
+
+def _deserialize_step_postconditions(raw: object) -> list[Postcondition]:
+    """Parse stored ``expected_postconditions`` (E05-T02), or ``[]``.
+
+    Payloads compiled before T02 carry no key. A present but malformed
+    entry is a broken acceptance bar: fail-closed, never silently
+    dropped.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("task_packet step expected_postconditions должен быть списком.")
+    parsed: list[Postcondition] = []
+    for entry in raw:
+        try:
+            parsed.append(Postcondition.from_json(entry))
+        except ValueError as exc:
+            raise ValueError(f"task_packet step expected_postconditions invalid: {exc}") from exc
+    return parsed
 
 
 def deserialize_task_packet_payload(payload: object) -> TaskPacket:
@@ -564,6 +635,9 @@ def deserialize_task_packet_payload(payload: object) -> TaskPacket:
                 ]
                 if isinstance(acceptance_checks_raw, list)
                 else [],
+                expected_postconditions=_deserialize_step_postconditions(
+                    item.get("expected_postconditions")
+                ),
             )
         )
 
@@ -942,6 +1016,10 @@ async def run_plan_runner(
                 normalize_task_payload_fn=normalize_task_payload_fn,
                 normalize_auto_state_fn=lambda value: value if isinstance(value, dict) else None,
             )
+            # E05-T02: one hook for the fresh and the resume path —
+            # the resumed step re-binds from its full loop result and
+            # re-verifies from current state (Q10).
+            step_verification = _plan_step_verification_hook(agent)
 
             execution_raw = task.get("execution")
             execution = execution_raw if isinstance(execution_raw, dict) else {}
@@ -972,6 +1050,7 @@ async def run_plan_runner(
                                 plan_hash_fn=plan_hash_payload,
                                 checkpoints=loop_checkpoints,
                                 cancellation_token=execution_token,
+                                step_verification=step_verification,
                             ),
                             execution_token,
                         )
@@ -1014,6 +1093,7 @@ async def run_plan_runner(
                         plan_hash_fn=plan_hash_payload,
                         checkpoints=loop_checkpoints,
                         cancellation_token=execution_token,
+                        step_verification=step_verification,
                     ),
                     execution_token,
                 )

@@ -4,6 +4,7 @@ import hashlib
 import json
 from collections.abc import Callable
 
+from core.postconditions import Postcondition
 from shared.models import JSONValue
 
 
@@ -64,7 +65,14 @@ def normalize_plan_step(
     )
     evidence_raw = step.get("evidence")
     evidence = normalize_json_value(evidence_raw) if isinstance(evidence_raw, dict) else None
-    return {
+    # E05-T02: expected_postconditions — часть утверждённого шага.
+    # Каждая запись валидируется через Postcondition.from_json и
+    # нормализуется в каноническую JSON-форму; невалидная запись —
+    # невалидный шаг целиком (fail-closed, как malformed step).
+    # Ключ добавляется только когда поле есть: шаг без поля остаётся
+    # байт-в-байт как до T02, а хеш плана без поля — как до T02 (Q12).
+    expected_raw = step.get("expected_postconditions")
+    normalized_step: dict[str, JSONValue] = {
         "step_id": step_id_raw.strip(),
         "title": title_raw.strip(),
         "description": description_raw,
@@ -77,30 +85,50 @@ def normalize_plan_step(
         "status": status,
         "evidence": evidence,
     }
+    if expected_raw is not None:
+        if not isinstance(expected_raw, list):
+            return None
+        normalized_expected: list[dict[str, JSONValue]] = []
+        for entry in expected_raw:
+            try:
+                normalized_expected.append(Postcondition.from_json(entry).to_json())
+            except ValueError:
+                return None
+        normalized_step["expected_postconditions"] = normalized_expected
+    return normalized_step
 
 
 def plan_hash_payload(plan: dict[str, JSONValue]) -> str:
     steps_raw = plan.get("steps")
     step_items = steps_raw if isinstance(steps_raw, list) else []
+    steps_payload: list[dict[str, JSONValue]] = []
+    for item in step_items:
+        if not isinstance(item, dict):
+            continue
+        step_payload: dict[str, JSONValue] = {
+            "step_id": item.get("step_id"),
+            "title": item.get("title"),
+            "description": item.get("description"),
+            "allowed_tool_kinds": item.get("allowed_tool_kinds"),
+            "inputs": item.get("inputs"),
+            "expected_outputs": item.get("expected_outputs"),
+            "acceptance_checks": item.get("acceptance_checks"),
+        }
+        # E05-T02 (Q12): expected_postconditions — часть утверждённого
+        # содержимого, поэтому входит в хеш; но план без поля обязан
+        # хешироваться как до появления поля — ключ добавляется только
+        # когда поле есть. Хеширование отсутствующего поля как None
+        # переписало бы хеш каждого уже утверждённого плана.
+        if item.get("expected_postconditions") is not None:
+            step_payload["expected_postconditions"] = item.get("expected_postconditions")
+        steps_payload.append(step_payload)
     payload = {
         "goal": plan.get("goal"),
         "scope_in": plan.get("scope_in"),
         "scope_out": plan.get("scope_out"),
         "assumptions": plan.get("assumptions"),
         "inputs_needed": plan.get("inputs_needed"),
-        "steps": [
-            {
-                "step_id": item.get("step_id"),
-                "title": item.get("title"),
-                "description": item.get("description"),
-                "allowed_tool_kinds": item.get("allowed_tool_kinds"),
-                "inputs": item.get("inputs"),
-                "expected_outputs": item.get("expected_outputs"),
-                "acceptance_checks": item.get("acceptance_checks"),
-            }
-            for item in step_items
-            if isinstance(item, dict)
-        ],
+        "steps": steps_payload,
         "exit_criteria": plan.get("exit_criteria"),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

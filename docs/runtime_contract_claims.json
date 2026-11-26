@@ -244,6 +244,19 @@
       "summary": "Target architecture accepts lifecycle completion only after policy-selected verification and acceptance for the exact task/result/artifact revision; current verifier paths are partial evidence mechanisms."
     },
     {
+      "id": "runtime.verification.effect_postcondition_binding",
+      "scope": "runtime",
+      "status": "partial",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/architecture/VERIFICATION_ARCHITECTURE_CONTRACT.md",
+      "verified_by": [
+        "tests/test_postcondition_binding.py",
+        "tests/test_plan_execute.py"
+      ],
+      "summary": "Effect-to-postcondition binding (E05-T02): state-changing tools suggest typed checks derived in trusted code from (tool, args, result), plan steps and direct runs declare expected conditions, expected wins per subject, and the bound list is evaluated by the typed checker; persistence is T04 and registry-backed process checks are E04-T05/T11, so the claim stays partial."
+    },
+    {
       "id": "runtime.lifecycle.task_run_contract",
       "scope": "runtime",
       "status": "target",
