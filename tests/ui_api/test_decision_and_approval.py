@@ -8,7 +8,7 @@ from core.agent_response import AgentResponse
 from .fakes import *
 
 
-def test_ui_plan_edit_resets_approved_to_draft() -> None:
+def test_ui_plan_edit_rejects_approved_plan() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
@@ -50,7 +50,7 @@ def test_ui_plan_edit_resets_approved_to_draft() -> None:
                 "/ui/api/plan/edit",
                 headers={"X-Slavik-Session": session_id},
                 json={
-                    "plan_revision": approved_revision,
+                    **_plan_binding(approved_plan),
                     "operation": {
                         "op": "update_step",
                         "step_id": "step-1",
@@ -58,14 +58,15 @@ def test_ui_plan_edit_resets_approved_to_draft() -> None:
                     },
                 },
             )
-            assert edit_resp.status == 200
-            edit_payload = await edit_resp.json()
-            edited_plan = edit_payload.get("active_plan")
-            assert isinstance(edited_plan, dict)
-            assert edited_plan.get("status") == "draft"
-            edited_revision = edited_plan.get("plan_revision")
-            assert isinstance(edited_revision, int)
-            assert edited_revision > approved_revision
+            assert edit_resp.status == 409
+            assert (await edit_resp.json())["error"]["code"] == "plan_not_draft"
+            workflow = await client.server.app["ui_hub"].get_session_workflow(session_id)
+            kept = workflow.get("active_plan")
+            assert isinstance(kept, dict)
+            assert kept.get("status") == "approved"
+            assert kept.get("plan_revision") == approved_revision
+            assert kept.get("approved_at") == approved_plan.get("approved_at")
+            assert kept.get("approved_by") == approved_plan.get("approved_by")
         finally:
             await client.close()
 

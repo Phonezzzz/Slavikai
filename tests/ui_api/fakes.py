@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -996,7 +997,10 @@ async def _enter_act_mode(client: TestClient, session_id: str, *, goal: str = "t
 
     execute_resp = await client.post(
         "/ui/api/plan/execute",
-        headers={"X-Slavik-Session": session_id},
+        headers={
+            "X-Slavik-Session": session_id,
+            "Idempotency-Key": str(uuid.uuid4()),
+        },
         json=_plan_binding(approved_plan),
     )
     assert execute_resp.status == 409

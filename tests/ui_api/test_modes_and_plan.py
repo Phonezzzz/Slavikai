@@ -228,7 +228,10 @@ def test_ui_plan_lifecycle_endpoints() -> None:
 
             execute_resp = await client.post(
                 "/ui/api/plan/execute",
-                headers={"X-Slavik-Session": session_id},
+                headers={
+                    "X-Slavik-Session": session_id,
+                    "Idempotency-Key": "lifecycle-k1",
+                },
                 json=_plan_binding(approved_plan),
             )
             assert execute_resp.status == 409
@@ -598,7 +601,10 @@ def test_ui_plan_execute_waiting_approval_then_resume(
 
             execute_resp = await client.post(
                 "/ui/api/plan/execute",
-                headers={"X-Slavik-Session": session_id},
+                headers={
+                    "X-Slavik-Session": session_id,
+                    "Idempotency-Key": "waiting-approval-k1",
+                },
                 json=binding,
             )
             assert execute_resp.status == 200
@@ -1471,7 +1477,10 @@ def test_ui_plan_execute_rejects_second_start_when_running(monkeypatch) -> None:
 
             first = await client.post(
                 "/ui/api/plan/execute",
-                headers={"X-Slavik-Session": session_id},
+                headers={
+                    "X-Slavik-Session": session_id,
+                    "Idempotency-Key": "second-start-k1",
+                },
                 json=binding,
             )
             assert first.status == 200
@@ -1482,7 +1491,10 @@ def test_ui_plan_execute_rejects_second_start_when_running(monkeypatch) -> None:
 
             second = await client.post(
                 "/ui/api/plan/execute",
-                headers={"X-Slavik-Session": session_id},
+                headers={
+                    "X-Slavik-Session": session_id,
+                    "Idempotency-Key": "second-start-k2",
+                },
                 json=binding,
             )
             assert second.status == 409
@@ -1519,7 +1531,10 @@ def test_ui_plan_execute_records_unavailable_subscription(monkeypatch) -> None: 
             await hub.set_session_model(session_id, "chatgpt-plan-" + "a" * 32, "gpt")
             response = await client.post(
                 "/ui/api/plan/execute",
-                headers={"X-Slavik-Session": session_id},
+                headers={
+                    "X-Slavik-Session": session_id,
+                    "Idempotency-Key": "unavailable-sub-k1",
+                },
                 json=binding,
             )
             assert response.status == 200
@@ -1550,14 +1565,16 @@ def test_ui_plan_execute_parallel_race_allows_only_one_runner(monkeypatch) -> No
 
             binding = await _prepare_approved_plan(client, session_id, switch_to_act=True)
 
-            async def _execute_once():
+            async def _execute_once(key):
                 return await client.post(
                     "/ui/api/plan/execute",
-                    headers={"X-Slavik-Session": session_id},
+                    headers={"X-Slavik-Session": session_id, "Idempotency-Key": key},
                     json=binding,
                 )
 
-            first_resp, second_resp = await asyncio.gather(_execute_once(), _execute_once())
+            first_resp, second_resp = await asyncio.gather(
+                _execute_once("race-k1"), _execute_once("race-k2")
+            )
             statuses = sorted([first_resp.status, second_resp.status])
             assert statuses == [200, 409]
 
@@ -1638,11 +1655,11 @@ def test_ui_plan_execute_idempotency_key_matrix(monkeypatch) -> None:  # noqa: A
                 headers={"X-Slavik-Session": session_id},
                 json=binding,
             )
-            assert no_key.status == 409
+            assert no_key.status == 400
             no_key_payload = await no_key.json()
             no_key_error = no_key_payload.get("error")
             assert isinstance(no_key_error, dict)
-            assert no_key_error.get("code") == "task_already_running"
+            assert no_key_error.get("code") == "idempotency_key_required"
         finally:
             await client.close()
 
@@ -1694,3 +1711,111 @@ def test_compute_plan_completion_state_matrix() -> None:
         )
         == "running"
     )
+
+
+def test_ui_plan_edit_after_execute_start_is_rejected(monkeypatch) -> None:  # noqa: ANN001
+    async def _slow_runner(**kwargs) -> None:  # noqa: ANN003
+        del kwargs
+        await asyncio.sleep(0.2)
+
+    monkeypatch.setattr("server.http.handlers.plan._run_plan_runner", _slow_runner)
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            binding = await _prepare_approved_plan(client, session_id, switch_to_act=True)
+            execute_resp = await client.post(
+                "/ui/api/plan/execute",
+                headers={
+                    "X-Slavik-Session": session_id,
+                    "Idempotency-Key": "edit-after-exec-k1",
+                },
+                json=binding,
+            )
+            assert execute_resp.status == 200
+            workflow = await client.server.app["ui_hub"].get_session_workflow(session_id)
+            assert workflow["mode"] == "act"
+            assert workflow["active_task"]["status"] == "running"
+            current_plan = workflow["active_plan"]
+
+            edit_resp = await client.post(
+                "/ui/api/plan/edit",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    **_plan_binding(current_plan),
+                    "operation": {
+                        "op": "update_step",
+                        "step_id": "step-1",
+                        "changes": {"title": "Too late"},
+                    },
+                },
+            )
+            assert edit_resp.status == 409
+            assert (await edit_resp.json())["error"]["code"] == "mode_not_plan"
+            workflow = await client.server.app["ui_hub"].get_session_workflow(session_id)
+            assert workflow["mode"] == "act"
+            assert workflow["active_task"]["status"] == "running"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_plan_execute_two_step_flow_uses_separate_keys() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            binding = await _prepare_approved_plan(client, session_id, switch_to_act=False)
+            plan_step = await client.post(
+                "/ui/api/plan/execute",
+                headers={
+                    "X-Slavik-Session": session_id,
+                    "Idempotency-Key": "two-step-k1",
+                },
+                json=binding,
+            )
+            assert plan_step.status == 409
+            assert (await plan_step.json())["error"]["code"] == "switch_to_act_required"
+
+            # The same key cannot cover the act step: the fingerprint includes
+            # mode, so replaying K1 in act mode is a conflict, not execution.
+            to_act = await client.post(
+                "/ui/api/mode",
+                headers={"X-Slavik-Session": session_id},
+                json={"mode": "act", "confirm": True},
+            )
+            assert to_act.status == 200
+            reused = await client.post(
+                "/ui/api/plan/execute",
+                headers={
+                    "X-Slavik-Session": session_id,
+                    "Idempotency-Key": "two-step-k1",
+                },
+                json=binding,
+            )
+            assert reused.status == 409
+            assert (await reused.json())["error"]["code"] == "idempotency_key_reused"
+
+            act_step = await client.post(
+                "/ui/api/plan/execute",
+                headers={
+                    "X-Slavik-Session": session_id,
+                    "Idempotency-Key": "two-step-k2",
+                },
+                json=binding,
+            )
+            assert act_step.status == 200
+        finally:
+            await client.close()
+
+    asyncio.run(run())
