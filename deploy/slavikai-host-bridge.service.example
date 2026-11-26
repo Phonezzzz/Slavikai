@@ -1,4 +1,4 @@
-# SlavikAI Owner Host Bridge — systemd USER service example (ADR-0013, E03-T02).
+# SlavikAI Owner Host Bridge — systemd USER service example (ADR-0013, E03-T02, E03-T09).
 #
 # Install (owner action, not done by the repo):
 #   cp deploy/slavikai-host-bridge.service.example \
@@ -8,8 +8,38 @@
 #
 # The daemon runs as the owner's UID (never root) and listens only on
 # $XDG_RUNTIME_DIR/slavikai/host-bridge.sock (directory 0700, socket 0600).
-# Without XDG_RUNTIME_DIR it refuses to start. The full systemd hardening
-# profile is E03-T09; only the basics are set here.
+# Without XDG_RUNTIME_DIR it refuses to start.
+#
+# Hardening profile (E03-T09, verified on the host 2026-11-26, systemd 259):
+# only the active settings in this file are set. Every one of them was
+# proven to (a) apply (seccomp/AF/umask layers, checked behaviourally,
+# not just by the analyzer) and (b) keep the enforcement probe green
+# (host.process.* available). systemd-analyze security: 6.7 MEDIUM
+# (25 checks green); exposure is an auxiliary metric, not the goal
+# (directors' verdict Q5 — re-measure after any profile change).
+#
+# Mount-based settings (ProtectSystem, ReadWritePaths, PrivateTmp,
+# ProtectKernelTunables, ProtectProc, ...) are DELIBERATELY ABSENT:
+# on this host they do not apply (no private mount namespace for user
+# services) AND each of them breaks the enforcement probe by putting
+# the daemon into a fresh user namespace where the spawn helper's
+# unshare(CLONE_NEWUSER|NEWNET|NEWIPC) fails with EPERM. Do not add
+# them back without re-running the probe under the changed file
+# (tests/test_host_bridge_systemd.py guards this).
+#
+# DevicePolicy/DeviceAllow are DELIBERATELY NOT active (directors' Q4):
+# the device filter does not bind for user services on this host
+# (/dev/ptmx and /dev/kvm open even under DevicePolicy=closed), so
+# making it mandatory would be false documentation. The lines below
+# are commented out as a documented option for systems where the
+# devices controller is delegated to the user slice; enabling them
+# must re-run the probe (tests/test_host_bridge_systemd.py).
+#
+# The OS-level filesystem isolation the T09 ticket originally asked
+# for ("daemon has no access to forbidden roots" as a physical
+# property) is NOT provided by this file: the filesystem boundary
+# stays in daemon code (RootsRegistry + fs.py). See ROADMAP.md §E03-T09
+# (open architectural gap, carried into T11 acceptance).
 
 [Unit]
 Description=SlavikAI Owner Host Bridge (AF_UNIX daemon)
@@ -22,7 +52,20 @@ ExecStart=/opt/slavikai/venv-prod/bin/python -m host_bridge
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
-PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0077
+# DevicePolicy=closed
+# DeviceAllow=/dev/null rw
+# DeviceAllow=/dev/zero r
+# DeviceAllow=/dev/full rw
+# DeviceAllow=/dev/urandom r
+# DeviceAllow=/dev/random r
 
 [Install]
 WantedBy=default.target
